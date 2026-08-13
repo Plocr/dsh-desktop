@@ -1,0 +1,76 @@
+/**
+ * 主窗口：加载 harness Web UI（http://127.0.0.1:<port>），
+ * 内置 loading/error 过渡页；导航锁 + 外链拦截。
+ */
+import { BrowserWindow, shell } from 'electron'
+import path from 'node:path'
+
+export interface WindowHandle {
+  win: BrowserWindow
+  loadApp: (url: string) => void
+  showLoading: (state?: string) => void
+  showError: (msg: string) => void
+}
+
+export function createWindow(
+  preloadPath: string,
+  resourcesDir: string,
+  opts: { isAllowed: (url: string) => boolean },
+): WindowHandle {
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 820,
+    minWidth: 900,
+    minHeight: 600,
+    show: false,
+    autoHideMenuBar: true,
+    title: 'DSH Desktop',
+    backgroundColor: '#0e1116',
+    icon: path.join(resourcesDir, 'icons', 'icon.png'),
+    webPreferences: {
+      preload: preloadPath,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      partition: 'persist:dsh-ui',
+    },
+  })
+
+  win.once('ready-to-show', () => win.show())
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) void shell.openExternal(url)
+    return { action: 'deny' }
+  })
+
+  win.webContents.on('will-navigate', (e, url) => {
+    if (!opts.isAllowed(url)) {
+      e.preventDefault()
+    }
+  })
+
+  // 阻止页面尝试打开 devtools 以外的敏感能力；静默即可
+  win.webContents.on('will-attach-webview', (e) => e.preventDefault())
+
+  const loadingPage = path.join(resourcesDir, 'shell-pages', 'loading.html')
+  const errorPage = path.join(resourcesDir, 'shell-pages', 'error.html')
+
+  const loadApp = (url: string): void => {
+    if (win.isDestroyed()) return
+    void win.loadURL(url).catch((err) => {
+      showError(`加载 ${url} 失败: ${err instanceof Error ? err.message : String(err)}`)
+    })
+  }
+
+  const showLoading = (state?: string): void => {
+    if (win.isDestroyed()) return
+    void win.loadFile(loadingPage, state ? { query: { state } } : undefined)
+  }
+
+  const showError = (msg: string): void => {
+    if (win.isDestroyed()) return
+    void win.loadFile(errorPage, { query: { msg } })
+  }
+
+  return { win, loadApp, showLoading, showError }
+}

@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';" />
+<title>DSH Desktop — 启动失败</title>
+<style>
+  html, body { height: 100%; margin: 0; background: #0e1116; color: #d7dee8; font-family: "Segoe UI", system-ui, sans-serif; display: flex; align-items: center; justify-content: center; }
+  .box { max-width: 560px; text-align: left; padding: 24px; }
+  h1 { font-size: 16px; color: #ff7a7a; margin: 0 0 10px; }
+  pre { background: #151a22; border: 1px solid #2a3441; border-radius: 8px; padding: 12px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow: auto; color: #9fb0c8; }
+  .hint { font-size: 12px; color: #7d8aa0; margin-top: 10px; }
+  button { margin-top: 12px; background: #4d7cfe; color: #fff; border: 0; border-radius: 6px; padding: 8px 16px; font-size: 13px; cursor: pointer; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <h1>Harness 启动失败</h1>
+    <pre id="msg">（无详细错误信息）</pre>
+    <div class="hint">可尝试从托盘菜单「重启 Harness」或「查看日志」排查。若反复失败，请检查 DSH Desktop 设置中的模型凭据与工作区目录。</div>
+    <button onclick="window.dshDesktop && window.dshDesktop.restartHarness()">重启 Harness</button>
+  </div>
+  <script>
+    if (location.search) {
+      const q = new URLSearchParams(location.search)
+      const msg = q.get('msg')
+      if (msg) document.getElementById('msg').textContent = decodeURIComponent(msg)
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+appId: com.dsh.desktop.workbench
+productName: DSH Desktop
+copyright: Copyright © 2026 dsh-desktop contributors
+
+directories:
+  output: release
+  buildResources: resources
+
+files:
+  - dist/**
+  - resources/profile-template/**
+  - resources/shell-pages/**
+  - resources/bridge/**
+  - resources/icons/**
+  - package.json
+
+# 运行时以 tar.gz 分发（electron-builder 会剔除 extraResources 中的 node_modules，
+# 故由壳在首启解压到 %LOCALAPPDATA%/DSH Desktop/runtime）
+extraResources:
+  - from: resources/dsh-runtime.tar.gz
+    to: dsh-runtime.tar.gz
+  - from: resources/runtime.version
+    to: runtime.version
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: resources/icons/icon.ico
+  executableName: dsh-desktop
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: DSH Desktop
+  artifactName: ${productName}-${version}-setup.${ext}
+
+portable:
+  artifactName: ${productName}-${version}-portable.${ext}
+
+npmRebuild: false
+
+# 复用 node_modules/electron/dist，避免 electron-builder 重新下载
+electronDist: node_modules/electron/dist

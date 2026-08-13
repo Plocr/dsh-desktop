@@ -1,0 +1,7 @@
+# Your patch layer for this dsh desktop profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+#
+# The desktop shell injects the dsh-desktop-bridge row and its per-launch token
+# through a generated `--patch` overlay, so this file stays user-owned.
+[]
