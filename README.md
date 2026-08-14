@@ -76,8 +76,9 @@ Electron 壳 ──spawn──▶ dsh --profile desktop --patch <overlay> --port
 - **右栏仪表盘**：注入到 harness Web UI（不改动其源码），复用 harness 的 `--dsw-alias-*` 设计令牌（浅色/深色/跟随系统三态自动跟随）。数据三源：
   - bridge（主）：`dashboard.snapshot` RPC 全量 + `jobs.changed / job.done / approval.asked` 事件增量；
   - harness stdout（次）：启动/运行日志流 → 「活动流」面板（环形缓冲 300 行）；
-  - DOM 探测（兜底）：桥接离线时统计侧边栏会话数/任务状态并标注「桥接离线」。
-- **底栏终端**：xterm.js + 管道后端（PowerShell/cmd/pwsh 可选 tab）。管道模式无 TTY（vim/top 等交互程序不可用，Ctrl+C 为会话复位）；如需完整 TTY，设置环境变量 `DSH_DESKTOP_TERM=pty` 并在本机为 Electron ABI 构建 `node-pty`（预编译包仅覆盖 Node ABI，`npmRebuild: false` 不会自动重编）。
+  - DOM 轮询/兜底（常驻）：上下文圆环（已用/窗口 tokens + 构成明细）、会话指标（缓存命中/运行时间/轮·步/首 token/速率/输入·输出 tokens + **费用估算**，deepseek 定价表内置可更新）、桥接离线时的会话/任务近似统计（标注「桥接离线」）。
+- **折叠 rail（对仗左侧）**：56px 全高窄栏，顶部面板图标按钮、底部终端开关按钮（与 harness 左 rail 同宽同底色同位置关系）；面板为覆盖层，**不挤压 harness 布局**（左侧侧边栏不会因面板打开而折叠）。
+- **底栏终端**：xterm.js + 管道后端（PowerShell/cmd/pwsh 可选 tab；`-NoProfile` 快速启动；就绪横幅；Ctrl+C 会话复位）。位置避开左右侧边栏（`left` 跟随 harness 侧栏宽，右缘随面板/rail 宽）。「⧉」在独立窗口打开完整 TTY 系统终端。管道模式无 TTY（vim/top 等交互程序不可用）；如需完整 TTY，设置环境变量 `DSH_DESKTOP_TERM=pty` 并在本机为 Electron ABI 构建 `node-pty`（预编译包仅覆盖 Node ABI，`npmRebuild: false` 不会自动重编）。
 - 面板资产随包分发（`resources/panel-dist`），主进程直接注入（`insertCSS` + `executeJavaScript`），不引入自定义协议。
 - dev 模式使用独立 userData（`%APPDATA%/dsh-desktop-dev`），与已安装版可并行运行（单实例锁隔离）。
 

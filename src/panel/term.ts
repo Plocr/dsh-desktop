@@ -123,11 +123,14 @@ function boot(): void {
   })
   openSession()
 
-  // ✕ = 真正关闭会话并收起面板；＋/tab = 重开（新会话）
+  // ✕ = 真正关闭会话并收起面板；＋/tab = 重开（新会话）；⧉ = 独立窗口系统终端
   const closeBtn = document.getElementById('dshd-term-close')
   closeBtn?.addEventListener('click', () => {
     void api.termClose()
     void api.dashAction('toggleTerminal')
+  })
+  document.getElementById('dshd-term-ext')?.addEventListener('click', () => {
+    void api.dashAction('openSystemTerminal')
   })
   document.querySelectorAll('.dshd-term-tab').forEach((btn) => {
     btn.addEventListener('click', () => openSession((btn as HTMLElement).dataset.shell))

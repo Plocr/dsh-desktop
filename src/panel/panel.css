@@ -5,26 +5,17 @@
  * 动效曲线与 duration 对齐 --ds-transition-duration-* / --ds-ease-in-out。
  */
 
-/* ── 布局变量与宿主偏移 ─────────────────────────────────────────────── */
+/* ── 布局变量 ───────────────────────────────────────────────────────── */
 
 :root {
   --dshd-w: 300px;
   --dshd-h: 200px;
+  /* 左侧 harness 侧边栏宽度（面板 DOM 轮询动态更新：展开 280 / 折叠 56） */
+  --dshd-left-w: 56px;
 }
 
-/* 侧栏展开时给 harness 应用层让位（右缘）；收起时归零 */
-html[data-dshd-sidebar="1"] #root {
-  padding-right: var(--dshd-w);
-}
-/* 终端展开时底部让位 */
-html[data-dshd-term="1"] #root {
-  padding-bottom: var(--dshd-h);
-}
-#root {
-  transition:
-    padding-right var(--ds-transition-duration-slow, 0.3s) var(--ds-ease-in-out, cubic-bezier(0.4, 0, 0.2, 1)),
-    padding-bottom var(--ds-transition-duration-slow, 0.3s) var(--ds-ease-in-out, cubic-bezier(0.4, 0, 0.2, 1));
-}
+/* 面板/rail 为覆盖层（overlay）：不修改 #root 布局，harness 响应式不触发，
+   左侧侧边栏不会因面板打开而被挤压（实测 #root padding 让位会触发折叠断点）。 */
 
 /* ── 面板外壳 ───────────────────────────────────────────────────────── */
 
@@ -401,19 +392,20 @@ html[data-dshd-sidebar="0"] #dshd-root {
 }
 #dshd-foot-badge { color: var(--dsw-alias-label-secondary, #61666b); }
 
-/* 折叠后的右侧 rail（harness 折叠侧边栏同款设计语言：全高窄栏 + 图标按钮） */
+/* 折叠后的右侧 rail（harness 折叠侧边栏同款：56px 宽、36px 图标按钮、
+   顶部按钮对仗左侧 logoRow、终端按钮对仗左侧设置区位于底部） */
 #dshd-tab {
   position: fixed;
   top: 0;
   right: 0;
   bottom: 0;
-  width: 44px;
+  width: 56px;
   z-index: 999998;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding-top: 8px;
+  gap: 4px;
+  padding: 0 0 12px;
   box-sizing: border-box;
   background: var(--dsw-specific-sidebar-fill, #f9fafb);
   border-left: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
@@ -423,8 +415,8 @@ html[data-dshd-sidebar="1"] #dshd-tab { transform: translateX(102%); }
 
 .dshd-rail-btn {
   position: relative;
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   border: none;
   background: transparent;
   color: var(--dsw-alias-label-secondary, #61666b);
@@ -443,10 +435,14 @@ html[data-dshd-sidebar="1"] #dshd-tab { transform: translateX(102%); }
   background: var(--dsw-alias-interactive-bg-hover-solid, rgba(38, 49, 72, 0.14));
   color: var(--dsw-alias-label-primary, #0f1115);
 }
+/* 终端按钮沉底，对仗左侧 rail 底部设置区 */
+#dshd-tab-term {
+  margin-top: auto;
+}
 #dshd-tab-badge {
   position: absolute;
-  top: 5px;
-  right: 5px;
+  top: 6px;
+  right: 6px;
   width: 7px;
   height: 7px;
   border-radius: 50%;
@@ -454,17 +450,11 @@ html[data-dshd-sidebar="1"] #dshd-tab { transform: translateX(102%); }
   animation: dshdPulse 1.6s ease-in-out infinite;
 }
 
-/* rail 展开时让位：折叠态预留 rail 宽度，内容不被遮挡 */
-html[data-dshd-sidebar="0"] #root {
-  padding-right: 44px;
-}
-
 /* ── 底栏终端 ───────────────────────────────────────────────────────── */
 
 #dshd-term {
   position: fixed;
-  left: 0;
-  right: 0;
+  left: var(--dshd-left-w, 56px);
   bottom: 0;
   height: var(--dshd-h);
   z-index: 999997;
@@ -472,11 +462,16 @@ html[data-dshd-sidebar="0"] #root {
   flex-direction: column;
   background: var(--dsw-alias-bg-layer-1, #ffffff);
   border-top: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
+  border-left: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
   color: var(--dsw-alias-label-primary, #0f1115);
   font-family: var(--dsw-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif);
   box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.06);
   transition: transform var(--ds-transition-duration-slow, 0.3s) var(--ds-ease-in-out, cubic-bezier(0.4, 0, 0.2, 1));
 }
+/* 终端不覆盖左右侧边栏：左缘 = harness 侧栏宽（--dshd-left-w），
+   右缘 = 仪表盘宽（展开）或 rail 宽（折叠） */
+html[data-dshd-sidebar="1"] #dshd-term { right: var(--dshd-w); }
+html[data-dshd-sidebar="0"] #dshd-term { right: 56px; }
 html[data-dshd-term="0"] #dshd-term { transform: translateY(102%); box-shadow: none; }
 
 #dshd-term-resize {
@@ -501,7 +496,8 @@ html[data-dshd-term="0"] #dshd-term { transform: translateY(102%); box-shadow: n
 }
 .dshd-term-tab,
 #dshd-term-new,
-#dshd-term-close {
+#dshd-term-close,
+#dshd-term-ext {
   border: none;
   background: transparent;
   color: var(--dsw-alias-label-secondary, #61666b);
@@ -515,7 +511,8 @@ html[data-dshd-term="0"] #dshd-term { transform: translateY(102%); box-shadow: n
 }
 .dshd-term-tab:hover,
 #dshd-term-new:hover,
-#dshd-term-close:hover {
+#dshd-term-close:hover,
+#dshd-term-ext:hover {
   background: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06));
   color: var(--dsw-alias-label-primary, #0f1115);
 }
@@ -541,6 +538,127 @@ html[data-dshd-term="0"] #dshd-term { transform: translateY(102%); box-shadow: n
   font-size: 12px;
   color: var(--dsw-alias-label-tertiary, #9aa0a6);
   background: var(--dsw-alias-bg-layer-1, #ffffff);
+}
+
+/* ── 上下文圆环 ─────────────────────────────────────────────────────── */
+
+#dshd-ctx {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 6px 8px;
+  margin: 0 -8px;
+}
+#dshd-ctx:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06)); }
+.dshd-ctx-ring {
+  width: 48px;
+  height: 48px;
+  flex: none;
+}
+.dshd-ctx-track {
+  fill: none;
+  stroke: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
+  stroke-width: 1.6;
+}
+.dshd-ctx-fill {
+  fill: none;
+  stroke: var(--dsw-alias-state-business-primary, #4176e6);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  transition: stroke-dasharray var(--ds-transition-duration-slow, 0.3s) var(--ds-ease-in-out, cubic-bezier(0.4, 0, 0.2, 1));
+}
+.dshd-ctx-info {
+  flex: none;
+  min-width: 0;
+}
+.dshd-ctx-pct {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--dsw-alias-label-primary, #0f1115);
+  font-variant-numeric: tabular-nums;
+}
+.dshd-ctx-sub {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary, #9aa0a6);
+  white-space: nowrap;
+}
+.dshd-ctx-breakdown {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: flex-end;
+}
+.dshd-ctx-part {
+  font-size: 10px;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06));
+  color: var(--dsw-alias-label-secondary, #61666b);
+  white-space: nowrap;
+}
+
+/* ── 会话指标 ───────────────────────────────────────────────────────── */
+
+.dshd-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.dshd-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-module-platform, #f5f6f7);
+  border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.04));
+  min-width: 0;
+}
+.dshd-metric-k {
+  font-size: 10px;
+  color: var(--dsw-alias-label-tertiary, #9aa0a6);
+}
+.dshd-metric-v {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary, #0f1115);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.dshd-cost {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.dshd-cost-note {
+  font-size: 10px;
+  color: var(--dsw-alias-label-tertiary, #9aa0a6);
+}
+.dshd-cost-v {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-state-business-primary, #4176e6);
+  font-variant-numeric: tabular-nums;
+}
+.dshd-cost-cny {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--dsw-alias-label-tertiary, #9aa0a6);
+}
+.dshd-cost-req {
+  font-size: 10px;
+  color: var(--dsw-alias-label-tertiary, #9aa0a6);
+  margin-left: auto;
 }
 
 /* ── 动效开关：尊重系统减弱动效 ─────────────────────────────────────── */

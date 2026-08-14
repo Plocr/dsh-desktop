@@ -36,18 +36,19 @@ export function resolveShellSpec(shell: TermShell): TermShellSpec | null {
   if (process.platform === 'win32') {
     switch (shell) {
       case 'powershell':
-        return { cmd: 'powershell.exe', args: ['-NoLogo', '-NoExit'], label: 'PowerShell' }
+        // -NoProfile：跳过用户 profile 加载，管道模式下启动更快更干净
+        return { cmd: 'powershell.exe', args: ['-NoLogo', '-NoProfile', '-NoExit'], label: 'PowerShell' }
       case 'cmd':
         return { cmd: 'cmd.exe', args: ['/K'], label: 'cmd' }
       case 'pwsh':
-        return hasOnPath('pwsh.exe') ? { cmd: 'pwsh.exe', args: ['-NoLogo', '-NoExit'], label: 'pwsh' } : null
+        return hasOnPath('pwsh.exe') ? { cmd: 'pwsh.exe', args: ['-NoLogo', '-NoProfile', '-NoExit'], label: 'pwsh' } : null
       case 'bash':
         return hasOnPath('bash.exe') ? { cmd: 'bash.exe', args: [], label: 'bash' } : null
       case 'zsh':
         return null
       case 'auto':
       default:
-        return { cmd: 'powershell.exe', args: ['-NoLogo', '-NoExit'], label: 'PowerShell' }
+        return { cmd: 'powershell.exe', args: ['-NoLogo', '-NoProfile', '-NoExit'], label: 'PowerShell' }
     }
   }
   // macOS / Linux

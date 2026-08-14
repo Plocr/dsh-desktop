@@ -60,6 +60,8 @@
 | D12 | 面板数据三源分层：**bridge WS（主）→ harness stdout 解析（次）→ DOM 爬取（兜底）** | 实时 JSON 走既有桥接（新增 `dashboard.snapshot` RPC 拉全量 + 事件增量）；stdout 环形缓冲提供活动流/启动时序（零额外机制）；桥接离线时 DOM 探测保证面板不空转 |
 | D13 | 终端**双后端**：PipeBackend（默认，零原生依赖）/ PtyBackend（可选，`DSH_DESKTOP_TERM=pty` 且需本机为 Electron ABI 构建 node-pty） | 实测 `@homebridge/node-pty-prebuilt-multiarch` v0.14.1 仅发布 Node ABI 资产、无 electron 资产；electron-builder 显式 `npmRebuild: false`；裸装必触发源码编译（VS Build Tools），多数机器不可用 |
 | D14 | **dev 与已安装版隔离 userData**（dev 用 `%APPDATA%/dsh-desktop-dev`） | app 名解析为 `productName`（DSH Desktop），dev 与已安装版同锁同目录 → 已安装版运行中 dev 直接退出（实测）；隔离后两者可并行 |
+| D15 | **面板/rail/终端为覆盖层（overlay）**，不修改 #root 布局；`#root` padding 让位会触发 harness 响应式断点（实测 frame 变窄 → 左侧侧边栏自动折叠为 rail） | 面板打开不再挤压左侧；左栏宽度经 DOM 轮询写入 `--dshd-left-w`，终端 `left/right` 偏移避开左右侧边栏 |
+| D16 | **上下文环/会话指标 = 常驻 DOM 轮询**（2s，与 bridge 状态无关） | 该数据仅存在于 harness UI（上下文按钮 aria-label + stats 行）；计费按官方定价表内置常量（pricing.ts，可随调价更新） |
 
 ## 3. 关键事实（实测确认）
 
@@ -138,20 +140,27 @@ cordis.patch.yml  []（用户补丁层，壳不写它）
 ### 4.6 右栏仪表盘（注入式，src/panel/panel.ts + panel.css）
 
 - **注入**：主进程在 harness 文档（`http://127.0.0.1:*`）每次 dom-ready 时注入（D11）；面板引导等待布局 frame 与 body 令牌就绪（轮询 30s），就绪后 `hello` 触发主进程补发状态/布局/日志基线。
-- **结构**：头部（鲸鱼 logo + 桥接状态点 + 折叠）；运行时卡（harness/bridge/PID/Node/uptime/DSH_HOME/工作区/已注册工作区）；任务卡（运行数徽标 + 列表，状态 pill 色映射）；会话卡（实时/持久计数，行点击走 `dsh://session/<id>` 深链）；审批卡（最近 20 条，新到闪烁）；活动流（stdout/stderr 行级日志，自动滚动可暂停/清空）；页脚（徽标数/数据源/状态）。
-- **布局**：`#root { padding-right: var(--dshd-w) }` 让位；面板 `position: fixed; right:0`，宽度可拖（240–420px，持久化）；折叠后右缘 16px 竖条可滑出。全部令牌复用 `--dsw-alias-*`（带兜底值），**必须挂到 `document.body` 下**（令牌定义在 body，挂 html 下不继承——实测修正）。
-- **数据**：`dsh:dash:state`（200ms 节流快照）/ `dsh:dash:log`（300ms 批，`sync` 批为 hello 时全量基线）/ `dsh:dash:layout`（开合与尺寸）。
-- **DOM 兜底（C 源）**：桥接离线时 2s 轮询 `[role=treeitem]`（会话数）、`[data-state=running|starting]`（任务近似），标注「桥接离线 · DOM 快照」；选择器集中一处注释（harness 0.1.0-rc.6 实测，升级复查）。
+- **结构**：头部（鲸鱼 logo + 桥接状态点 + 折叠）；运行时卡（harness/bridge/PID/Node/uptime/DSH_HOME/工作区/已注册工作区）；**上下文卡**（圆环进度条 + 已用/窗口 tokens + 系统/工具/对话构成，数据来自 harness 上下文按钮 DOM，deepseek 蓝，点击转发打开详情）；**会话指标卡**（缓存命中/运行时间/轮·步/首 token/速率/输入·输出 tokens + **费用估算**：deepseek 定价表 `pricing.ts`，官方价格 fetched 2026-08-13，含峰谷价常量，缓存命中率计入）；任务卡（运行数徽标 + 列表，状态 pill 色映射）；会话卡（实时/持久计数，行点击走 `dsh://session/<id>` 深链）；审批卡（最近 20 条，新到闪烁）；活动流（stdout/stderr 行级日志，自动滚动可暂停/清空）；页脚（徽标数/数据源/状态）。
+- **布局（overlay）**：面板与 rail 为固定覆盖层，**不改 #root 布局**（实测 padding 让位会触发 harness 响应式断点导致左侧侧边栏自动折叠，D15）；左侧 harness 侧边栏宽度由 DOM 轮询写入 `--dshd-left-w`（展开 280 / 折叠 56）。
+- **折叠 rail（对仗左侧）**：56px 全高窄栏（与 harness 左 rail 同宽同底色），顶部 36px 面板图标按钮（对仗左侧 logoRow），**终端开关按钮沉底**（对仗左侧设置区），图标颜色同令牌。
+- **数据**：`dsh:dash:state`（200ms 节流快照）/ `dsh:dash:log`（300ms 批，`sync` 批为 hello 时全量基线）/ `dsh:dash:layout`（开合与尺寸）；上下文/会话指标为**常驻 DOM 轮询**（2s，与 bridge 状态无关）。
+- **DOM 兜底（C 源）**：桥接离线时 2s 轮询 `[role=treeitem]`（会话数）、`[data-state=running|starting]`（任务近似），标注「桥接离线 · DOM 快照」；选择器集中注释（harness 0.1.0-rc.6 实测，升级复查）。
 
 ### 4.7 底栏终端（src/panel/term.ts + src/main/terminal.ts）
 
-- **面板**：xterm.js（`@xterm/xterm`，lazy 注入：首次打开时主进程注入 xterm.css + term.js，422KB 不进首屏）；tab 切换 PowerShell/cmd/pwsh；拖拽调高（120–480px，持久化）；主题色从 body 令牌实时读取（MutationObserver + matchMedia，三态换肤）。
-- **后端**（D13）：PipeBackend = spawn shell 接管 stdio，ANSI 剥离、Ctrl+C 复位（杀壳重开并提示）；PtyBackend = try-require('node-pty')（需 `DSH_DESKTOP_TERM=pty` + 本机 Electron ABI 构建）。
-- **生命周期**：独立于 harness 子进程（harness 崩溃重启不影响已开终端）；「＋」以当前工作区重开；退出显示 overlay 提示。
+- **面板**：xterm.js（`@xterm/xterm`，lazy 注入：首次打开时主进程注入 xterm.css + term.js，422KB 不进首屏）；tab 切换 PowerShell/cmd/pwsh；拖拽调高（120–480px，持久化）；主题色从 body 令牌实时读取（MutationObserver + matchMedia，三态换肤）；**系统终端按钮**（⧉）在独立窗口打开完整 TTY（`detached` spawn）。
+- **位置（D15）**：`left: var(--dshd-left-w)`（harness 侧边栏宽，不覆盖左栏）、右缘 = 面板宽（展开）或 rail 宽（折叠），**不覆盖左右侧边栏**。
+- **后端**（D13）：PipeBackend = spawn shell 接管 stdio（PowerShell 带 `-NoProfile` 加速启动），ANSI 剥离、Ctrl+C 复位（杀壳重开并提示）、spawn 即打印就绪横幅（后端模式/壳/cwd）；PtyBackend = try-require('node-pty')（需 `DSH_DESKTOP_TERM=pty` + 本机 Electron ABI 构建）。
+- **生命周期**：独立于 harness 子进程（harness 崩溃重启不影响已开终端）；✕ 真正关闭会话（overlay 提示），面板收起→展开且会话已死时自动重开；「＋」以当前工作区重开；退出显示 overlay 提示。
 
 ### 4.8 共享类型（src/shared/types.ts）
 
 preload 与面板共用的纯数据契约（DashSnapshot/DashLogBatch/DashLayout/PanelApi），不引入 electron 依赖，面板可安全打包进浏览器侧。
+
+### 4.9 上下文环 / 会话指标与计费（src/panel/stats.ts + pricing.ts）
+
+- **数据源**（常驻 2s DOM 轮询）：harness 上下文按钮（`button[aria-label*="上下文已用"]`，含百分比与 `~X / Y` 明细）与 stats 行（`.FJxK0a_root`，实测格式 `3 轮 · 6 步| LLM 16.2s · 工具调用 9.7s| 首 token 平均 1.2s · 140 tok/s| 缓存命中 82%| 输入 450K tok · 输出 1.2K tok`）；解析函数纯逻辑可单测，缺字段容错（harness 改文案不崩）。
+- **费用估算**：`estimateCost(model, mode, input, output, cacheHitRate)`，定价表按官方文档（api-docs.deepseek.com/quick_start/pricing，fetched 2026-08-13：deepseek-v4-flash 命中 $0.0028/M、未命中 $0.14/M、输出 $0.28/M；v4-pro 相应翻倍；2026-08-16 起峰谷价常量已内置）；模型名从 composer DOM 探测（`DeepSeek-*`，含模式后缀规范化）；请求数 harness 未暴露 → 以步骤数近似并注明。
 
 ### 4.4 数据流
 
@@ -245,6 +254,11 @@ E2E（`scripts/e2e-turn.mjs` / `scripts/verify-dashboard.mjs`，需 `DSH_DESKTOP
   - 面板 DOM 必须挂 `document.body`（`--dsw-alias-*` 令牌定义在 body，挂 html 下不继承——主题跟随失效）
   - 活动流基线：面板 `hello` 时主进程补发日志全量（sync 批），避免订阅前日志丢失
   - 面板注入从自定义协议改为直接注入（D11：dev 渲染层 `ERR_UNKNOWN_URL_SCHEME`）
+  - `#root` padding 让位触发 harness 响应式折叠（左侧自动缩成 rail）→ 改 overlay（D15）
+  - e2e-turn 判定改 `#root` 文本（面板 DOM 挂在 body 末尾会污染 `body.innerText` 尾部窗口）
+  - 终端 `onTermData` 回流订阅在重构中误删（shell 输出到主进程后无人写入 xterm）——探针定位恢复
+  - 终端 ✕ 关闭后再开面板不重开会话 → `sessionDead` 标记 + layout 订阅自动重开
+  - 面板 boot 晚于 dom-ready 推送 → `hello` 补发 state/layout/日志全量基线
 
 ## 9. 已知限制与后续
 
@@ -252,7 +266,9 @@ E2E（`scripts/e2e-turn.mjs` / `scripts/verify-dashboard.mjs`，需 `DSH_DESKTOP
 - `dsh://session/<id>` 依赖侧边栏渲染该会话（当前工作区可见的会话）；未分组/其他工作区的会话只聚焦窗口。
 - 通知/徽标仅在任务事件到达时更新；harness 不在前台时任务列表为启动时快照（服务端持久化，重启后恢复）。
 - 面板 DOM 兜底为近似统计（`[data-state]` 可能被其他组件复用），仅作桥接离线时的参考；选择器按 harness 0.1.0-rc.6 校准，升级需复查。
-- 管道终端无 TTY：vim/top/ssh 等交互程序不可用；Ctrl+C 为会话复位（非信号中断）；pty 后端需本机构建（D13）。
+- 上下文环/会话指标依赖 harness 上下文按钮与 stats 行的 DOM 文案；harness 改文案时解析器容错显示「—」，需按新格式校准（stats.ts 集中）。
+- 费用估算按官方定价表内置常量（2026-08-13 抓取；2026-08-16 峰谷价已含）；调价后需更新 `pricing.ts`；请求数以步骤数近似（harness 未暴露请求计数）。
+- 管道终端无 TTY：vim/top/ssh 等交互程序不可用；Ctrl+C 为会话复位（非信号中断）；pty 后端需本机构建（D13）；「⧉」可开独立窗口完整终端。
 - 窗口内快捷键依赖键盘布局（`Ctrl+Shift+\`` / `Ctrl+Shift+.` 在部分布局下不同），可在 settings 调整。
 - macOS/Linux 未实机验证（配置就绪；终端壳解析已覆盖 bash/zsh/pwsh）。
 - harness 版本锁定 0.1.0-rc.6；升级需重跑 setup-runtime.mjs 并同步 bridge 版本。

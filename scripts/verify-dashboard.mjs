@@ -75,15 +75,17 @@ check('面板节点注入（root/tab/term）', shell.root && shell.tab && shell.
 check('CDP 验证钩子 window.__dshd', shell.api, `version=${shell.version ?? '?'}`)
 check('preload API 可见 window.dshDesktop', shell.dash)
 
-/* 2. 布局让位：#root padding-right 已生效 */
+/* 2. 布局：面板为覆盖层（overlay），不挤压 harness（#root 无 padding） */
 const layout = await evalJs(`(() => {
   const root = document.getElementById('root')
   const html = document.documentElement
   const pr = root ? getComputedStyle(root).paddingRight : '?'
-  const pb = root ? getComputedStyle(root).paddingBottom : '?'
-  return { sidebar: html.dataset.dshdSidebar, term: html.dataset.dshdTerm, pr, pb }
+  const panel = document.getElementById('dshd-root')
+  const rail = document.getElementById('dshd-tab')
+  return { sidebar: html.dataset.dshdSidebar, term: html.dataset.dshdTerm, pr, panelW: panel?.offsetWidth, railW: rail?.offsetWidth, railH: rail?.offsetHeight }
 })()`)
-check('侧栏展开 → #root 右让位', layout.sidebar === '1' && parseFloat(layout.pr) > 200, `paddingRight=${layout.pr}`)
+check('面板展开且不挤压 harness（paddingRight=0）', layout.sidebar === '1' && layout.pr === '0px', `paddingRight=${layout.pr}`)
+check('rail 尺寸对仗左侧（56px 全高）', layout.railW === 56 && layout.railH > 700, `rail=${layout.railW}x${layout.railH}`)
 
 /* 3. 状态渲染（等主进程推送） */
 let snap = null
@@ -102,7 +104,58 @@ if (snap) {
   check('活动流有行', logsHtml > 0, `${logsHtml} 行`)
 }
 
-/* 4. 主题跟随：深色主题下面板背景非白 */
+/* 4. 上下文环 + 会话指标卡（常驻 DOM 轮询；需先打开一个会话） */
+// 前置（幂等）：展开 harness 侧边栏并点击第一个会话行
+const sidebarReady = await evalJs(`(() => {
+  const rail = document.querySelector('.hHd-Xa_root')
+  if (rail && rail.className.includes('collapsed')) {
+    const toggle = rail.querySelector('[class*="toggle"]')
+    toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+  }
+  return true
+})()`)
+await sleep(1800)
+// 工作区行可展开（aria-expanded=false → 点击展开会话列表）
+const wsClicked = await evalJs(`(() => {
+  const row = [...document.querySelectorAll('[role="treeitem"]')].find((r) => r.getAttribute('aria-expanded') === 'false')
+  if (row) {
+    row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+    return 'ws-expanded'
+  }
+  return 'ws-already-open'
+})()`)
+check('展开工作区会话列表', true, String(wsClicked))
+await sleep(1500)
+const sessionClicked = await evalJs(`(() => {
+  const rows = [...document.querySelectorAll('[role="treeitem"]')]
+  // 会话行：文本最长者（工作区行文本短，如 "Dsh"）
+  const row = rows
+    .map((r) => ({ el: r, t: (r.textContent || '').trim() }))
+    .filter((x) => x.t.length > 4 && !/工作区|会话区/.test(x.t))
+    .sort((a, b) => b.t.length - a.t.length)[0]
+  if (!row) return 'no-row'
+  row.el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+  return 'clicked:' + row.t.slice(0, 24)
+})()`)
+check('打开会话（指标卡前置）', String(sessionClicked).startsWith('clicked'), String(sessionClicked))
+await sleep(5000)
+
+const ctxCard = await evalJs(`(() => {
+  const fill = document.querySelector('#dshd-ctx .dshd-ctx-fill')
+  const pct = document.getElementById('dshd-ctx-pct')
+  return { hasRing: !!fill, dash: fill?.getAttribute('stroke-dasharray'), pct: pct?.textContent, sub: document.getElementById('dshd-ctx-sub')?.textContent }
+})()`)
+check('上下文圆环渲染', ctxCard.hasRing, `pct=${ctxCard.pct} dash=${ctxCard.dash}`)
+const metricsCard = await evalJs(`(() => {
+  const host = document.getElementById('dshd-metrics')
+  const cost = document.getElementById('dshd-cost')
+  return { metrics: host?.innerText?.slice(0, 120) ?? '', cost: cost?.innerText?.slice(0, 120) ?? '' }
+})()`)
+const metricsOk = metricsCard.metrics.length > 0 && metricsCard.metrics !== '未打开会话' && metricsCard.metrics !== '会话暂无统计'
+check('会话指标卡渲染', metricsOk, metricsCard.metrics.replace(/\n/g, ' | '))
+check('费用估算渲染', metricsCard.cost.includes('费用'), metricsCard.cost.replace(/\n/g, ' | '))
+
+/* 5. 主题跟随：深色主题下面板背景非白 */
 const themed = await evalJs(`(() => {
   const root = document.getElementById('dshd-root')
   if (!root) return null

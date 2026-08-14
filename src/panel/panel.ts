@@ -11,6 +11,8 @@
  */
 import type { DashApproval, DashJob, DashLayout, DashLogLine, DashSession, DashSnapshot } from '../shared/types'
 import { WHALE_PATH } from './whale'
+import { parseHarnessStats, parseContextUsage, type HarnessStats, type ContextUsage } from './stats'
+import { estimateCost, formatUsd, formatCny, modelLabel } from './pricing'
 
 const api = window.dshDesktop
 
@@ -105,6 +107,25 @@ const SHELL_HTML = `
       <div class="dshd-sec-title">运行时</div>
       <div class="dshd-rows" id="dshd-runtime"></div>
     </section>
+    <section class="dshd-sec" id="dshd-sec-context">
+      <div class="dshd-sec-title"><span>上下文</span><span id="dshd-ctx-meta" class="dshd-sec-meta"></span></div>
+      <div class="dshd-ctx" id="dshd-ctx" title="点击查看详情">
+        <svg class="dshd-ctx-ring" viewBox="0 0 14 14" aria-hidden="true">
+          <circle class="dshd-ctx-track" cx="7" cy="7" r="5.5"></circle>
+          <circle class="dshd-ctx-fill" cx="7" cy="7" r="5.5" stroke-dasharray="0 34.55751918948772" transform="rotate(-90 7 7)"></circle>
+        </svg>
+        <div class="dshd-ctx-info">
+          <div class="dshd-ctx-pct" id="dshd-ctx-pct">—</div>
+          <div class="dshd-ctx-sub" id="dshd-ctx-sub">—</div>
+        </div>
+        <div class="dshd-ctx-breakdown" id="dshd-ctx-breakdown"></div>
+      </div>
+    </section>
+    <section class="dshd-sec" id="dshd-sec-stats">
+      <div class="dshd-sec-title"><span>会话指标</span><span id="dshd-stats-meta" class="dshd-sec-meta"></span></div>
+      <div class="dshd-metrics" id="dshd-metrics"></div>
+      <div class="dshd-cost" id="dshd-cost"></div>
+    </section>
     <section class="dshd-sec">
       <div class="dshd-sec-title"><span>任务</span><span id="dshd-jobs-badge" class="dshd-badge" hidden></span></div>
       <div class="dshd-list" id="dshd-jobs"></div>
@@ -156,6 +177,7 @@ const SHELL_HTML = `
     <button class="dshd-term-tab" data-shell="cmd" type="button">cmd</button>
     <button class="dshd-term-tab" data-shell="pwsh" type="button">pwsh</button>
     <span class="dshd-term-spacer"></span>
+    <button id="dshd-term-ext" type="button" title="在独立窗口打开系统终端（完整 TTY）">⧉</button>
     <button id="dshd-term-new" type="button" title="新终端（当前工作区）">＋</button>
     <button id="dshd-term-close" type="button" title="关闭（Ctrl+Shift+\`）">✕</button>
   </div>
@@ -400,6 +422,166 @@ function stopDomProbe(): void {
   }
 }
 
+/* ── 上下文环 / 会话指标 / 左栏宽度（harness DOM 常驻轮询，2s） ─────── */
+
+let domPollTimer: number | null = null
+let lastCtxBtn: HTMLElement | null = null
+
+/** 格式化 token 数：80600 → "80.6K"，1e6 → "1M"。 */
+function fmtTokens(n: number | null): string {
+  if (n == null) return '—'
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`
+  return String(n)
+}
+
+function fmtMs(ms: number | null): string {
+  if (ms == null) return '—'
+  if (ms >= 3_600_000) return `${(ms / 3_600_000).toFixed(1)}h`
+  if (ms >= 60_000) return `${(ms / 60_000).toFixed(1)}m`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+function pollContext(): void {
+  const btn = document.querySelector<HTMLElement>('button[aria-label*="上下文已用"]')
+  const pctEl = $('#dshd-ctx-pct')
+  const subEl = $('#dshd-ctx-sub')
+  const ring = document.querySelector<SVGCircleElement>('#dshd-ctx .dshd-ctx-fill')
+  const meta = $('#dshd-ctx-meta')
+  const breakdown = $('#dshd-ctx-breakdown')
+  lastCtxBtn = btn
+  if (!btn) {
+    if (pctEl) pctEl.textContent = '—'
+    if (subEl) subEl.textContent = '未打开会话'
+    if (meta) meta.textContent = ''
+    if (breakdown) breakdown.innerHTML = ''
+    if (ring) ring.setAttribute('stroke-dasharray', '0 34.55751918948772')
+    return
+  }
+  // 明细：上溯含 "~X / Y" 的容器文本
+  let detail = ''
+  let el: HTMLElement | null = btn
+  for (let i = 0; i < 5 && el; i++) {
+    const t = el.innerText ?? ''
+    if (/~?\s*[\d.]+\s*[KMB]?\s*\/\s*[\d.]+\s*[KMB]?/.test(t)) {
+      detail = t
+      break
+    }
+    el = el.parentElement
+  }
+  const u = parseContextUsage(btn.getAttribute('aria-label') ?? '', detail)
+  const pct = u.percent ?? 0
+  if (ring) ring.setAttribute('stroke-dasharray', `${(pct / 100) * 34.55751918948772} 34.55751918948772`)
+  if (pctEl) pctEl.textContent = u.percent != null ? `${Math.round(u.percent)}%` : '—'
+  if (subEl) subEl.textContent = `${fmtTokens(u.usedTokens)} / ${fmtTokens(u.windowTokens)}`
+  if (meta) meta.textContent = u.windowTokens != null ? `窗口 ${fmtTokens(u.windowTokens)}` : ''
+  if (breakdown) {
+    const b = u.breakdown
+    const parts: [string, number | null | undefined][] = [
+      ['系统', b.system],
+      ['工具', b.tools],
+      ['对话', b.messages],
+    ]
+    breakdown.innerHTML = parts
+      .filter(([, v]) => v != null)
+      .map(([k, v]) => `<span class="dshd-ctx-part">${k} ${fmtTokens(v ?? null)}</span>`)
+      .join('')
+  }
+}
+
+function findStatsEl(): HTMLElement | null {
+  let el = document.querySelector<HTMLElement>('.FJxK0a_root')
+  if (el) return el
+  const span = [...document.querySelectorAll('span')].find(
+    (s) => /轮\s*·\s*\d+\s*步/.test(s.textContent || '') && (s.textContent || '').length < 40,
+  )
+  if (!span) return null
+  el = span as HTMLElement
+  for (let i = 0; i < 6 && el.parentElement; i++) {
+    el = el.parentElement
+    if ((el.innerText || '').includes('缓存命中')) break
+  }
+  return el
+}
+
+function detectModel(): string {
+  const el = [...document.querySelectorAll('div,span')].find(
+    (e) => /DeepSeek-?V?\d/i.test(e.textContent || '') && (e.textContent || '').length < 40,
+  )
+  const t = el?.textContent ?? ''
+  // 只取型号名（如 DeepSeek-V4-Flash），不吞后续模式名（Max/Reasoning 等）
+  const m = /DeepSeek[-\s]*V?\d+(?:\.\d+)?(?:-[A-Za-z0-9]+)?/i.exec(t)
+  return m ? m[0] : 'deepseek-v4-flash'
+}
+
+function renderStats(st: HarnessStats): void {
+  const host = $('#dshd-metrics')
+  const cost = $('#dshd-cost')
+  const meta = $('#dshd-stats-meta')
+  if (!host) return
+  const runMs = st.llmMs != null || st.toolMs != null ? (st.llmMs ?? 0) + (st.toolMs ?? 0) : null
+  const items: [string, string][] = [
+    ['缓存命中', st.cacheHitPct != null ? `${Math.round(st.cacheHitPct)}%` : '—'],
+    ['运行时间', fmtMs(runMs)],
+    ['轮 · 步', st.turns != null ? `${st.turns} · ${st.steps ?? '?'}` : '—'],
+    ['首 token', fmtMs(st.ttftAvgMs)],
+    ['速率', st.tokPerSec != null ? `${st.tokPerSec} tok/s` : '—'],
+    ['输入 / 输出', `${fmtTokens(st.inputTokens)} / ${fmtTokens(st.outputTokens)}`],
+  ]
+  host.innerHTML = items.map(([k, v]) => `<div class="dshd-metric"><span class="dshd-metric-k">${esc(k)}</span><span class="dshd-metric-v" title="${esc(v)}">${esc(v)}</span></div>`).join('')
+  if (meta) meta.textContent = st.raw ? `已更新 ${fmtTime(Date.now())}` : ''
+  // 费用估算（deepseek 定价表，见 src/panel/pricing.ts；请求数 harness 未暴露 → 显示 —）
+  if (cost) {
+    if (st.inputTokens == null) {
+      cost.innerHTML = `<span class="dshd-cost-note">计费估算需要输入/输出 tokens</span>`
+      return
+    }
+    const model = detectModel()
+    const usd = estimateCost(model, 'current', st.inputTokens, st.outputTokens ?? 0, (st.cacheHitPct ?? 0) / 100)
+    const reqText = st.steps != null ? String(st.steps) : '—'
+    cost.innerHTML = `<span class="dshd-cost-note">费用（${esc(modelLabel(model))}）</span>
+      <span class="dshd-cost-v">${formatUsd(usd)} <span class="dshd-cost-cny">≈ ${formatCny(usd)}</span></span>
+      <span class="dshd-cost-req">请求数 ${esc(reqText)}（步骤近似）</span>`
+  }
+}
+
+function pollStats(): void {
+  const el = findStatsEl()
+  const host = $('#dshd-metrics')
+  const cost = $('#dshd-cost')
+  if (!el) {
+    if (host) host.innerHTML = `<div class="dshd-empty">未打开会话</div>`
+    if (cost) cost.innerHTML = ''
+    $('#dshd-stats-meta') && ($('#dshd-stats-meta')!.textContent = '')
+    return
+  }
+  const st = parseHarnessStats(el.innerText)
+  if (st.turns == null && st.cacheHitPct == null && st.inputTokens == null) {
+    if (host) host.innerHTML = `<div class="dshd-empty">会话暂无统计</div>`
+    if (cost) cost.innerHTML = ''
+    return
+  }
+  renderStats(st)
+}
+
+/** 左侧 harness 侧边栏宽度 → --dshd-left-w（终端/面板让位用）。 */
+function pollLeftWidth(): void {
+  const rail = document.querySelector<HTMLElement>('.hHd-Xa_root')
+  if (!rail) return
+  const w = Math.round(rail.getBoundingClientRect().width)
+  if (w > 0) document.documentElement.style.setProperty('--dshd-left-w', `${w}px`)
+}
+
+function startDomPoll(): void {
+  if (domPollTimer !== null) return
+  domPollTimer = window.setInterval(() => {
+    pollContext()
+    pollStats()
+    pollLeftWidth()
+  }, 2000)
+}
+
 /* ── 拖拽调整尺寸 ───────────────────────────────────────────────────── */
 
 function dragResize(
@@ -512,7 +694,13 @@ function wireEvents(): void {
     const chip = (e.target as HTMLElement).closest('.dshd-ws-chip') as HTMLElement | null
     if (chip) void api.dashAction('pickWorkspace')
   })
-  // 终端按钮（tab/＋/✕）由 term.ts 接管（lazy 加载后绑定，避免双重 spawn）
+  // 上下文环点击 → 转发到 harness 的上下文按钮（打开详情）
+  $('#dshd-ctx')?.addEventListener('click', () => {
+    if (lastCtxBtn) {
+      lastCtxBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+    }
+  })
+  // 终端按钮（tab/＋/✕/系统终端）由 term.ts 接管（lazy 加载后绑定，避免双重 spawn）
   // 侧栏宽度拖拽（左缘 handle）
   const resizer = $('#dshd-resize')
   if (resizer) {
@@ -578,6 +766,12 @@ async function boot(): Promise<void> {
   wireEvents()
   applyLayout()
   await api.dashAction('hello')
+
+  // 常驻 DOM 轮询（上下文/指标/左栏宽），立即执行一次再进入 2s 周期
+  pollContext()
+  pollStats()
+  pollLeftWidth()
+  startDomPoll()
 
   // CDP 验证钩子
   Object.defineProperty(window, '__dshd', {

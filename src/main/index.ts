@@ -6,6 +6,7 @@
  * 面板注入（右栏仪表盘 + 底栏终端）→ 优雅停机。
  */
 import { app, dialog, shell } from 'electron'
+import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -27,6 +28,7 @@ import { initUpdater, checkNow } from './updater'
 import { injectChrome } from './chrome'
 import { createDashboardState } from './dashboard'
 import { createTerminalManager, type TermManager } from './terminal'
+import { resolveShellSpec } from './termShell'
 import type { DashLayout, DashLogLine } from '../shared/types'
 
 // dev 模式与已安装版隔离 userData（app 名解析为 productName → 默认同名目录，
@@ -199,6 +201,20 @@ function currentInfo(): unknown {
     globalShortcut: currentShortcut(),
     panel: panelLayout(),
     terminalBackend: terminal?.backend ?? null,
+    terminalShell: terminal?.activeShell?.label ?? null,
+  }
+}
+
+/** 独立窗口打开系统终端（管道模式无 TTY 的逃生口；detached + 新控制台窗口）。 */
+function openSystemTerminal(): void {
+  const spec = terminal?.activeShell ?? resolveShellSpec('auto')
+  if (!spec) return
+  try {
+    const child = spawn(spec.cmd, spec.args, { detached: true, stdio: 'ignore', windowsHide: false })
+    child.unref()
+    log('info', `system terminal opened: ${spec.cmd} ${spec.args.join(' ')}`)
+  } catch (err) {
+    log('error', `system terminal failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
@@ -579,6 +595,7 @@ async function main(): Promise<void> {
     setSidebarWidth,
     setTerminalHeight,
     sendPanelBaseline,
+    openSystemTerminal,
   })
 
   // dsh:// 协议 + 全局快捷键 + 自动更新

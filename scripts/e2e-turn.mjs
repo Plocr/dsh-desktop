@@ -63,14 +63,17 @@ const submitted = await evalJs(`(() => {
 console.log('STEP submit:', submitted)
 
 // 3) 轮询：等待最后一个 assistant 消息出现（发送时间之后的新消息块）
+// 注意：判定与输出基于 #root（harness 应用区）——面板 DOM 挂在 body 末尾，
+// 其文本（终端输出等）会污染 body.innerText 的尾部窗口。
+const appText = `(() => {
+  const root = document.getElementById('root');
+  return (root ? root.innerText : document.body.innerText).slice(-4000);
+})()`
 const started = Date.now()
 let lastText = ''
 let found = false
 while (Date.now() - started < timeoutSec * 1000) {
-  const text = await evalJs(`(() => {
-    const blocks = [...document.querySelectorAll('[class*="assistant"], [class*="message"], [class*="Markdown"], pre, p')];
-    return document.body.innerText.slice(-4000);
-  })()`)
+  const text = await evalJs(appText)
   // 简化判定：输入框被清空 + 页面新增了 assistant 内容（文本末尾出现非输入内容且包含常见回答词）
   const taValue = await evalJs(`(() => { const ta = document.querySelector('textarea'); return ta ? ta.value : 'none'; })()`)
   if (taValue === '' && text !== lastText) {
@@ -79,7 +82,7 @@ while (Date.now() - started < timeoutSec * 1000) {
     let stable = 0
     for (let k = 0; k < 3; k++) {
       await sleep(2500)
-      const t2 = await evalJs(`document.body.innerText.slice(-4000)`)
+      const t2 = await evalJs(appText)
       if (t2 === lastText) stable++
       else {
         lastText = t2

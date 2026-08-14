@@ -86,6 +86,8 @@ export function createTerminalManager(handlers: TermHandlers, getCwd: () => stri
       return
     }
     pipeChild = child
+    // 就绪横幅：明确后端模式与工作目录（管道模式无 TTY，需让用户知情）
+    handlers.onData(`\r\n[DSH Desktop 终端 · ${spec.label} · 管道模式 · ${cwd}]\r\n`)
     const onChunk = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {
       if (closing) return
       let text = chunk.toString('utf8')

@@ -26,6 +26,8 @@ export interface IpcDeps {
   setTerminalHeight: (h: number) => void
   /** hello 时向面板补发全量基线（state + layout + 日志 sync 批）。 */
   sendPanelBaseline: () => void
+  /** 在独立窗口打开系统终端（逃生口：管道模式无 TTY 时用）。 */
+  openSystemTerminal: () => void
 }
 
 /** 校验调用来自工作台窗口主 frame（防 harness 页内其他 frame/注入滥用）。 */
@@ -118,6 +120,9 @@ export function registerIpc(deps: IpcDeps): void {
         if (w) injectTerminalAssets(w)
         return { ok: true }
       }
+      case 'openSystemTerminal':
+        deps.openSystemTerminal()
+        return { ok: true }
       default:
         return { ok: false, error: `unknown action: ${action}` }
     }
