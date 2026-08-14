@@ -191,6 +191,7 @@ export function createTerminalManager(handlers: TermHandlers, getCwd: () => stri
   }
 
   const doClose = (): void => {
+    const hadProc = pipeChild !== null || ptyProc !== null
     closing = true
     const child = pipeChild
     if (child && child.exitCode === null) {
@@ -210,6 +211,8 @@ export function createTerminalManager(handlers: TermHandlers, getCwd: () => stri
       }
     }
     ptyProc = null
+    // 主动关闭也通知面板（显示"已关闭，可重开"），与进程自然退出同构
+    if (hadProc) handlers.onExit({ code: null, reset: true })
   }
 
   return {

@@ -118,9 +118,9 @@ check('终端（xterm）已引导', termBooted)
 const termOpen = await evalJs(`document.documentElement.dataset.dshdTerm`)
 check('终端面板展开', termOpen === '1')
 
-// 输入一行 PowerShell 命令并回车
-await evalJs(`window.__dshdTerm.write('Write-Output DSH_DASHBOARD_OK\\r')`)
-await sleep(2500)
+// 输入一行 PowerShell 命令并回车（真实链路：xterm 输入 → IPC → shell stdin → 输出回流）
+await evalJs(`window.dshDesktop.termWrite('Write-Output DSH_DASHBOARD_OK\\r')`)
+await sleep(3000)
 const termText = await evalJs(`document.querySelector('#dshd-term-xterm .xterm-screen')?.innerText || ''`)
 check('终端回环输出', termText.includes('DSH_DASHBOARD_OK'), termText.replace(/\n/g, '⏎').slice(-120))
 

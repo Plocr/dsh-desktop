@@ -90,11 +90,38 @@ function boot(): void {
     const overlay = document.getElementById('dshd-term-overlay')
     if (overlay) {
       overlay.hidden = false
-      overlay.textContent = `进程已退出（code ${String(info.code)}）— 点按上方「＋」重新打开`
+      overlay.textContent = `进程已退出（${info.code === null ? '已关闭' : `code ${String(info.code)}`}）— 点按上方「＋」重新打开`
     }
   })
   const overlay = document.getElementById('dshd-term-overlay')
   if (overlay) overlay.hidden = true
+
+  // 面板打开即启动真实 shell 会话（auto → PowerShell/cmd）
+  const openSession = (shell?: string): void => {
+    void api.termOpen(shell).then((r) => {
+      const res = r as { ok?: boolean; backend?: string | null } | null
+      if (res && !res.ok) {
+        if (overlay) {
+          overlay.hidden = false
+          overlay.textContent = '终端启动失败（壳不可用）— 点按上方「＋」重试'
+        }
+      } else if (overlay) {
+        overlay.hidden = true
+      }
+    })
+  }
+  openSession()
+
+  // ✕ = 真正关闭会话并收起面板；＋/tab = 重开（新会话）
+  const closeBtn = document.getElementById('dshd-term-close')
+  closeBtn?.addEventListener('click', () => {
+    void api.termClose()
+    void api.dashAction('toggleTerminal')
+  })
+  document.querySelectorAll('.dshd-term-tab').forEach((btn) => {
+    btn.addEventListener('click', () => openSession((btn as HTMLElement).dataset.shell))
+  })
+  document.getElementById('dshd-term-new')?.addEventListener('click', () => openSession())
 
   // 窗口缩放自适应（与 harness 面板共用 CSS 变量变化节流）
   let t: number | null = null
@@ -116,9 +143,9 @@ function boot(): void {
     term.options.theme = readTheme()
   })
 
-  // 供 CDP 验证
+  // 供 CDP 验证（真实输入链路）
   Object.defineProperty(window, '__dshdTerm', {
-    value: { booted: true, cols: () => term.cols, rows: () => term.rows, write: (d: string) => term.write(d) },
+    value: { booted: true, cols: () => term.cols, rows: () => term.rows, write: (d: string) => void api.termWrite(d) },
     configurable: true,
   })
 }
