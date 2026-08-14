@@ -75,7 +75,7 @@ check('面板节点注入（root/tab/term）', shell.root && shell.tab && shell.
 check('CDP 验证钩子 window.__dshd', shell.api, `version=${shell.version ?? '?'}`)
 check('preload API 可见 window.dshDesktop', shell.dash)
 
-/* 2. 布局：面板为覆盖层（overlay），不挤压 harness（#root 无 padding） */
+/* 2. 布局：面板让位（原生侧边栏语义），#root padding-right 生效 */
 const layout = await evalJs(`(() => {
   const root = document.getElementById('root')
   const html = document.documentElement
@@ -84,7 +84,7 @@ const layout = await evalJs(`(() => {
   const rail = document.getElementById('dshd-tab')
   return { sidebar: html.dataset.dshdSidebar, term: html.dataset.dshdTerm, pr, panelW: panel?.offsetWidth, railW: rail?.offsetWidth, railH: rail?.offsetHeight }
 })()`)
-check('面板展开且不挤压 harness（paddingRight=0）', layout.sidebar === '1' && layout.pr === '0px', `paddingRight=${layout.pr}`)
+check('侧栏展开 → #root 右让位', layout.sidebar === '1' && parseFloat(layout.pr) > 200, `paddingRight=${layout.pr}`)
 check('rail 尺寸对仗左侧（56px 全高）', layout.railW === 56 && layout.railH > 700, `rail=${layout.railW}x${layout.railH}`)
 
 /* 3. 状态渲染（等主进程推送） */
@@ -96,13 +96,21 @@ for (let i = 0; i < 20; i++) {
 }
 check('仪表盘收到状态快照', !!snap, `harness=${snap?.harness?.state ?? '?'} bridge=${snap?.bridge ?? '?'}`)
 if (snap) {
-  const runtimeHtml = await evalJs(`document.getElementById('dshd-runtime')?.innerText || ''`)
-  check('运行时卡渲染（PID/Node）', runtimeHtml.includes('PID'), runtimeHtml.split('\n').slice(0, 4).join(' | '))
   const jobsHtml = await evalJs(`document.getElementById('dshd-jobs')?.innerText || ''`)
   check('任务卡渲染', jobsHtml.length > 0, jobsHtml.slice(0, 60))
   const logsHtml = await evalJs(`document.getElementById('dshd-logs')?.childElementCount || 0`)
   check('活动流有行', logsHtml > 0, `${logsHtml} 行`)
 }
+
+/* 3.5 账户卡（余额经 bridge billing.balance；未配置 key 时显示错误文案也算渲染） */
+const balanceCard = await evalJs(`(() => {
+  const host = document.getElementById('dshd-balance')
+  const hasSection = !!document.getElementById('dshd-sec-balance')
+  const refresh = !!document.getElementById('dshd-balance-refresh')
+  const text = host?.innerText?.slice(0, 80) ?? ''
+  return { hasSection, refresh, text }
+})()`)
+check('账户卡渲染（余额/刷新）', balanceCard.hasSection && balanceCard.refresh, balanceCard.text.replace(/\n/g, ' | '))
 
 /* 4. 上下文环 + 会话指标卡（常驻 DOM 轮询；需先打开一个会话） */
 // 前置（幂等）：展开 harness 侧边栏并点击第一个会话行

@@ -9,7 +9,7 @@
  * 主题：全部复用 harness 的 --dsw-alias-* 令牌（带兜底值），
  * 三态主题自动跟随；动效对齐 --ds-transition-duration-* / --ds-ease-in-out。
  */
-import type { DashApproval, DashJob, DashLayout, DashLogLine, DashSession, DashSnapshot } from '../shared/types'
+import type { DashApproval, DashJob, DashLayout, DashLogLine, DashSnapshot } from '../shared/types'
 import { WHALE_PATH } from './whale'
 import { parseHarnessStats, parseContextUsage, type HarnessStats, type ContextUsage } from './stats'
 import { estimateCost, formatUsd, formatCny, modelLabel } from './pricing'
@@ -32,13 +32,6 @@ function fmtTime(ts: number): string {
   const d = new Date(ts)
   const p = (n: number) => String(n).padStart(2, '0')
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
-}
-
-/** 中段截断：abc…xyz */
-function truncMid(s: string, max = 40): string {
-  if (s.length <= max) return s
-  const half = Math.floor((max - 1) / 2)
-  return `${s.slice(0, half)}…${s.slice(-half)}`
 }
 
 function alias(name: string, fallback: string): string {
@@ -103,10 +96,6 @@ const SHELL_HTML = `
     </button>
   </div>
   <div id="dshd-body">
-    <section class="dshd-sec" id="dshd-sec-runtime">
-      <div class="dshd-sec-title">运行时</div>
-      <div class="dshd-rows" id="dshd-runtime"></div>
-    </section>
     <section class="dshd-sec" id="dshd-sec-context">
       <div class="dshd-sec-title"><span>上下文</span><span id="dshd-ctx-meta" class="dshd-sec-meta"></span></div>
       <div class="dshd-ctx" id="dshd-ctx" title="点击查看详情">
@@ -126,13 +115,13 @@ const SHELL_HTML = `
       <div class="dshd-metrics" id="dshd-metrics"></div>
       <div class="dshd-cost" id="dshd-cost"></div>
     </section>
+    <section class="dshd-sec" id="dshd-sec-balance">
+      <div class="dshd-sec-title"><span>账户</span><button id="dshd-balance-refresh" type="button" class="dshd-sec-tools-btn" title="刷新余额">↻</button></div>
+      <div class="dshd-balance" id="dshd-balance"></div>
+    </section>
     <section class="dshd-sec">
       <div class="dshd-sec-title"><span>任务</span><span id="dshd-jobs-badge" class="dshd-badge" hidden></span></div>
       <div class="dshd-list" id="dshd-jobs"></div>
-    </section>
-    <section class="dshd-sec">
-      <div class="dshd-sec-title"><span>会话</span><span id="dshd-sessions-meta" class="dshd-sec-meta"></span></div>
-      <div class="dshd-list" id="dshd-sessions"></div>
     </section>
     <section class="dshd-sec">
       <div class="dshd-sec-title"><span>审批</span><span id="dshd-approvals-meta" class="dshd-sec-meta"></span></div>
@@ -208,44 +197,6 @@ const HARNESS_STATE_TEXT: Record<string, string> = {
   stopped: '已停止',
 }
 
-function renderRuntime(): void {
-  const s = state.snap
-  const host = $('#dshd-runtime')
-  if (!host) return
-  if (!s) {
-    host.innerHTML = `<div class="dshd-empty">等待数据…</div>`
-    return
-  }
-  const r = s.runtime
-  const rows: [string, string][] = [
-    ['Harness', HARNESS_STATE_TEXT[s.harness.state] ?? s.harness.state],
-    ['桥接', s.bridge ? '在线' : '离线（DOM 快照）'],
-  ]
-  if (r) {
-    rows.push(['PID', String(r.pid ?? '—')])
-    if (r.node) rows.push(['Node', String(r.node)])
-    if (r.uptimeMs != null) rows.push(['已运行', fmtDuration(r.uptimeMs)])
-    if (typeof r.dshHome === 'string') rows.push(['DSH_HOME', truncMid(r.dshHome, 34)])
-    if (typeof r.cwd === 'string') rows.push(['工作区', truncMid(r.cwd, 34)])
-  }
-  host.innerHTML = rows
-    .map(
-      ([k, v]) =>
-        `<div class="dshd-row"><span class="dshd-row-k">${esc(k)}</span><span class="dshd-row-v" title="${esc(v)}">${esc(v)}</span></div>`,
-    )
-    .join('')
-  const workspaces = r?.workspaces
-  if (Array.isArray(workspaces) && workspaces.length > 0) {
-    host.insertAdjacentHTML(
-      'beforeend',
-      `<div class="dshd-row dshd-row-ws"><span class="dshd-row-k">已注册</span><span class="dshd-ws-chips">${workspaces
-        .slice(0, 4)
-        .map((w) => `<span class="dshd-ws-chip">${esc(w.title ?? w.id ?? '?')}</span>`)
-        .join('')}</span></div>`,
-    )
-  }
-}
-
 function fmtDuration(ms: number): string {
   const s = Math.floor(ms / 1000)
   if (s < 60) return `${s}s`
@@ -295,29 +246,6 @@ function renderJobs(): void {
     .join('')
 }
 
-function renderSessions(): void {
-  const s = state.snap
-  const host = $('#dshd-sessions')
-  const meta = $('#dshd-sessions-meta')
-  if (!host) return
-  const rows: DashSession[] = s?.sessions.rows ?? []
-  if (meta) meta.textContent = s ? `实时 ${s.sessions.live} · 持久 ${s.sessions.persisted}` : ''
-  if (rows.length === 0) {
-    host.innerHTML = `<div class="dshd-empty">无会话</div>`
-    return
-  }
-  host.innerHTML = rows
-    .slice(0, 12)
-    .map((row) => {
-      const title = typeof row.title === 'string' && row.title ? row.title : String(row.id ?? '?')
-      return `<div class="dshd-sess" data-id="${esc(row.id ?? '')}">
-        <span class="dshd-sess-title" title="${esc(title)}">${esc(title)}</span>
-        <span class="dshd-pill ${row.live ? 'dshd-st-running' : 'dshd-st-muted'}">${row.live ? '实时' : '持久'}</span>
-      </div>`
-    })
-    .join('')
-}
-
 function renderApprovals(): void {
   const s = state.snap
   const host = $('#dshd-approvals')
@@ -339,6 +267,47 @@ function renderApprovals(): void {
     })
     .join('')
   state.lastApprovalCount = rows.length
+}
+
+/** 账户余额：DeepSeek /user/balance（bridge RPC，key 不出 harness）。 */
+function renderBalance(): void {
+  const host = $('#dshd-balance')
+  if (!host) return
+  const b = state.snap?.balance
+  if (!b) {
+    host.innerHTML = `<div class="dshd-empty">余额未拉取</div>`
+    return
+  }
+  if (b.error) {
+    host.innerHTML = `<div class="dshd-balance-err">${esc(b.error)}</div>`
+    return
+  }
+  const infos = b.infos ?? []
+  if (infos.length === 0) {
+    host.innerHTML = `<div class="dshd-empty">暂无余额信息</div>`
+    return
+  }
+  // API 返回的金额可能是字符串（"19.28"），统一数值化
+  const num = (v: unknown): number | null => {
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v)
+    return null
+  }
+  host.innerHTML = infos
+    .map((info) => {
+      const total = num(info.totalBalance)
+      const currency = String(info.currency ?? 'CNY')
+      const symbol = currency === 'CNY' ? '¥' : currency === 'USD' ? '$' : `${currency} `
+      const fmt = (n: number | null): string => (n != null ? n.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—')
+      const topped = num(info.toppedUpBalance)
+      const granted = num(info.grantedBalance)
+      const parts: string[] = []
+      if (topped != null) parts.push(`充值 ${symbol}${fmt(topped)}`)
+      if (granted != null && granted > 0) parts.push(`赠送 ${symbol}${fmt(granted)}`)
+      return `<div class="dshd-balance-main"><span class="dshd-balance-v">${symbol}${fmt(total)}</span><span class="dshd-balance-t">${esc(currency)} 可用</span></div>
+        <div class="dshd-balance-sub">${esc(parts.join(' · '))}</div>`
+    })
+    .join('')
 }
 
 function renderLogs(): void {
@@ -377,12 +346,11 @@ function renderTabBadge(): void {
 
 function renderAll(): void {
   renderDot()
-  renderRuntime()
   renderJobs()
-  renderSessions()
   renderApprovals()
   renderFoot()
   renderTabBadge()
+  renderBalance()
 }
 
 /* ── DOM 探测兜底（桥接离线时，2s 轮询） ─────────────────────────────── */
@@ -685,15 +653,8 @@ function wireEvents(): void {
     state.logs = []
     renderLogs()
   })
-  $('#dshd-sessions')?.addEventListener('click', (e) => {
-    const row = (e.target as HTMLElement).closest('.dshd-sess') as HTMLElement | null
-    const id = row?.dataset.id
-    if (id) void api.dashAction('openSession', id)
-  })
-  $('#dshd-runtime')?.addEventListener('click', (e) => {
-    const chip = (e.target as HTMLElement).closest('.dshd-ws-chip') as HTMLElement | null
-    if (chip) void api.dashAction('pickWorkspace')
-  })
+  // 余额刷新
+  $('#dshd-balance-refresh')?.addEventListener('click', () => void api.dashAction('refreshBalance'))
   // 上下文环点击 → 转发到 harness 的上下文按钮（打开详情）
   $('#dshd-ctx')?.addEventListener('click', () => {
     if (lastCtxBtn) {

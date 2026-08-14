@@ -60,8 +60,9 @@
 | D12 | 面板数据三源分层：**bridge WS（主）→ harness stdout 解析（次）→ DOM 爬取（兜底）** | 实时 JSON 走既有桥接（新增 `dashboard.snapshot` RPC 拉全量 + 事件增量）；stdout 环形缓冲提供活动流/启动时序（零额外机制）；桥接离线时 DOM 探测保证面板不空转 |
 | D13 | 终端**双后端**：PipeBackend（默认，零原生依赖）/ PtyBackend（可选，`DSH_DESKTOP_TERM=pty` 且需本机为 Electron ABI 构建 node-pty） | 实测 `@homebridge/node-pty-prebuilt-multiarch` v0.14.1 仅发布 Node ABI 资产、无 electron 资产；electron-builder 显式 `npmRebuild: false`；裸装必触发源码编译（VS Build Tools），多数机器不可用 |
 | D14 | **dev 与已安装版隔离 userData**（dev 用 `%APPDATA%/dsh-desktop-dev`） | app 名解析为 `productName`（DSH Desktop），dev 与已安装版同锁同目录 → 已安装版运行中 dev 直接退出（实测）；隔离后两者可并行 |
-| D15 | **面板/rail/终端为覆盖层（overlay）**，不修改 #root 布局；`#root` padding 让位会触发 harness 响应式断点（实测 frame 变窄 → 左侧侧边栏自动折叠为 rail） | 面板打开不再挤压左侧；左栏宽度经 DOM 轮询写入 `--dshd-left-w`，终端 `left/right` 偏移避开左右侧边栏 |
+| D15 | **面板/rail/终端为固定层 + #root 布局让位**（原生侧边栏语义：展开 `padding-right`、终端 `padding-bottom` 上移内容不遮挡 composer） | 对照实验确认让位**不会**触发 harness 响应式折叠（左侧 280px 保持）；overlay 覆盖方案会盖住 harness 内容/对话框，弃用；左栏宽度经 DOM 轮询写入 `--dshd-left-w`，终端 `left/right` 偏移避开左右侧边栏 |
 | D16 | **上下文环/会话指标 = 常驻 DOM 轮询**（2s，与 bridge 状态无关） | 该数据仅存在于 harness UI（上下文按钮 aria-label + stats 行）；计费按官方定价表内置常量（pricing.ts，可随调价更新） |
+| D17 | **余额 = bridge RPC `billing.balance`**（`https://api.deepseek.com/user/balance`） | API key 经 harness credentials 服务解析，**只在 harness 进程内使用、不离开 harness**；snake_case 字段在 bridge 侧规范化；余额不敏感（仅金额） |
 
 ## 3. 关键事实（实测确认）
 
@@ -140,10 +141,10 @@ cordis.patch.yml  []（用户补丁层，壳不写它）
 ### 4.6 右栏仪表盘（注入式，src/panel/panel.ts + panel.css）
 
 - **注入**：主进程在 harness 文档（`http://127.0.0.1:*`）每次 dom-ready 时注入（D11）；面板引导等待布局 frame 与 body 令牌就绪（轮询 30s），就绪后 `hello` 触发主进程补发状态/布局/日志基线。
-- **结构**：头部（鲸鱼 logo + 桥接状态点 + 折叠）；运行时卡（harness/bridge/PID/Node/uptime/DSH_HOME/工作区/已注册工作区）；**上下文卡**（圆环进度条 + 已用/窗口 tokens + 系统/工具/对话构成，数据来自 harness 上下文按钮 DOM，deepseek 蓝，点击转发打开详情）；**会话指标卡**（缓存命中/运行时间/轮·步/首 token/速率/输入·输出 tokens + **费用估算**：deepseek 定价表 `pricing.ts`，官方价格 fetched 2026-08-13，含峰谷价常量，缓存命中率计入）；任务卡（运行数徽标 + 列表，状态 pill 色映射）；会话卡（实时/持久计数，行点击走 `dsh://session/<id>` 深链）；审批卡（最近 20 条，新到闪烁）；活动流（stdout/stderr 行级日志，自动滚动可暂停/清空）；页脚（徽标数/数据源/状态）。
-- **布局（overlay）**：面板与 rail 为固定覆盖层，**不改 #root 布局**（实测 padding 让位会触发 harness 响应式断点导致左侧侧边栏自动折叠，D15）；左侧 harness 侧边栏宽度由 DOM 轮询写入 `--dshd-left-w`（展开 280 / 折叠 56）。
+- **结构**：头部（鲸鱼 logo + 桥接状态点 + 折叠）；**上下文卡**（圆环进度条 + 已用/窗口 tokens + 系统/工具/对话构成，数据来自 harness 上下文按钮 DOM，deepseek 蓝，点击转发打开详情）；**会话指标卡**（缓存命中/运行时间/轮·步/首 token/速率/输入·输出 tokens + **费用估算**：deepseek 定价表 `pricing.ts`，官方价格 fetched 2026-08-13，含峰谷价常量，缓存命中率计入）；**账户卡**（DeepSeek 余额：bridge `billing.balance` RPC → `https://api.deepseek.com/user/balance`，API key 只在 harness 进程内解析、不离开 harness；余额/充值/赠送 + 手动刷新）；任务卡（运行数徽标 + 列表，状态 pill 色映射）；审批卡（最近 20 条，新到闪烁）；活动流（stdout/stderr 行级日志，自动滚动可暂停/清空）；页脚（徽标数/数据源/状态）。
+- **布局（原生让位）**：面板/rail 为固定层，**#root padding 让位**（展开 `padding-right: var(--dshd-w)`、折叠 56px、终端 `padding-bottom` 上移内容）。对照实验确认让位**不会**触发 harness 响应式折叠（左侧 280px 保持，D15 更正）；左侧 harness 侧边栏宽度由 DOM 轮询写入 `--dshd-left-w`（终端 left 偏移用）。
 - **折叠 rail（对仗左侧）**：56px 全高窄栏（与 harness 左 rail 同宽同底色），顶部 36px 面板图标按钮（对仗左侧 logoRow），**终端开关按钮沉底**（对仗左侧设置区），图标颜色同令牌。
-- **数据**：`dsh:dash:state`（200ms 节流快照）/ `dsh:dash:log`（300ms 批，`sync` 批为 hello 时全量基线）/ `dsh:dash:layout`（开合与尺寸）；上下文/会话指标为**常驻 DOM 轮询**（2s，与 bridge 状态无关）。
+- **数据**：`dsh:dash:state`（200ms 节流快照）/ `dsh:dash:log`（300ms 批，`sync` 批为 hello 时全量基线）/ `dsh:dash:layout`（开合与尺寸）；上下文/会话指标为**常驻 DOM 轮询**（2s，与 bridge 状态无关）；余额经 bridge RPC（连接时拉取 + 面板刷新按钮）。
 - **DOM 兜底（C 源）**：桥接离线时 2s 轮询 `[role=treeitem]`（会话数）、`[data-state=running|starting]`（任务近似），标注「桥接离线 · DOM 快照」；选择器集中注释（harness 0.1.0-rc.6 实测，升级复查）。
 
 ### 4.7 底栏终端（src/panel/term.ts + src/main/terminal.ts）
@@ -254,11 +255,12 @@ E2E（`scripts/e2e-turn.mjs` / `scripts/verify-dashboard.mjs`，需 `DSH_DESKTOP
   - 面板 DOM 必须挂 `document.body`（`--dsw-alias-*` 令牌定义在 body，挂 html 下不继承——主题跟随失效）
   - 活动流基线：面板 `hello` 时主进程补发日志全量（sync 批），避免订阅前日志丢失
   - 面板注入从自定义协议改为直接注入（D11：dev 渲染层 `ERR_UNKNOWN_URL_SCHEME`）
-  - `#root` padding 让位触发 harness 响应式折叠（左侧自动缩成 rail）→ 改 overlay（D15）
+  - overlay 覆盖方案被用户否决（盖住 harness 内容/对话框，不原生）→ 改 #root 让位；对照实验推翻"让位触发折叠"的初判（D15 更正）
   - e2e-turn 判定改 `#root` 文本（面板 DOM 挂在 body 末尾会污染 `body.innerText` 尾部窗口）
   - 终端 `onTermData` 回流订阅在重构中误删（shell 输出到主进程后无人写入 xterm）——探针定位恢复
   - 终端 ✕ 关闭后再开面板不重开会话 → `sessionDead` 标记 + layout 订阅自动重开
   - 面板 boot 晚于 dom-ready 推送 → `hello` 补发 state/layout/日志全量基线
+  - 余额 API 返回 snake_case 字符串金额（"19.28"）→ bridge 规范化字段 + 面板数值容错
 
 ## 9. 已知限制与后续
 

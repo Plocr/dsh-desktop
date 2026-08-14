@@ -127,6 +127,23 @@ function sendPanelBaseline(): void {
   if (lines.length > 0) w.webContents.send('dsh:dash:log', { sync: true, lines })
 }
 
+/** 拉取 DeepSeek 账户余额（bridge RPC，key 不出 harness 进程）。 */
+function refreshBalance(): void {
+  if (!bridge) return
+  void bridge
+    .call('billing.balance', undefined, 15_000)
+    .then((res) => {
+      dash.mergeBalance(res)
+      log('info', `balance fetched: ${JSON.stringify(res).slice(0, 200)}`)
+      pushDash()
+    })
+    .catch((err) => {
+      dash.mergeBalance({ isAvailable: false, infos: [], fetchedAt: Date.now(), error: err instanceof Error ? err.message : String(err) })
+      log('error', `balance fetch failed: ${err instanceof Error ? err.message : String(err)}`)
+      pushDash()
+    })
+}
+
 /** 推送布局状态（面板开合/尺寸）。 */
 function pushLayout(): void {
   if (!uiReady()) return
@@ -512,6 +529,8 @@ async function main(): Promise<void> {
               pushDash()
             })
             .catch((err) => log('error', `dashboard.snapshot failed: ${err instanceof Error ? err.message : String(err)}`))
+          // 拉取账户余额（异步，不阻塞 ready）
+          refreshBalance()
           if (pendingRegisterWorkspace) {
             const dir = pendingRegisterWorkspace
             pendingRegisterWorkspace = null
@@ -596,6 +615,7 @@ async function main(): Promise<void> {
     setTerminalHeight,
     sendPanelBaseline,
     openSystemTerminal,
+    refreshBalance,
   })
 
   // dsh:// 协议 + 全局快捷键 + 自动更新

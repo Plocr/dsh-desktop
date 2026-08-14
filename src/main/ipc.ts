@@ -28,6 +28,8 @@ export interface IpcDeps {
   sendPanelBaseline: () => void
   /** 在独立窗口打开系统终端（逃生口：管道模式无 TTY 时用）。 */
   openSystemTerminal: () => void
+  /** 拉取 DeepSeek 账户余额（bridge RPC）。 */
+  refreshBalance: () => void
 }
 
 /** 校验调用来自工作台窗口主 frame（防 harness 页内其他 frame/注入滥用）。 */
@@ -122,6 +124,9 @@ export function registerIpc(deps: IpcDeps): void {
       }
       case 'openSystemTerminal':
         deps.openSystemTerminal()
+        return { ok: true }
+      case 'refreshBalance':
+        deps.refreshBalance()
         return { ok: true }
       default:
         return { ok: false, error: `unknown action: ${action}` }

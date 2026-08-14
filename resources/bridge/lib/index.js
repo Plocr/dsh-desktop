@@ -184,6 +184,51 @@ export function apply(ctx, config = {}) {
           break
         }
 
+        case 'billing.balance': {
+          // DeepSeek 账户余额（https://api.deepseek.com/user/balance）。
+          // 只在 harness 进程内使用 API key（credentials 服务解析），key 不离开 harness。
+          const credentials = ctx.get('credentials')
+          if (!credentials || typeof credentials.resolve !== 'function') {
+            return fail('credentials service unavailable')
+          }
+          let key = ''
+          try {
+            // credentialRef 为品牌化字符串（正则校验后原样返回），直接传环境变量名
+            const hit = await credentials.resolve('DEEPSEEK_API_KEY')
+            if (hit && typeof hit.value === 'string' && hit.value.length > 0) key = hit.value
+          } catch (err) {
+            return fail(`credentials.resolve failed: ${err instanceof Error ? err.message : String(err)}`)
+          }
+          if (!key) return fail('DEEPSEEK_API_KEY 未配置（请在 harness 设置中填写 API key）')
+          try {
+            const res = await fetch('https://api.deepseek.com/user/balance', {
+              method: 'GET',
+              headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
+              signal: AbortSignal.timeout(10_000),
+            })
+            const data = await res.json().catch(() => ({}))
+            if (!res.ok) {
+              const msg = data?.error?.message ?? `HTTP ${res.status}`
+              return fail(`余额查询失败: ${msg}`)
+            }
+            reply({
+              isAvailable: data?.is_available !== false,
+              infos: Array.isArray(data?.balance_infos)
+                ? data.balance_infos.map((i) => ({
+                    currency: safe(() => i?.currency, undefined),
+                    totalBalance: safe(() => i?.total_balance, undefined),
+                    grantedBalance: safe(() => i?.granted_balance, undefined),
+                    toppedUpBalance: safe(() => i?.topped_up_balance, undefined),
+                  }))
+                : [],
+              fetchedAt: Date.now(),
+            })
+          } catch (err) {
+            return fail(`余额查询异常: ${err instanceof Error ? err.message : String(err)}`)
+          }
+          break
+        }
+
         case 'session.resolve': {
           // 深链用：按会话 id 解析标题（live 优先，持久化 inspect 兜底）。
           const id = typeof msg.params?.id === 'string' ? msg.params.id : ''

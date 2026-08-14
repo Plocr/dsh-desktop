@@ -38,6 +38,14 @@ export interface DashLogLine {
   ts: number
 }
 
+/** 账户余额（bridge billing.balance 结果，主进程缓存）。 */
+export interface DashBalance {
+  isAvailable: boolean
+  infos: { currency?: unknown; totalBalance?: unknown; grantedBalance?: unknown; toppedUpBalance?: unknown }[]
+  fetchedAt: number
+  error?: string
+}
+
 /** 主进程聚合后的仪表盘快照（dsh:dash:state）。 */
 export interface DashSnapshot {
   harness: { state: string; url: string | null }
@@ -49,6 +57,8 @@ export interface DashSnapshot {
   badge: number
   /** bridge 在线 = 'bridge'；离线降级 = 'dom'（面板 DOM 探测） */
   source: 'bridge' | 'dom'
+  /** DeepSeek 账户余额（未拉取/失败时 null） */
+  balance: DashBalance | null
 }
 
 /** 面板布局状态（dsh:dash:layout）。 */

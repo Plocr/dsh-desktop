@@ -4,7 +4,7 @@
  * 输出：渲染侧 JSON 快照（toSnapshot）+ 日志批量行。
  * 不依赖 Electron；副作用（发送）由调用方完成。
  */
-import type { DashApproval, DashJob, DashLogLine, DashRuntime, DashSession, DashSnapshot } from '../shared/types'
+import type { DashApproval, DashBalance, DashJob, DashLogLine, DashRuntime, DashSession, DashSnapshot } from '../shared/types'
 
 export interface RingBufferOptions {
   cap: number
@@ -65,6 +65,7 @@ export interface DashboardState {
   sessions: DashSession[]
   jobs: DashJob[]
   approvals: DashApproval[]
+  balance: DashBalance | null
   startedAt: number
 }
 
@@ -76,6 +77,7 @@ export function createDashboardState(): {
   setBridge: (connected: boolean) => void
   applyBridgeEvent: (type: string, payload: unknown) => void
   mergeSnapshot: (snap: unknown) => void
+  mergeBalance: (balance: unknown) => void
   toSnapshot: () => DashSnapshot
 } {
   const state: DashboardState = {
@@ -86,6 +88,7 @@ export function createDashboardState(): {
     sessions: [],
     jobs: [],
     approvals: [],
+    balance: null,
     startedAt: Date.now(),
   }
   const logs = new RingBuffer<DashLogLine>(300)
@@ -139,6 +142,11 @@ export function createDashboardState(): {
     if (Array.isArray(s.approvals)) state.approvals = s.approvals as DashApproval[]
   }
 
+  const mergeBalance = (balance: unknown): void => {
+    if (!balance || typeof balance !== 'object') return
+    state.balance = balance as DashBalance
+  }
+
   const toSnapshot = (): DashSnapshot => {
     const live = state.sessions.filter((s) => s.live).length
     return {
@@ -150,6 +158,7 @@ export function createDashboardState(): {
       approvals: state.approvals,
       badge: runningCount(state.jobs),
       source: state.bridgeConnected ? 'bridge' : 'dom',
+      balance: state.balance,
     }
   }
 
@@ -161,6 +170,7 @@ export function createDashboardState(): {
     setBridge,
     applyBridgeEvent,
     mergeSnapshot,
+    mergeBalance,
     toSnapshot,
   }
 }

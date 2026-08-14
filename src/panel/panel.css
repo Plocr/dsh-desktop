@@ -5,7 +5,7 @@
  * 动效曲线与 duration 对齐 --ds-transition-duration-* / --ds-ease-in-out。
  */
 
-/* ── 布局变量 ───────────────────────────────────────────────────────── */
+/* ── 布局变量与宿主让位 ─────────────────────────────────────────────── */
 
 :root {
   --dshd-w: 300px;
@@ -14,8 +14,23 @@
   --dshd-left-w: 56px;
 }
 
-/* 面板/rail 为覆盖层（overlay）：不修改 #root 布局，harness 响应式不触发，
-   左侧侧边栏不会因面板打开而被挤压（实测 #root padding 让位会触发折叠断点）。 */
+/* 面板/rail 为固定层 + #root 布局让位（原生侧边栏语义，不覆盖 harness 内容；
+   实测 padding 让位不会触发 harness 响应式折叠——左侧 280px 保持） */
+html[data-dshd-sidebar="1"] #root {
+  padding-right: var(--dshd-w);
+}
+html[data-dshd-sidebar="0"] #root {
+  padding-right: 56px;
+}
+/* 终端展开时内容上移（composer 不被遮挡） */
+html[data-dshd-term="1"] #root {
+  padding-bottom: var(--dshd-h);
+}
+#root {
+  transition:
+    padding-right var(--ds-transition-duration-slow, 0.3s) var(--ds-ease-in-out, cubic-bezier(0.4, 0, 0.2, 1)),
+    padding-bottom var(--ds-transition-duration-slow, 0.3s) var(--ds-ease-in-out, cubic-bezier(0.4, 0, 0.2, 1));
+}
 
 /* ── 面板外壳 ───────────────────────────────────────────────────────── */
 
@@ -177,46 +192,6 @@ html[data-dshd-sidebar="0"] #dshd-root {
   padding: 4px 0;
 }
 
-/* 运行时行 */
-.dshd-row {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 12px;
-  padding: 1.5px 0;
-  min-width: 0;
-}
-.dshd-row-k {
-  flex: none;
-  width: 64px;
-  color: var(--dsw-alias-label-tertiary, #9aa0a6);
-  font-size: 11px;
-}
-.dshd-row-v {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.dshd-row-ws { align-items: center; }
-.dshd-ws-chips { display: flex; flex-wrap: wrap; gap: 4px; }
-.dshd-ws-chip {
-  font-size: 11px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06));
-  color: var(--dsw-alias-label-secondary, #61666b);
-  cursor: pointer;
-  max-width: 130px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.dshd-ws-chip:hover {
-  background: var(--dsw-alias-interactive-bg-hover-solid, rgba(38, 49, 72, 0.14));
-}
-
 /* 徽标（任务数） */
 .dshd-badge {
   font-size: 11px;
@@ -297,25 +272,6 @@ html[data-dshd-sidebar="0"] #dshd-root {
 @keyframes dshdFadeSlide {
   from { opacity: 0; transform: translateY(-3px); }
   to { opacity: 1; transform: translateY(0); }
-}
-
-/* 会话行 */
-.dshd-sess {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 8px;
-  border-radius: 8px;
-  cursor: pointer;
-}
-.dshd-sess:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06)); }
-.dshd-sess-title {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* 审批行 */
@@ -659,6 +615,50 @@ html[data-dshd-term="0"] #dshd-term { transform: translateY(102%); box-shadow: n
   font-size: 10px;
   color: var(--dsw-alias-label-tertiary, #9aa0a6);
   margin-left: auto;
+}
+
+/* ── 账户余额 ───────────────────────────────────────────────────────── */
+
+.dshd-sec-tools-btn {
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, #9aa0a6);
+  font-size: 13px;
+  line-height: 1;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  cursor: pointer;
+  padding: 0;
+}
+.dshd-sec-tools-btn:hover {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06));
+  color: var(--dsw-alias-label-primary, #0f1115);
+}
+.dshd-balance-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.dshd-balance-v {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--dsw-alias-state-success-primary, #22c55e);
+  font-variant-numeric: tabular-nums;
+}
+.dshd-balance-t {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary, #9aa0a6);
+}
+.dshd-balance-sub {
+  font-size: 10px;
+  color: var(--dsw-alias-label-tertiary, #9aa0a6);
+  margin-top: 2px;
+}
+.dshd-balance-err {
+  font-size: 11px;
+  color: var(--dsw-alias-state-error-primary, #ec1313);
+  word-break: break-all;
 }
 
 /* ── 动效开关：尊重系统减弱动效 ─────────────────────────────────────── */
