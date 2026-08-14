@@ -104,6 +104,17 @@ cordis.patch.yml  []（用户补丁层，壳不写它）
 | `harness.ts` | spawn（dev: 全局 dsh；prod: `resources/dsh-runtime`）、行解析、就绪判定（URL+桥接行齐备）、指数退避重启、优雅停机、cwd 切换 |
 | `bridge.ts` | WS 客户端、token 握手、断线重连（1s）、RPC（call with timeout）、事件分发 |
 | `window.ts` | BrowserWindow（1280×820、`persist:dsh-ui` 分区、sandbox）、导航锁、loading/error 过渡页、外链拦截 |
+
+### 4.5 加载页：粒子鲸鱼动画（shell-pages/loading.html）
+
+启动/重启/崩溃恢复时的过渡页，以 [DeepSeek 官网](https://www.deepseek.com/harness/) 背景的**粒子鲸鱼**为视觉母题（自研实现，非复制官网代码）：
+
+- 鲸鱼剪影：官网品牌素材 `hero-whale.svg`（24×18 viewBox）的 path 存于 `whale-path.txt`，经 `scripts/inject-whale.mjs` 注入模板 `loading.template.html` 生成 `loading.html`（`__WHALE_PATH__` 占位符）。
+- 渲染：SVG → data URI → 离屏 canvas（480×360）→ `getImageData` 像素采样（alpha>128，步长 4）→ 归一化目标点；1100 个弹性粒子从随机位置飞向目标。
+- 动画：速度积分 + 阻尼弹簧（k=0.014, damp=0.90）；整体呼吸缩放（sin 2.6s ±2.2%）；逐粒子相位游动（1.7s）；亮度闪烁（0.9s）；半透明拖尾（rgba 背景 0.30）形成光带。
+- 分层：清晰 canvas + blur(18px) 光晕复制层（`drawImage` 每帧），还原官网"粒子 + 光晕"质感；品牌蓝渐变 + 8% 白粒点缀。
+- 工程细节：DPR 上限 2；`visibilitychange` 隐藏时暂停 rAF（省电）；`?state=` 状态文字；采样失败退化纯文字；CSP 收紧（`script-src 'unsafe-inline'`，无网络依赖）。
+- 验证（CDP 实测）：无 JS 错误；1100 粒子 + 5800+ 发光像素；三次像素 hash 全不同（动画帧持续变化）；真实重启流程中窗口 URL 确认切至 `loading.html?state=…` 并自动恢复。
 | `tray.ts` | 显示窗口/浏览器版/切换工作区/重启 Harness/查看日志/开机自启/通知开关/退出 |
 | `notify.ts` | 系统通知 + `app.setBadgeCount` 徽标 |
 | `ipc.ts` | 壳页面白名单（pickWorkspace/revealInFolder/openExternal/restartHarness/openLogs/getInfo） |
@@ -138,7 +149,9 @@ dsh-desktop/
 ├─ packages/bridge/      # dsh-desktop-bridge 插件（lib + vendor/ws）
 ├─ resources/
 │  ├─ profile-template/desktop/
-│  ├─ shell-pages/       # loading/error 过渡页
+│  ├─ shell-pages/       # loading/error 过渡页（loading 为粒子鲸鱼动画，见下）
+│  ├─ whale-path.txt     # 鲸鱼 SVG path（DeepSeek 官网品牌素材，注入用）
+│  ├─ loading.template.html # 加载页模板（__WHALE_PATH__ 占位符）
 │  ├─ bridge/            # build 产物（随 asar 分发）
 │  ├─ icons/             # 生成产物
 │  └─ dsh-runtime/       # setup-runtime 产物（自包含运行时）

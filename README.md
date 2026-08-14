@@ -7,6 +7,7 @@
 ## 能力一览
 
 - 🪟 原生窗口加载 harness Web UI（`--port 0`，无端口冲突）
+- 🐋 启动/重启加载页：官网同款**粒子鲸鱼**动画（SVG 像素采样 + 弹性粒子 + 光晕层）
 - 🧩 专用 `desktop` profile（`$DSH_HOME/profiles/desktop`），会话与 Web/CLI 共享
 - 🔌 `dsh-desktop-bridge` 桥接插件：后台任务/审批事件 → 系统通知与任务栏徽标
 - ⌨️ 全局快捷键唤出（默认 `Ctrl+Shift+Space`，settings.json `globalShortcut` 可改）
