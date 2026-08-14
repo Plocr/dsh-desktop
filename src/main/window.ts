@@ -2,7 +2,7 @@
  * 主窗口：加载 harness Web UI（http://127.0.0.1:<port>），
  * 内置 loading/error 过渡页；导航锁 + 外链拦截。
  */
-import { BrowserWindow, shell } from 'electron'
+import { BrowserWindow, nativeTheme, shell } from 'electron'
 import path from 'node:path'
 
 export interface WindowHandle {
@@ -25,7 +25,8 @@ export function createWindow(
     show: false,
     autoHideMenuBar: true,
     title: 'DSH Desktop',
-    backgroundColor: '#ffffff', // 与加载页/工作台一致（避免绘制前闪深色）
+    // 窗口底色跟随系统主题（与加载页一致，避免绘制前闪错底色）
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0f1115' : '#ffffff',
     icon: path.join(resourcesDir, 'icons', 'icon.png'),
     webPreferences: {
       preload: preloadPath,

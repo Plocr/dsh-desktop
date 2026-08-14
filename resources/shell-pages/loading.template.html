@@ -2,12 +2,25 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />
 <title>DSH Desktop</title>
 <style>
+  :root {
+    --bg: #ffffff;
+    --ink: #0f1115;
+    --sub: #6b7280;
+  }
+  /* 跟随系统主题：深色模式下深底浅鲸，夜间不刺眼 */
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --ink: #f5f6f8;
+      --sub: #9aa4b2;
+    }
+  }
   html, body {
     height: 100%; margin: 0; overflow: hidden;
-    background: #ffffff; color: #0f1115;
+    background: var(--bg); color: var(--ink);
     font-family: "Segoe UI", system-ui, sans-serif;
   }
   .stage {
@@ -20,10 +33,11 @@
   /* 淡出由壳在 ready 时触发（window.__fadeOut） */
   .stage.fading { transition: opacity 0.35s ease; opacity: 0; }
 
-  /* 静态黑白鲸鱼 logo（官网品牌 path，fill 近黑），矢量直渲 */
+  /* 静态黑白鲸鱼 logo（官网品牌 path，随主题取色），矢量直渲 */
   .whale {
     width: min(34vw, 260px);
     aspect-ratio: 24 / 18;
+    color: var(--ink);
     animation: breathe 4s ease-in-out infinite;
   }
   @keyframes breathe {
@@ -32,14 +46,14 @@
   }
 
   .brand { margin-top: 16px; text-align: center; }
-  .title { font-size: 15px; font-weight: 600; margin-bottom: 5px; letter-spacing: 0.2px; color: #0f1115; }
-  .sub { font-size: 12px; color: #6b7280; }
+  .title { font-size: 15px; font-weight: 600; margin-bottom: 5px; letter-spacing: 0.2px; color: var(--ink); }
+  .sub { font-size: 12px; color: var(--sub); }
 
   /* 极简加载点（三个依次脉冲），保持页面有活动感 */
   .dots { margin-top: 14px; display: flex; gap: 6px; justify-content: center; }
   .dots span {
     width: 5px; height: 5px; border-radius: 50%;
-    background: #0f1115;
+    background: var(--ink);
     animation: pulse 1.2s ease-in-out infinite;
   }
   .dots span:nth-child(2) { animation-delay: 0.15s; }
@@ -53,7 +67,7 @@
 <body>
   <div class="stage" id="stage">
     <svg class="whale" viewBox="0 0 24 18" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="DeepSeek Harness">
-      <path d="__WHALE_PATH__" fill="#0f1115"></path>
+      <path d="__WHALE_PATH__" fill="currentColor"></path>
     </svg>
     <div class="brand">
       <div class="title">正在启动 DeepSeek Harness…</div>
