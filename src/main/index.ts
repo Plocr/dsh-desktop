@@ -2,7 +2,8 @@
  * DSH Desktop 主进程入口：
  * 单实例 → 设置/日志 → 确保 desktop profile → 定位运行时 → 生成 overlay →
  * 创建窗口/托盘 → spawn harness → 解析 URL/桥接行 → 加载 Web UI →
- * 桥接事件（徽标/通知）→ 全局快捷键 / dsh:// 深链 / 自动更新 → 优雅停机。
+ * 桥接事件（徽标/通知/仪表盘）→ 全局快捷键 / dsh:// 深链 / 自动更新 →
+ * 面板注入（右栏仪表盘 + 底栏终端）→ 优雅停机。
  */
 import { app, dialog, shell } from 'electron'
 import { existsSync } from 'node:fs'
@@ -23,6 +24,16 @@ import { registerIpc } from './ipc'
 import { parseDeepLink, extractDeepLinkFromArgv, type DeepLinkAction } from './deepLink'
 import { registerGlobalShortcut, currentShortcut, unregisterAllShortcuts } from './shortcut'
 import { initUpdater, checkNow } from './updater'
+import { injectChrome } from './chrome'
+import { createDashboardState } from './dashboard'
+import { createTerminalManager, type TermManager } from './terminal'
+import type { DashLayout, DashLogLine } from '../shared/types'
+
+// dev 模式与已安装版隔离 userData（app 名解析为 productName → 默认同名目录，
+// 已安装版运行中时 dev 会因单实例锁冲突直接退出；隔离后两者可并行）
+if (process.defaultApp) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'dsh-desktop-dev'))
+}
 
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
@@ -46,6 +57,7 @@ let win: WindowHandle | null = null
 let trayHandle: TrayHandle | null = null
 let harness: HarnessManager
 let bridge: BridgeClient
+let terminal: TermManager
 let settings: AppSettings
 let settingsFile = ''
 let quitting = false
@@ -53,6 +65,98 @@ let pendingRegisterWorkspace: string | null = null
 let lastUrl: string | null = null
 let runningJobs = 0
 let pendingDeepLinks: DeepLinkAction[] = []
+
+/* ── 仪表盘状态与推送 ────────────────────────────────────────────────── */
+
+const dash = createDashboardState()
+let dashPushTimer: NodeJS.Timeout | null = null
+let logQueue: DashLogLine[] = []
+let logPushTimer: NodeJS.Timeout | null = null
+
+function panelLayout(): DashLayout {
+  return {
+    sidebar: settings.sidebar.enabled,
+    term: settings.terminal.enabled,
+    sidebarWidth: settings.sidebar.width,
+    termHeight: settings.terminal.height,
+  }
+}
+
+function uiReady(): boolean {
+  const w = win?.win
+  if (!w || w.isDestroyed()) return false
+  return w.webContents.getURL().startsWith('http://127.0.0.1:')
+}
+
+/** 节流推送仪表盘快照（仅 harness 页接收）。 */
+function pushDash(): void {
+  if (dashPushTimer) return
+  dashPushTimer = setTimeout(() => {
+    dashPushTimer = null
+    if (!uiReady()) return
+    const w = win?.win
+    if (!w || w.isDestroyed()) return
+    w.webContents.send('dsh:dash:state', dash.toSnapshot())
+  }, 200)
+}
+
+/** 批量推送日志行（300ms 批）。 */
+function pushLogs(): void {
+  if (logPushTimer) return
+  logPushTimer = setTimeout(() => {
+    logPushTimer = null
+    if (logQueue.length === 0 || !uiReady()) return
+    const w = win?.win
+    if (!w || w.isDestroyed()) return
+    const batch = logQueue
+    logQueue = []
+    w.webContents.send('dsh:dash:log', { sync: false, lines: batch })
+  }, 300)
+}
+
+/** 面板 hello：补发日志全量基线（避免订阅前的启动日志丢失）。 */
+function sendLogBacklog(): void {
+  if (!uiReady()) return
+  const w = win?.win
+  if (!w || w.isDestroyed()) return
+  const lines = dash.logs.all
+  if (lines.length > 0) w.webContents.send('dsh:dash:log', { sync: true, lines })
+}
+
+/** 推送布局状态（面板开合/尺寸）。 */
+function pushLayout(): void {
+  if (!uiReady()) return
+  win?.win.webContents.send('dsh:dash:layout', panelLayout())
+}
+
+/** 面板动作：开合/尺寸 → 设置持久化 + 布局推送 + 托盘刷新。 */
+function toggleSidebar(): void {
+  settings.sidebar.enabled = !settings.sidebar.enabled
+  saveSettings(settingsFile, settings)
+  pushLayout()
+  refreshTray()
+}
+
+function toggleTerminal(): void {
+  settings.terminal.enabled = !settings.terminal.enabled
+  saveSettings(settingsFile, settings)
+  pushLayout()
+  refreshTray()
+}
+
+function setSidebarWidth(w: number): void {
+  settings.sidebar.width = w
+  saveSettings(settingsFile, settings)
+  pushLayout()
+}
+
+function setTerminalHeight(h: number): void {
+  settings.terminal.height = h
+  saveSettings(settingsFile, settings)
+  pushLayout()
+}
+
+/* ── 既有基础设施 ───────────────────────────────────────────────────── */
 
 function dshHome(): string {
   return settings.isolatedHome ? path.join(app.getPath('userData'), 'dsh-home') : path.join(os.homedir(), '.dsh')
@@ -91,6 +195,8 @@ function currentInfo(): unknown {
     appData: app.getPath('userData'),
     logsDir: logDirPath(),
     globalShortcut: currentShortcut(),
+    panel: panelLayout(),
+    terminalBackend: terminal?.backend ?? null,
   }
 }
 
@@ -128,6 +234,9 @@ function handleBridgeEventWrapper(type: string, payload: unknown): void {
     runningJobs = runningJobCount(jobs)
     refreshTray()
   }
+  // 仪表盘增量更新
+  dash.applyBridgeEvent(type, payload)
+  pushDash()
 }
 
 /* ── dsh:// 深链 ─────────────────────────────────────────────────────── */
@@ -145,13 +254,6 @@ function registerProtocol(): void {
   } catch (err) {
     log('error', `protocol registration failed: ${err instanceof Error ? err.message : String(err)}`)
   }
-}
-
-/** 页面是否已加载 harness Web UI。 */
-function uiReady(): boolean {
-  const w = win?.win
-  if (!w || w.isDestroyed()) return false
-  return w.webContents.getURL().startsWith('http://127.0.0.1:')
 }
 
 /** 在侧边栏按匹配器点击一行（React 合成事件可被冒泡 click 触发）。 */
@@ -239,6 +341,53 @@ function flushPendingDeepLinks(): void {
   }, 1500)
 }
 
+/* ── 窗口内快捷键（面板开关，非全局） ───────────────────────────────── */
+
+function acceleratorParts(acc: string): { mods: Set<string>; key: string } {
+  const parts = acc.split('+').map((p) => p.trim().toLowerCase()).filter(Boolean)
+  const key = parts.pop() ?? ''
+  return { mods: new Set(parts), key }
+}
+
+function matchAccelerator(
+  acc: string,
+  input: { type: string; key?: string; control?: boolean; shift?: boolean; alt?: boolean },
+): boolean {
+  if (input.type !== 'keyDown') return false
+  const { mods, key } = acceleratorParts(acc)
+  const wantCtrl = mods.has('control') || mods.has('commandorcontrol')
+  const wantShift = mods.has('shift')
+  const wantAlt = mods.has('alt')
+  if (wantCtrl !== !!input.control) return false
+  if (wantShift !== !!input.shift) return false
+  if (wantAlt !== !!input.alt) return false
+  const k = (input.key || '').toLowerCase()
+  if (k !== key) {
+    // 兼容不同键盘布局下的符号键别名
+    const alias: Record<string, string> = { '`': 'backquote', '~': 'backquote', '.': 'period', '>': 'period' }
+    if (alias[k] !== key && alias[key] !== k) return false
+  }
+  return true
+}
+
+function installPanelShortcuts(): void {
+  const w = win?.win
+  if (!w) return
+  w.webContents.on('before-input-event', (event, input) => {
+    if (!uiReady()) return
+    const st = settings.panelShortcuts
+    if (st.terminal && matchAccelerator(st.terminal, input)) {
+      event.preventDefault()
+      toggleTerminal()
+      return
+    }
+    if (st.sidebar && matchAccelerator(st.sidebar, input)) {
+      event.preventDefault()
+      toggleSidebar()
+    }
+  })
+}
+
 /* ── 主流程 ──────────────────────────────────────────────────────────── */
 
 async function main(): Promise<void> {
@@ -253,8 +402,20 @@ async function main(): Promise<void> {
   win = createWindow(path.join(__dirname, '..', 'preload', 'index.cjs'), resourcesDir, {
     isAllowed: (url) => url.startsWith('http://127.0.0.1:') || url.startsWith('file://'),
     theme: resolveEffectiveTheme(dshHome()),
+    onDomReady: (w) => {
+      injectChrome(w)
+      // 面板就绪前补发最新状态/布局（panel 订阅早于 hello）
+      const url = w.webContents.getURL()
+      if (url.startsWith('http://127.0.0.1:')) {
+        setTimeout(() => {
+          w.webContents.send('dsh:dash:state', dash.toSnapshot())
+          w.webContents.send('dsh:dash:layout', panelLayout())
+        }, 400)
+      }
+    },
   })
   win.showLoading(undefined, resolveThemePreference(dshHome()))
+  installPanelShortcuts()
   win.win.on('close', (e) => {
     if (settings.trayOnClose && !quitting) {
       e.preventDefault()
@@ -279,6 +440,7 @@ async function main(): Promise<void> {
       onReady: (r: HarnessReady) => {
         lastUrl = r.url
         log('info', `harness ready: ${r.url} bridgePort=${r.bridgePort}`)
+        dash.state.readyUrl = r.url
         win?.loadApp(r.url)
         bridge.connect()
         refreshTray()
@@ -286,13 +448,20 @@ async function main(): Promise<void> {
         setTimeout(() => flushPendingDeepLinks(), 2500)
       },
       onExit: ({ code, willRestart }) => {
+        dash.state.readyUrl = null
         if (willRestart) {
           win?.showLoading('Harness 异常退出，正在自动重启…', resolveThemePreference(dshHome()))
         }
         refreshTray()
       },
-      onLog: (stream, line) => log(stream === 'stdout' ? 'info' : 'error', `[harness:${stream}] ${line}`),
+      onLog: (stream, line) => {
+        log(stream === 'stdout' ? 'info' : 'error', `[harness:${stream}] ${line}`)
+        dash.applyHarnessLog(stream, line)
+        pushLogs()
+      },
       onState: (s) => {
+        dash.applyHarnessState(s)
+        pushDash()
         if (s === 'starting') {
           if (!lastUrl) win?.showLoading(undefined, resolveThemePreference(dshHome()))
         }
@@ -309,12 +478,22 @@ async function main(): Promise<void> {
     {
       onEvent: handleBridgeEventWrapper,
       onConnected: (connected) => {
+        dash.setBridge(connected)
+        pushDash()
         if (connected) {
           // 自检：验证 shell -> harness RPC 通路
           void bridge
             .call('ping')
             .then(() => log('info', 'bridge RPC self-test OK'))
             .catch((err) => log('error', `bridge RPC self-test failed: ${err instanceof Error ? err.message : String(err)}`))
+          // 拉取仪表盘全量快照（之后靠事件增量）
+          void bridge
+            .call('dashboard.snapshot', undefined, 10_000)
+            .then((snap) => {
+              dash.mergeSnapshot(snap)
+              pushDash()
+            })
+            .catch((err) => log('error', `dashboard.snapshot failed: ${err instanceof Error ? err.message : String(err)}`))
           if (pendingRegisterWorkspace) {
             const dir = pendingRegisterWorkspace
             pendingRegisterWorkspace = null
@@ -328,6 +507,18 @@ async function main(): Promise<void> {
     },
   )
 
+  terminal = createTerminalManager(
+    {
+      onData: (data) => {
+        if (uiReady()) win?.win.webContents.send('dsh:term:data', data)
+      },
+      onExit: (info) => {
+        if (uiReady()) win?.win.webContents.send('dsh:term:exit', { code: info.code })
+      },
+    },
+    () => harness?.cwd ?? defaultWorkspace(),
+  )
+
   trayHandle = createTray(path.join(resourcesDir, 'icons', 'tray.png'), {
     getUrl: () => harness?.ready?.url ?? lastUrl,
     getState: () => ({
@@ -337,6 +528,7 @@ async function main(): Promise<void> {
       harnessState:
         harness?.state === 'ready' ? '运行中' : harness?.state === 'starting' ? '启动中' : '已停止',
       globalShortcut: currentShortcut(),
+      panel: panelLayout(),
     }),
     showWindow,
     openBrowser,
@@ -358,6 +550,13 @@ async function main(): Promise<void> {
       saveSettings(settingsFile, settings)
       refreshTray()
     },
+    setPanel: (kind, v) => {
+      if (kind === 'sidebar') settings.sidebar.enabled = v
+      else settings.terminal.enabled = v
+      saveSettings(settingsFile, settings)
+      pushLayout()
+      refreshTray()
+    },
     quit: () => app.quit(),
   })
 
@@ -365,12 +564,19 @@ async function main(): Promise<void> {
     getWindow: () => win?.win ?? null,
     harness,
     bridge,
+    terminal,
     pickWorkspace,
     restartHarness: () => {
       lastUrl = null
       harness.restart()
     },
     getInfo: currentInfo,
+    openSession: (sessionId) => handleDeepLink({ kind: 'session', sessionId }),
+    toggleSidebar,
+    toggleTerminal,
+    setSidebarWidth,
+    setTerminalHeight,
+    sendLogBacklog,
   })
 
   // dsh:// 协议 + 全局快捷键 + 自动更新
@@ -401,6 +607,7 @@ app.on('before-quit', (e) => {
   log('info', 'quitting: stopping harness')
   unregisterAllShortcuts()
   bridge?.stop()
+  terminal?.close()
   void harness
     ?.stop()
     .catch((err) => log('error', `stop failed: ${err instanceof Error ? err.message : String(err)}`))

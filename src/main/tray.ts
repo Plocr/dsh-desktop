@@ -13,6 +13,7 @@ export interface TrayDeps {
     runningJobs: number
     harnessState: string
     globalShortcut: string
+    panel: { sidebar: boolean; term: boolean }
   }
   showWindow: () => void
   openBrowser: () => void
@@ -22,6 +23,7 @@ export interface TrayDeps {
   checkUpdate: () => void
   setAutoStart: (v: boolean) => void
   setNotifications: (v: boolean) => void
+  setPanel: (kind: 'sidebar' | 'terminal', v: boolean) => void
   quit: () => void
 }
 
@@ -67,6 +69,19 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
         type: 'checkbox',
         checked: s.notifications,
         click: (item) => deps.setNotifications(item.checked),
+      },
+      { type: 'separator' },
+      {
+        label: '显示仪表盘',
+        type: 'checkbox',
+        checked: s.panel.sidebar,
+        click: (item) => deps.setPanel('sidebar', item.checked),
+      },
+      {
+        label: '显示终端',
+        type: 'checkbox',
+        checked: s.panel.term,
+        click: (item) => deps.setPanel('terminal', item.checked),
       },
       { type: 'separator' },
       { label: '退出', click: () => deps.quit() },

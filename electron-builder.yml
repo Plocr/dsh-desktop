@@ -11,6 +11,7 @@ files:
   - resources/profile-template/**
   - resources/shell-pages/**
   - resources/bridge/**
+  - resources/panel-dist/**
   - resources/icons/**
   - package.json
 
