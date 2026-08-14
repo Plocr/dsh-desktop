@@ -62,8 +62,36 @@ export function createWindow(
   const MIN_LOADING_MS = 900
   let loadingShownAt = 0
 
+  // 主题兜底 CSS：harness 页面在 JS 渲染前 body 是白的（深色主题下会闪白屏）。
+  // insertCSS 注入的 !important 让加载期即保持主题底色；
+  // harness dom-ready（其 boot theme 已应用）后 removeInsertedCSS 移除。
+  let themeBootKey: string | null = null
+
+  const applyThemeBoot = (theme: 'light' | 'dark'): void => {
+    if (win.isDestroyed()) return
+    const css =
+      theme === 'dark'
+        ? 'html, body { background: #151517 !important; color: #f9fafb !important; }'
+        : 'html, body { background: #ffffff !important; color: #0f1115 !important; }'
+    void win.webContents
+      .insertCSS(css)
+      .then((key) => {
+        themeBootKey = key
+      })
+      .catch(() => {})
+  }
+
+  const removeThemeBoot = (): void => {
+    if (!themeBootKey || win.isDestroyed()) return
+    const key = themeBootKey
+    themeBootKey = null
+    void win.webContents.removeInsertedCSS(key).catch(() => {})
+  }
+
   const loadURL = (url: string): void => {
     if (win.isDestroyed()) return
+    // harness 页面 DOM 就绪（boot theme 已应用）后移除兜底
+    win.webContents.once('dom-ready', () => removeThemeBoot())
     void win.loadURL(url).catch((err) => {
       showError(`加载 ${url} 失败: ${err instanceof Error ? err.message : String(err)}`)
     })
@@ -95,6 +123,8 @@ export function createWindow(
   const showLoading = (state?: string, themeArg?: 'light' | 'dark'): void => {
     if (win.isDestroyed()) return
     loadingShownAt = Date.now()
+    // 注入主题兜底（跨导航保留，防 harness 加载期白屏）
+    applyThemeBoot(themeArg ?? theme)
     const query: Record<string, string> = {}
     if (state) query.state = state
     if (themeArg) query.theme = themeArg
