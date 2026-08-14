@@ -35,6 +35,13 @@ app.setAppUserModelId('com.dsh.desktop.workbench')
 // 本地地址绕过系统代理（electron-updater/Chromium net 走系统代理时会劫持 127.0.0.1 请求）
 app.commandLine.appendSwitch('proxy-bypass-list', '127.0.0.1;localhost;<local>')
 
+// 【调试】验证导航黑帧是否由深色系统占位背景引起
+if (process.env.DSH_DEBUG_THEME_SOURCE) {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { nativeTheme } = require('electron') as typeof import('electron')
+  nativeTheme.themeSource = process.env.DSH_DEBUG_THEME_SOURCE as 'light' | 'dark'
+}
+
 let win: WindowHandle | null = null
 let trayHandle: TrayHandle | null = null
 let harness: HarnessManager

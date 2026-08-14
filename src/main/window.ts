@@ -2,7 +2,7 @@
  * 主窗口：加载 harness Web UI（http://127.0.0.1:<port>），
  * 内置 loading/error 过渡页；导航锁 + 外链拦截。
  */
-import { BrowserWindow, shell } from 'electron'
+import { BrowserWindow, nativeTheme, shell } from 'electron'
 import path from 'node:path'
 import { THEME_COLORS } from './theme'
 
@@ -90,8 +90,15 @@ export function createWindow(
 
   const loadURL = (url: string): void => {
     if (win.isDestroyed()) return
-    // 新文档就绪后注入兜底（覆盖插件加载期；变量被 harness 激活后自动让位）
-    win.webContents.once('dom-ready', () => applyThemeBoot())
+    // 导航间隙 Chromium 的占位帧跟随系统深色（深色系统 + 浅色主题 → 闪黑）。
+    // 导航期间把 themeSource 对齐有效主题（占位帧同色），新文档就绪后恢复 system。
+    const prevSource = nativeTheme.themeSource
+    nativeTheme.themeSource = currentBootTheme
+    win.webContents.once('dom-ready', () => {
+      nativeTheme.themeSource = prevSource
+      // 注入兜底变量（覆盖插件加载期；harness 激活后自动让位）
+      applyThemeBoot()
+    })
     void win.loadURL(url).catch((err) => {
       showError(`加载 ${url} 失败: ${err instanceof Error ? err.message : String(err)}`)
     })
