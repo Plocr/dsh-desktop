@@ -42,6 +42,11 @@ export function resolveEffectiveTheme(dshHome: string): 'light' | 'dark' {
   return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
 }
 
+/** 原始偏好（含 system），供壳驱动 nativeTheme.themeSource。 */
+export function resolveThemePreference(dshHome: string): ThemePreference {
+  return readHarnessThemePreference(dshHome) ?? 'system'
+}
+
 /** 与 harness 深色主题一致的色值（实测：背景 rgb(21,21,23)，文字 rgb(249,250,251)）。 */
 export const THEME_COLORS = {
   light: { bg: '#ffffff', ink: '#0f1115', sub: '#6b7280' },

@@ -9,8 +9,8 @@ import { THEME_COLORS } from './theme'
 export interface WindowHandle {
   win: BrowserWindow
   loadApp: (url: string) => void
-  showLoading: (state?: string, theme?: 'light' | 'dark') => void
-  showError: (msg: string, theme?: 'light' | 'dark') => void
+  showLoading: (state?: string, theme?: 'light' | 'dark' | 'system') => void
+  showError: (msg: string, theme?: 'light' | 'dark' | 'system') => void
 }
 
 export function createWindow(
@@ -65,18 +65,31 @@ export function createWindow(
   // 主题兜底 CSS：harness 的插件加载界面（"HARNESS / Loading plugins…"）颜色
   // 全部走 var(--dsw-alias-*, fallback)，插件树激活前变量未定义 → fallback 近白。
   // 在 :root 定义兜底变量（不带 !important）：boot 期间生效（深色/浅色），
-  // harness 激活后在 body 上定义同名变量（更近祖先）自动覆盖——无需移除，
-  // 也不影响运行中切换主题。
-  // insertCSS 不跨导航保留 → 在 harness 文档 dom-ready 时（重新）注入，
-  // 覆盖整个插件加载期（白屏主体）。
-  let currentBootTheme: 'light' | 'dark' = theme
+  // harness 激活后在 body 上定义同名变量（更近祖先）自动覆盖——无需移除。
+  // insertCSS 不跨导航保留 → 在 harness 文档 dom-ready 时（重新）注入。
+  //
+  // nativeTheme.themeSource 持久设为壳解析的有效主题：
+  //  - harness 的 client 端设置同步在某些组合下回退 system（其 ui-theme 读不到
+  //    显式偏好），而 system 解析依赖 prefers-color-scheme（= themeSource）；
+  //  - 由壳按 settings.yaml 的 preference 驱动 themeSource，显式 light/dark
+  //    重启后与 harness 一致，system 时 themeSource=system 跟随系统。
+  //  - 副作用：原生标题栏颜色跟随有效主题（浅色主题→浅色标题栏，符合预期）。
+  let currentBootTheme: 'light' | 'dark' | 'system' = theme
 
-  const applyThemeBoot = (themeArg?: 'light' | 'dark'): void => {
+  const applyThemeBoot = (themeArg?: 'light' | 'dark' | 'system'): void => {
     if (win.isDestroyed()) return
-    const t = themeArg ?? currentBootTheme
-    currentBootTheme = t
+    const pref = themeArg ?? currentBootTheme
+    currentBootTheme = pref
+    // effective：system → 跟随系统当前状态
+    const effective: 'light' | 'dark' = pref === 'system' ? (nativeTheme.shouldUseDarkColors ? 'dark' : 'light') : pref
+    // themeSource：system 偏好保持 'system'（实时跟随系统）；显式偏好锁定
+    try {
+      nativeTheme.themeSource = pref
+    } catch {
+      /* ignore */
+    }
     const css =
-      t === 'dark'
+      effective === 'dark'
         ? [
             ':root{--dsw-alias-bg-base:#151517;--dsw-alias-label-primary:#f9fafb;--dsw-alias-label-tertiary:#9aa0a6;--dsw-alias-border-l2:rgb(255 255 255 / 14%);--dsw-alias-brand-primary:#4d7cfe;}',
             'html,body{background:#151517;color:#f9fafb;}',
@@ -90,15 +103,8 @@ export function createWindow(
 
   const loadURL = (url: string): void => {
     if (win.isDestroyed()) return
-    // 导航间隙 Chromium 的占位帧跟随系统深色（深色系统 + 浅色主题 → 闪黑）。
-    // 导航期间把 themeSource 对齐有效主题（占位帧同色），新文档就绪后恢复 system。
-    const prevSource = nativeTheme.themeSource
-    nativeTheme.themeSource = currentBootTheme
-    win.webContents.once('dom-ready', () => {
-      nativeTheme.themeSource = prevSource
-      // 注入兜底变量（覆盖插件加载期；harness 激活后自动让位）
-      applyThemeBoot()
-    })
+    // 导航间隙占位帧颜色随 themeSource（已持久设为有效主题）→ 无黑/白闪
+    win.webContents.once('dom-ready', () => applyThemeBoot())
     void win.loadURL(url).catch((err) => {
       showError(`加载 ${url} 失败: ${err instanceof Error ? err.message : String(err)}`)
     })
@@ -127,7 +133,7 @@ export function createWindow(
     }
   }
 
-  const showLoading = (state?: string, themeArg?: 'light' | 'dark'): void => {
+  const showLoading = (state?: string, themeArg?: 'light' | 'dark' | 'system'): void => {
     if (win.isDestroyed()) return
     loadingShownAt = Date.now()
     // 记录/注入当前主题（dom-ready 时会再次注入到 harness 文档）
@@ -135,14 +141,14 @@ export function createWindow(
     applyThemeBoot()
     const query: Record<string, string> = {}
     if (state) query.state = state
-    if (themeArg) query.theme = themeArg
+    if (themeArg === 'light' || themeArg === 'dark') query.theme = themeArg
     void win.loadFile(loadingPage, { query })
   }
 
-  const showError = (msg: string, themeArg?: 'light' | 'dark'): void => {
+  const showError = (msg: string, themeArg?: 'light' | 'dark' | 'system'): void => {
     if (win.isDestroyed()) return
     const query: Record<string, string> = { msg }
-    if (themeArg) query.theme = themeArg
+    if (themeArg === 'light' || themeArg === 'dark') query.theme = themeArg
     void win.loadFile(errorPage, { query })
   }
 
