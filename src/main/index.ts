@@ -114,11 +114,13 @@ function pushLogs(): void {
   }, 300)
 }
 
-/** 面板 hello：补发日志全量基线（避免订阅前的启动日志丢失）。 */
-function sendLogBacklog(): void {
+/** 面板 hello：补发全量基线（state/layout/日志）——面板 boot 可能晚于 dom-ready 推送。 */
+function sendPanelBaseline(): void {
   if (!uiReady()) return
   const w = win?.win
   if (!w || w.isDestroyed()) return
+  w.webContents.send('dsh:dash:state', dash.toSnapshot())
+  w.webContents.send('dsh:dash:layout', panelLayout())
   const lines = dash.logs.all
   if (lines.length > 0) w.webContents.send('dsh:dash:log', { sync: true, lines })
 }
@@ -576,7 +578,7 @@ async function main(): Promise<void> {
     toggleTerminal,
     setSidebarWidth,
     setTerminalHeight,
-    sendLogBacklog,
+    sendPanelBaseline,
   })
 
   // dsh:// 协议 + 全局快捷键 + 自动更新

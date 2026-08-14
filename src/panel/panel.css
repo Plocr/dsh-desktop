@@ -401,37 +401,63 @@ html[data-dshd-sidebar="0"] #dshd-root {
 }
 #dshd-foot-badge { color: var(--dsw-alias-label-secondary, #61666b); }
 
-/* 折叠后的右缘竖条 */
+/* 折叠后的右侧 rail（harness 折叠侧边栏同款设计语言：全高窄栏 + 图标按钮） */
 #dshd-tab {
   position: fixed;
-  top: 96px;
+  top: 0;
   right: 0;
-  width: 16px;
-  height: 56px;
+  bottom: 0;
+  width: 44px;
   z-index: 999998;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 4px;
-  cursor: pointer;
-  background: var(--dsw-alias-bg-layer-1, #ffffff);
-  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
-  border-right: none;
-  border-radius: 8px 0 0 8px;
-  box-shadow: -4px 0 12px rgba(0, 0, 0, 0.05);
+  gap: 6px;
+  padding-top: 8px;
+  box-sizing: border-box;
+  background: var(--dsw-specific-sidebar-fill, #f9fafb);
+  border-left: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
   transition: transform var(--ds-transition-duration-slow, 0.3s) var(--ds-ease-in-out, cubic-bezier(0.4, 0, 0.2, 1));
 }
-#dshd-tab:hover { background: var(--dsw-alias-interactive-bg-hover-solid, rgba(38, 49, 72, 0.14)); }
-#dshd-tab .dshd-whale { width: 13px; }
+html[data-dshd-sidebar="1"] #dshd-tab { transform: translateX(102%); }
+
+.dshd-rail-btn {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #61666b);
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.dshd-rail-btn:hover {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06));
+  color: var(--dsw-alias-label-primary, #0f1115);
+}
+.dshd-rail-btn[data-active] {
+  background: var(--dsw-alias-interactive-bg-hover-solid, rgba(38, 49, 72, 0.14));
+  color: var(--dsw-alias-label-primary, #0f1115);
+}
 #dshd-tab-badge {
+  position: absolute;
+  top: 5px;
+  right: 5px;
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--dsw-alias-state-business-primary, #4176e6);
   animation: dshdPulse 1.6s ease-in-out infinite;
 }
-html[data-dshd-sidebar="1"] #dshd-tab { transform: translateX(100%); }
+
+/* rail 展开时让位：折叠态预留 rail 宽度，内容不被遮挡 */
+html[data-dshd-sidebar="0"] #root {
+  padding-right: 44px;
+}
 
 /* ── 底栏终端 ───────────────────────────────────────────────────────── */
 

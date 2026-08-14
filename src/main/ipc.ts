@@ -24,8 +24,8 @@ export interface IpcDeps {
   toggleTerminal: () => void
   setSidebarWidth: (w: number) => void
   setTerminalHeight: (h: number) => void
-  /** hello 时向面板补发日志全量基线（sync 批）。 */
-  sendLogBacklog: () => void
+  /** hello 时向面板补发全量基线（state + layout + 日志 sync 批）。 */
+  sendPanelBaseline: () => void
 }
 
 /** 校验调用来自工作台窗口主 frame（防 harness 页内其他 frame/注入滥用）。 */
@@ -81,8 +81,8 @@ export function registerIpc(deps: IpcDeps): void {
     if (typeof action !== 'string') return { ok: false, error: 'bad action' }
     switch (action) {
       case 'hello':
-        // 面板就绪：补发日志基线（快照/布局由主进程在 dom-ready 时推送）
-        deps.sendLogBacklog()
+        // 面板就绪（可能晚于 dom-ready 推送）：补发 state/layout/日志基线
+        deps.sendPanelBaseline()
         return { ok: true }
       case 'toggleSidebar':
         deps.toggleSidebar()

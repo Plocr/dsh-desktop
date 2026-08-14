@@ -134,9 +134,20 @@ const SHELL_HTML = `
     <span id="dshd-foot-state">—</span>
   </div>
 </div>
-<div id="dshd-tab" title="展开仪表盘（Ctrl+Shift+.）">
-  <svg class="dshd-whale" viewBox="0 0 24 18" aria-hidden="true"><path d="${WHALE_PATH}"/></svg>
-  <span id="dshd-tab-badge" hidden></span>
+<div id="dshd-tab" aria-label="DSH Desktop 面板（已折叠）">
+  <button type="button" id="dshd-tab-dash" class="dshd-rail-btn" title="展开仪表盘（Ctrl+Shift+.）">
+    <svg width="18" height="18" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <g transform="translate(16,0) scale(-1,1)">
+        <path fill-rule="evenodd" clip-rule="evenodd" d="M9.67272 0.522841C10.8339 0.522841 11.76 0.522714 12.4963 0.602493C13.2453 0.683657 13.8789 0.854248 14.4264 1.25197C14.7504 1.48739 15.0355 1.77247 15.2709 2.0965C15.6686 2.64394 15.8392 3.27758 15.9204 4.02655C16.0002 4.7629 16 5.68895 16 6.85014V9.14986C16 10.3111 16.0002 11.2371 15.9204 11.9735C15.8392 12.7224 15.6686 13.3561 15.2709 13.9035C15.0355 14.2275 14.7504 14.5126 14.4264 14.748C13.8789 15.1458 13.2453 15.3163 12.4963 15.3975C11.76 15.4773 10.8339 15.4772 9.67272 15.4772H6.3273C5.16611 15.4772 4.24006 15.4773 3.50371 15.3975C2.75474 15.3163 2.1211 15.1458 1.57366 14.748C1.24963 14.5126 0.964549 14.2275 0.729131 13.9035C0.331407 13.3561 0.160817 12.7224 0.0796529 11.9735C-0.000126137 11.2371 1.25338e-09 10.3111 1.25338e-09 9.14986V6.85014C1.25329e-09 5.68895 -0.000126137 4.7629 0.0796529 4.02655C0.160817 3.27758 0.331407 2.64394 0.729131 2.0965C0.964549 1.77247 1.24963 1.48739 1.57366 1.25197C2.1211 0.854248 2.75474 0.683657 3.50371 0.602493C4.24006 0.522714 5.16611 0.522841 6.3273 0.522841H9.67272ZM5.54303 1.88715V14.1118C5.78636 14.1128 6.04709 14.1169 6.3273 14.1169H9.67272C10.8639 14.1169 11.7032 14.1164 12.3493 14.0465C12.9824 13.9779 13.3497 13.8494 13.6268 13.6482C13.8354 13.4966 14.0195 13.3125 14.1711 13.1039C14.3723 12.8268 14.5007 12.4595 14.5693 11.8264C14.6393 11.1803 14.6398 10.341 14.6398 9.14986V6.85014C14.6398 5.65896 14.6393 4.81967 14.5693 4.1736C14.5007 3.54048 14.3723 3.17318 14.1711 2.89609C14.0195 2.68747 13.8354 2.50337 13.6268 2.35179C13.3497 2.1506 12.9824 2.02212 12.3493 1.95353C11.7032 1.88358 10.8639 1.88307 9.67272 1.88307H6.3273C6.04709 1.88307 5.78636 1.8862 5.54303 1.88715ZM4.1828 1.91166C3.99125 1.9216 3.8148 1.93577 3.65076 1.95353C3.01764 2.02212 2.65034 2.1506 2.37325 2.35179C2.16463 2.50337 1.98052 2.68747 1.82895 2.89609C1.62776 3.17318 1.49928 3.54048 1.43069 4.1736C1.36074 4.81967 1.36023 5.65896 1.36023 6.85014V9.14986C1.36023 10.341 1.36074 11.1803 1.43069 11.8264C1.49928 12.4595 1.62776 12.8268 1.82895 13.1039C1.98052 13.3125 2.16463 13.4966 2.37325 13.6482C2.65034 13.8494 3.01764 13.9779 3.65076 14.0465C3.81478 14.0642 3.99127 14.0774 4.1828 14.0873V1.91166Z" fill="currentColor"></path>
+      </g>
+    </svg>
+    <span id="dshd-tab-badge" hidden></span>
+  </button>
+  <button type="button" id="dshd-tab-term" class="dshd-rail-btn" title="显示终端（Ctrl+Shift+\`）">
+    <svg width="18" height="18" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M2 1.5A1.5 1.5 0 0 0 .5 3v10A1.5 1.5 0 0 0 2 14.5h12a1.5 1.5 0 0 0 1.5-1.5V3A1.5 1.5 0 0 0 14 1.5H2Zm0 1.05h12a.45.45 0 0 1 .45.45v10a.45.45 0 0 1-.45.45H2a.45.45 0 0 1-.45-.45V3A.45.45 0 0 1 2 2.55Zm2.4 2.85a.55.55 0 0 0-.78.78l1.9 1.9-1.9 1.9a.55.55 0 1 0 .78.78l2.3-2.3a.55.55 0 0 0 0-.78l-2.28-2.28Zm3.7 4.5h3.3a.55.55 0 0 0 0-1.1H8.1a.55.55 0 1 0 0 1.1Z" fill="currentColor"></path>
+    </svg>
+  </button>
 </div>
 <div id="dshd-term" aria-label="DSH Desktop 终端">
   <div id="dshd-term-resize" title="拖拽调整高度"></div>
@@ -336,6 +347,12 @@ function renderFoot(): void {
   if (st) st.textContent = HARNESS_STATE_TEXT[s.harness.state] ?? s.harness.state
 }
 
+/** rail 上仪表盘按钮的运行任务角标（有运行任务时亮蓝点）。 */
+function renderTabBadge(): void {
+  const b = $('#dshd-tab-badge')
+  if (b) b.hidden = !(state.snap && state.snap.badge > 0)
+}
+
 function renderAll(): void {
   renderDot()
   renderRuntime()
@@ -343,6 +360,7 @@ function renderAll(): void {
   renderSessions()
   renderApprovals()
   renderFoot()
+  renderTabBadge()
 }
 
 /* ── DOM 探测兜底（桥接离线时，2s 轮询） ─────────────────────────────── */
@@ -421,8 +439,9 @@ function applyLayout(): void {
   root.dataset.dshdTerm = l.term ? '1' : '0'
   const term = $('#dshd-term')
   if (term) term.dataset.open = l.term ? '1' : '0'
-  const tab = $('#dshd-tab')
-  if (tab) tab.hidden = l.sidebar
+  // rail 展开/折叠由 CSS transform 驱动（保留滑动动画），不设 hidden
+  // rail 上终端按钮的激活态（终端打开时高亮）
+  $('#dshd-tab-term')?.toggleAttribute('data-active', l.term)
   if (l.term && !state.termBooted) bootTerm()
 }
 
@@ -472,7 +491,8 @@ function subscribe(): void {
 
 function wireEvents(): void {
   $('#dshd-collapse')?.addEventListener('click', toggleSidebar)
-  $('#dshd-tab')?.addEventListener('click', toggleSidebar)
+  $('#dshd-tab-dash')?.addEventListener('click', toggleSidebar)
+  $('#dshd-tab-term')?.addEventListener('click', toggleTerm)
   $('#dshd-log-pause')?.addEventListener('click', () => {
     state.logAuto = !state.logAuto
     const btn = $('#dshd-log-pause')

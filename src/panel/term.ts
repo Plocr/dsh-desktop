@@ -85,8 +85,12 @@ function boot(): void {
   fit(term, host)
 
   term.onData((data) => void api.termWrite(data))
+  // 主进程回流：shell 输出 → xterm
   api.onTermData((data) => term.write(data))
+  // 会话死亡标记：✕ 关闭/进程退出后，面板再次展开时自动重开
+  let sessionDead = false
   api.onTermExit((info) => {
+    sessionDead = true
     const overlay = document.getElementById('dshd-term-overlay')
     if (overlay) {
       overlay.hidden = false
@@ -110,6 +114,13 @@ function boot(): void {
       }
     })
   }
+  // 面板收起→展开时：若会话已死亡则自动重开（存活则保持现状）
+  api.onDashboardLayout((l) => {
+    if (l.term && sessionDead) {
+      sessionDead = false
+      openSession()
+    }
+  })
   openSession()
 
   // ✕ = 真正关闭会话并收起面板；＋/tab = 重开（新会话）
