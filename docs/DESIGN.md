@@ -110,11 +110,12 @@ cordis.patch.yml  []（用户补丁层，壳不写它）
 启动/重启/崩溃恢复时的过渡页，以 [DeepSeek 官网](https://www.deepseek.com/harness/) 背景的**粒子鲸鱼**为视觉母题（自研实现，非复制官网代码）：
 
 - 鲸鱼剪影：官网品牌素材 `hero-whale.svg`（24×18 viewBox）的 path 存于 `whale-path.txt`，经 `scripts/inject-whale.mjs` 注入模板 `loading.template.html` 生成 `loading.html`（`__WHALE_PATH__` 占位符）。
-- 渲染：SVG → data URI → 离屏 canvas（480×360）→ `getImageData` 像素采样（alpha>128，步长 4）→ 归一化目标点；1100 个弹性粒子从随机位置飞向目标。
-- 动画：速度积分 + 阻尼弹簧（k=0.014, damp=0.90）；整体呼吸缩放（sin 2.6s ±2.2%）；逐粒子相位游动（1.7s）；亮度闪烁（0.9s）；半透明拖尾（rgba 背景 0.30）形成光带。
-- 分层：清晰 canvas + blur(18px) 光晕复制层（`drawImage` 每帧），还原官网"粒子 + 光晕"质感；品牌蓝渐变 + 8% 白粒点缀。
-- 工程细节：DPR 上限 2；`visibilitychange` 隐藏时暂停 rAF（省电）；`?state=` 状态文字；采样失败退化纯文字；CSP 收紧（`script-src 'unsafe-inline'`，无网络依赖）。
-- 验证（CDP 实测）：无 JS 错误；1100 粒子 + 5800+ 发光像素；三次像素 hash 全不同（动画帧持续变化）；真实重启流程中窗口 URL 确认切至 `loading.html?state=…` 并自动恢复。
+- 渲染：SVG → data URI → 离屏 canvas（480×360）→ `getImageData` 像素采样（alpha>128，步长 4）→ 归一化目标点；900 个弹性粒子从鲸鱼下方升起、淡入聚合。
+- 动画：速度积分 + 阻尼弹簧（k=0.014, damp=0.90）；整体呼吸缩放（sin 2.6s ±2.2%）；逐粒子相位游动（1.7s）；亮度闪烁（0.9s）；半透明拖尾（rgba 背景 0.16）形成光带。
+- 分层：清晰 canvas + blur(18px) 光晕复制层（`drawImage` 每帧），还原官网"粒子 + 光晕"质感；品牌蓝渐变 + 8% 白粒点缀；**双层绘制**（大而淡的光晕圆 + 小而亮的核）替代 shadowBlur。
+- 工程细节：DPR 上限 2；`visibilitychange` 隐藏时暂停 rAF、恢复时**无条件重新调度**（schedule/step 单链模式，避免"初始 hidden 后 rAF 永不恢复"）；`?state=` 状态文字；采样失败退化纯文字；CSP 收紧（`script-src 'unsafe-inline'`，无网络依赖）。
+- 实测修复（用户反馈"矩形粒子"）：采样前误填不透明黑底导致 alpha 阈值把背景也采为目标点（10800 点铺满全画布）——改为透明底采样后，ASCII 渲染目标点呈清晰鲸鱼剪影（头部/鱼眼/身体/分叉尾鳍）。
+- 验证（CDP 实测）：目标点包围盒回到鲸鱼形状（spanX≈0.93 / spanY≈0.86）；无 JS 错误；帧计数增长（动画循环存活，遮挡时被 Chromium 节流属正常省电）；真实重启流程中窗口 URL 确认切至 `loading.html?state=…` 并自动恢复。
 | `tray.ts` | 显示窗口/浏览器版/切换工作区/重启 Harness/查看日志/开机自启/通知开关/退出 |
 | `notify.ts` | 系统通知 + `app.setBadgeCount` 徽标 |
 | `ipc.ts` | 壳页面白名单（pickWorkspace/revealInFolder/openExternal/restartHarness/openLogs/getInfo） |

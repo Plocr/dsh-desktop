@@ -43,7 +43,6 @@ const BG = [14, 17, 22]
 const BLUE_A = [77, 124, 255]
 const BLUE_B = [122, 160, 255]
 const WHITE = [232, 240, 255]
-const MAX_PARTICLES = 1100
 
 const main = document.getElementById('whale')
 const glow = document.getElementById('glow')
@@ -68,7 +67,9 @@ function resize() {
 }
 window.addEventListener('resize', resize)
 
-/* ── SVG 像素采样 ── */
+/* ── SVG 像素采样 ──
+   注意：离屏画布必须保持透明背景（不能预填不透明色），
+   否则 alpha>阈值 会把背景也算进目标点，粒子铺满整个矩形。 */
 async function sampleTargets() {
   const img = new Image()
   img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(WHALE_SVG)
@@ -77,15 +78,14 @@ async function sampleTargets() {
   off.width = 480
   off.height = 360
   const octx = off.getContext('2d', { willReadFrequently: true })
-  octx.fillStyle = '#000'
-  octx.fillRect(0, 0, 480, 360)
   octx.drawImage(img, 0, 0, 480, 360)
   const data = octx.getImageData(0, 0, 480, 360).data
   const pts = []
   const step = 4
   for (let y = 0; y < 360; y += step) {
     for (let x = 0; x < 480; x += step) {
-      if (data[(y * 480 + x) * 4 + 3] > 128) pts.push({ x: x / 480, y: y / 360 })
+      const a = data[(y * 480 + x) * 4 + 3]
+      if (a > 128) pts.push({ x: x / 480, y: y / 360 })
     }
   }
   return pts
@@ -93,18 +93,22 @@ async function sampleTargets() {
 
 /* ── 粒子 ── */
 function makeParticles() {
-  const count = Math.max(320, Math.min(targets.length, MAX_PARTICLES))
+  const count = Math.max(360, Math.min(targets.length, 900))
   particles = []
   for (let i = 0; i < count; i++) {
     const tp = targets[(Math.random() * targets.length) | 0]
+    // 起点：从鲸鱼水平范围下方升起（而非全屏乱飞）
+    const startX = Math.min(W - 4, Math.max(4, (tp.x - 0.5) * Math.min(W * 0.96, 460) + W / 2 + (Math.random() - 0.5) * W * 0.16))
     particles.push({
       tx: tp.x, ty: tp.y,
-      x: Math.random() * W, y: Math.random() * H,
+      x: startX,
+      y: H + 30 + Math.random() * H * 0.5,
       vx: 0, vy: 0,
       phase: Math.random() * Math.PI * 2,
-      size: 1 + Math.random() * 1.5,
-      alpha: 0.45 + Math.random() * 0.5,
+      size: 0.7 + Math.random() * 1.6,
+      alpha: 0.5 + Math.random() * 0.5,
       white: Math.random() < 0.08,
+      born: performance.now() + Math.random() * 1200, // 错峰上浮
     })
   }
 }
@@ -123,18 +127,20 @@ function targetFor(p, t) {
   }
 }
 
-function colorOf(p, t) {
-  const c = p.white ? WHITE : (Math.random() < 0.5 ? BLUE_A : BLUE_B)
-  const shimmer = 0.75 + 0.25 * Math.sin(t / 900 + p.phase)
-  return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (p.alpha * shimmer).toFixed(3) + ')'
-}
-
 let last = 0
-function frame(now) {
+let rafId = null
+/* 标准 rAF 管理：running 为逻辑开关，rafId 保证单链；
+   hidden 时 rAF 被浏览器暂停，visible 后必须重新调度（不能因 running 已 true 而跳过）。 */
+function schedule() {
+  if (rafId === null && running) rafId = requestAnimationFrame(step)
+}
+function step(now) {
+  rafId = null
   if (!running) return
+  window.__frames = (window.__frames || 0) + 1 // 帧计数钩子（验证用）
   const t = now
-  // 半透明拖尾清屏
-  ctx.fillStyle = 'rgba(14,17,22,0.30)'
+  // 半透明拖尾清屏（数值低一点，让鲸鱼形状更清晰）
+  ctx.fillStyle = 'rgba(14,17,22,0.16)'
   ctx.fillRect(0, 0, W, H)
   for (const p of particles) {
     const g = targetFor(p, t)
@@ -145,20 +151,34 @@ function frame(now) {
     p.vy *= 0.90
     p.x += p.vx
     p.y += p.vy
+    // 淡入：粒子出生后 1.6s 内 alpha 从 0 增长（错峰升起、汇聚成鲸鱼）
+    const fade = Math.min(1, (t - p.born) / 1600)
+    if (fade <= 0) continue
+    const a = (p.alpha * fade).toFixed(3)
+    const c = p.white ? WHITE : (Math.random() < 0.5 ? BLUE_A : BLUE_B)
+    const shimmer = 0.75 + 0.25 * Math.sin(t / 900 + p.phase)
+    // 双层绘制：大而淡的光晕 + 小而亮的核心（星云质感，替代 shadowBlur）
     ctx.beginPath()
-    ctx.fillStyle = colorOf(p, t)
+    ctx.fillStyle = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (a * 0.16 * shimmer).toFixed(3) + ')'
+    ctx.arc(p.x, p.y, p.size * 3, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.beginPath()
+    ctx.fillStyle = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (a * shimmer).toFixed(3) + ')'
     ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2)
     ctx.fill()
   }
   // 光晕层：复制主画面 + CSS blur
   gctx.clearRect(0, 0, W, H)
   gctx.drawImage(main, 0, 0, W, H)
-  requestAnimationFrame(frame)
+  schedule()
 }
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) running = false
-  else if (!running) { running = true; requestAnimationFrame(frame) }
+  else {
+    running = true
+    schedule() // hidden 期间 rAF 被暂停，恢复后必须重新调度
+  }
 })
 
 /* ── 启动 ── */
@@ -175,7 +195,7 @@ sampleTargets().then((pts) => {
   window.__targets = targets
   window.__particles = particles
   window.__running = () => running
-  requestAnimationFrame(frame)
+  schedule()
 }).catch(() => {
   // 采样失败（极端环境）：退化为纯文字
   document.querySelector('.whale-wrap').style.display = 'none'
