@@ -25,7 +25,7 @@ export function createWindow(
     show: false,
     autoHideMenuBar: true,
     title: 'DSH Desktop',
-    backgroundColor: '#0e1116',
+    backgroundColor: '#ffffff', // 与加载页/工作台一致（避免绘制前闪深色）
     icon: path.join(resourcesDir, 'icons', 'icon.png'),
     webPreferences: {
       preload: preloadPath,
@@ -55,6 +55,10 @@ export function createWindow(
   const loadingPage = path.join(resourcesDir, 'shell-pages', 'loading.html')
   const errorPage = path.join(resourcesDir, 'shell-pages', 'error.html')
 
+  // 加载页最短显示时长：避免启动很快时 logo 一闪而过
+  const MIN_LOADING_MS = 900
+  let loadingShownAt = 0
+
   const loadURL = (url: string): void => {
     if (win.isDestroyed()) return
     void win.loadURL(url).catch((err) => {
@@ -64,20 +68,30 @@ export function createWindow(
 
   const loadApp = (url: string): void => {
     if (win.isDestroyed()) return
-    // 若当前在加载页（file://），先触发页面淡出，再切换——转场不突变
     const current = win.webContents.getURL()
-    if (current.startsWith('file://')) {
-      void win.webContents
-        .executeJavaScript(`window.__fadeOut ? window.__fadeOut() : Promise.resolve()`)
-        .then(() => loadURL(url))
-        .catch(() => loadURL(url))
+    const doSwitch = (): void => {
+      if (current.startsWith('file://')) {
+        // 加载页先淡出（0.35s），再切换——转场不突变
+        void win.webContents
+          .executeJavaScript(`window.__fadeOut ? window.__fadeOut() : Promise.resolve()`)
+          .then(() => loadURL(url))
+          .catch(() => loadURL(url))
+      } else {
+        loadURL(url)
+      }
+    }
+    // 保证加载页至少展示了 MIN_LOADING_MS（避免闪现）
+    const shownFor = Date.now() - loadingShownAt
+    if (loadingShownAt && shownFor < MIN_LOADING_MS) {
+      setTimeout(doSwitch, MIN_LOADING_MS - shownFor)
     } else {
-      loadURL(url)
+      doSwitch()
     }
   }
 
   const showLoading = (state?: string): void => {
     if (win.isDestroyed()) return
+    loadingShownAt = Date.now()
     void win.loadFile(loadingPage, state ? { query: { state } } : undefined)
   }
 

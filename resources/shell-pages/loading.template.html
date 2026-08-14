@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:;" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';" />
 <title>DSH Desktop</title>
 <style>
   html, body {
@@ -19,207 +19,56 @@
   @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
   /* 淡出由壳在 ready 时触发（window.__fadeOut） */
   .stage.fading { transition: opacity 0.35s ease; opacity: 0; }
-  .whale-wrap { position: relative; width: min(52vw, 380px); aspect-ratio: 4 / 3; }
-  canvas#glow {
-    position: absolute; inset: 0; width: 100%; height: 100%;
-    filter: blur(16px); opacity: 0.8;
+
+  /* 静态黑白鲸鱼 logo（官网品牌 path，fill 近黑），矢量直渲 */
+  .whale {
+    width: min(34vw, 260px);
+    aspect-ratio: 24 / 18;
+    animation: breathe 4s ease-in-out infinite;
   }
-  canvas#whale { position: absolute; inset: 0; width: 100%; height: 100%; }
-  .brand { margin-top: 14px; text-align: center; }
+  @keyframes breathe {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.015); }
+  }
+
+  .brand { margin-top: 16px; text-align: center; }
   .title { font-size: 15px; font-weight: 600; margin-bottom: 5px; letter-spacing: 0.2px; color: #0f1115; }
   .sub { font-size: 12px; color: #6b7280; }
+
+  /* 极简加载点（三个依次脉冲），保持页面有活动感 */
+  .dots { margin-top: 14px; display: flex; gap: 6px; justify-content: center; }
+  .dots span {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: #0f1115;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  .dots span:nth-child(2) { animation-delay: 0.15s; }
+  .dots span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.25; transform: translateY(0); }
+    50% { opacity: 1; transform: translateY(-2px); }
+  }
 </style>
 </head>
 <body>
   <div class="stage" id="stage">
-    <div class="whale-wrap">
-      <canvas id="glow"></canvas>
-      <canvas id="whale"></canvas>
-    </div>
+    <svg class="whale" viewBox="0 0 24 18" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="DeepSeek Harness">
+      <path d="__WHALE_PATH__" fill="#0f1115"></path>
+    </svg>
     <div class="brand">
       <div class="title">正在启动 DeepSeek Harness…</div>
       <div class="sub" id="sub">启动桌面工作台</div>
     </div>
+    <div class="dots"><span></span><span></span><span></span></div>
   </div>
 <script>
-/* 粒子鲸鱼加载动画：SVG 剪影像素采样 + 方块粒子 + 白色主题（与工作台一致）。
-   鲸鱼形状取自 DeepSeek 官网品牌素材（hero-whale.svg，viewBox 24x18）。 */
-const WHALE_PATH = "__WHALE_PATH__"
-const WHALE_SVG = '<svg width="24" height="18" viewBox="0 0 24 18" fill="black" xmlns="http://www.w3.org/2000/svg"><path d="' + WHALE_PATH + '"/></svg>'
-const ASPECT = 24 / 18
-const BG = [255, 255, 255]          // 与工作台 body 背景一致
-const INK_A = [15, 17, 21]          // 近黑（工作台正文色）
-const INK_B = [41, 66, 120]         // 深品牌蓝
-const ACCENT = [77, 124, 255]       // 品牌蓝（少量点缀）
-const MAX_PARTICLES = 900
-
-const main = document.getElementById('whale')
-const glow = document.getElementById('glow')
-const ctx = main.getContext('2d')
-const gctx = glow.getContext('2d')
-let W = 0, H = 0, DPR = 1
-let targets = []          // 归一化目标点 [{x, y}]
-let particles = []        // {tx, ty, x, y, vx, vy, phase, size, alpha, colorIdx}
-let running = false
-let rafId = null
-
-/* ── 尺寸 ── */
-function resize() {
-  DPR = Math.min(2, window.devicePixelRatio || 1)
-  W = main.clientWidth
-  H = main.clientHeight
-  for (const c of [main, glow]) {
-    c.width = Math.round(W * DPR)
-    c.height = Math.round(H * DPR)
-  }
-  ctx.setTransform(DPR, 0, 0, DPR, 0, 0)
-  gctx.setTransform(DPR, 0, 0, DPR, 0, 0)
-}
-window.addEventListener('resize', resize)
-
-/* ── SVG 像素采样（透明底，只取鲸鱼像素） ── */
-async function sampleTargets() {
-  const img = new Image()
-  img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(WHALE_SVG)
-  await img.decode()
-  const off = document.createElement('canvas')
-  off.width = 480
-  off.height = 360
-  const octx = off.getContext('2d', { willReadFrequently: true })
-  octx.drawImage(img, 0, 0, 480, 360)
-  const data = octx.getImageData(0, 0, 480, 360).data
-  const pts = []
-  const step = 4
-  for (let y = 0; y < 360; y += step) {
-    for (let x = 0; x < 480; x += step) {
-      const a = data[(y * 480 + x) * 4 + 3]
-      if (a > 128) pts.push({ x: x / 480, y: y / 360 })
-    }
-  }
-  return pts
-}
-
-/* ── 粒子：方块、颜色创建时固定（不再每帧随机） ── */
-function makeParticles() {
-  const count = Math.max(360, Math.min(targets.length, MAX_PARTICLES))
-  particles = []
-  for (let i = 0; i < count; i++) {
-    const tp = targets[(Math.random() * targets.length) | 0]
-    const startX = Math.min(W - 4, Math.max(4, (tp.x - 0.5) * Math.min(W * 0.96, 380) + W / 2 + (Math.random() - 0.5) * W * 0.16))
-    particles.push({
-      tx: tp.x, ty: tp.y,
-      x: startX,
-      y: H + 24 + Math.random() * H * 0.45,
-      vx: 0, vy: 0,
-      phase: Math.random() * Math.PI * 2,
-      size: 1.5 + Math.random() * 2.5,
-      alpha: 0.55 + Math.random() * 0.45,
-      colorIdx: Math.random() < 0.72 ? 0 : Math.random() < 0.6 ? 1 : 2, // 72% 近黑、其余深蓝/点缀
-      born: performance.now() + Math.random() * 1200,
-    })
-  }
-}
-
-/* 目标绘制坐标：wrap 正中（鲸鱼与文字整体垂直居中，顶部不再被遮） */
-function targetFor(p, t) {
-  const ww = W
-  const wh = H
-  const cx = W / 2
-  const cy = H / 2
-  const breathe = 1 + 0.015 * Math.sin(t / 3200)
-  const wob = 0.006 * Math.sin(t / 2100 + p.phase)
-  return {
-    x: cx + (p.tx - 0.5) * ww * breathe + wob * ww,
-    y: cy + (p.ty - 0.5) * wh * breathe,
-  }
-}
-
-const COLORS = [INK_A, INK_B, ACCENT]
-
-/* rAF 管理：单链；hidden 时浏览器暂停 rAF，visible 后必须重新调度 */
-function schedule() {
-  if (rafId === null && running) rafId = requestAnimationFrame(step)
-}
-function step(now) {
-  rafId = null
-  if (!running) return
-  window.__frames = (window.__frames || 0) + 1 // 帧计数钩子（验证用）
-  const t = now
-  // 白色拖尾（背景恒白，粒子运动留下浅色轨迹）
-  ctx.fillStyle = 'rgba(255,255,255,0.55)'
-  ctx.fillRect(0, 0, W, H)
-  const pulse = 0.9 + 0.1 * Math.sin(t / 4000) // 极缓全局脉动（取代高频闪烁）
-  for (const p of particles) {
-    const g = targetFor(p, t)
-    // 弹性趋近 + 接近锁定（消除跳动）
-    const dx = g.x - p.x
-    const dy = g.y - p.y
-    const dist2 = dx * dx + dy * dy
-    if (dist2 < 0.25) {
-      p.x = g.x
-      p.y = g.y
-      p.vx = 0
-      p.vy = 0
-    } else {
-      p.vx += dx * 0.02
-      p.vy += dy * 0.02
-      p.vx *= 0.88
-      p.vy *= 0.88
-      p.x += p.vx
-      p.y += p.vy
-    }
-    // 淡入：出生后 1.6s 内 alpha 从 0 增长
-    const fade = Math.min(1, (t - p.born) / 1600)
-    if (fade <= 0) continue
-    const c = COLORS[p.colorIdx]
-    const a = (p.alpha * fade * pulse).toFixed(3)
-    const s = p.size
-    // 双层方块：大而淡的方形光晕 + 小而实的核心（像素块）
-    ctx.fillStyle = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (a * 0.14).toFixed(3) + ')'
-    ctx.fillRect(p.x - s * 1.6, p.y - s * 1.6, s * 3.2, s * 3.2)
-    ctx.fillStyle = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'
-    ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s)
-  }
-  // 光晕层：复制主画面 + CSS blur
-  gctx.clearRect(0, 0, W, H)
-  gctx.drawImage(main, 0, 0, W, H)
-  schedule()
-}
-
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) running = false
-  else {
-    running = true
-    schedule()
-  }
-})
-
-/* 淡出钩子：壳在 ready 时调用，让加载页渐变淡出后再切到工作台 */
+/* 淡出钩子：壳在 ready 时调用，渐变淡出后再切到工作台 */
 window.__fadeOut = () =>
   new Promise((resolve) => {
     const stage = document.getElementById('stage')
     stage.classList.add('fading')
     setTimeout(resolve, 380)
   })
-
-/* ── 启动 ── */
-window.__errs = []
-window.addEventListener('error', (e) => window.__errs.push(String(e.message)))
-window.addEventListener('unhandledrejection', (e) => window.__errs.push('rejection: ' + String(e.reason)))
-
-resize()
-sampleTargets().then((pts) => {
-  targets = pts
-  makeParticles()
-  running = true
-  // 调试钩子（加载页验证用）
-  window.__targets = targets
-  window.__particles = particles
-  window.__running = () => running
-  schedule()
-}).catch(() => {
-  document.querySelector('.whale-wrap').style.display = 'none'
-})
 
 if (location.search) {
   const q = new URLSearchParams(location.search)
