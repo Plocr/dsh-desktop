@@ -32,7 +32,8 @@ dev 模式依赖全局 `@deepseek-ai/dsh`（或设置 `DSH_DESKTOP_DSH_BIN` 指�
 
 ```sh
 npm test                 # 事件逻辑单测（node --test）
-npm run build            # esbuild 构建 + bridge 复制到 resources/bridge
+npm run build            # esbuild 构建 + 面板（panel/term）+ bridge → resources/
+npm run rebuild:native   # node-pty 重编为 Electron ABI（需 VS Build Tools；postinstall 自动跑）
 npm run make:icons       # 生成应用图标（纯 JS）
 npm run setup:runtime    # 构建自包含运行时 resources/dsh-runtime
 npm run dist:win         # Windows NSIS 安装包（release/）
@@ -78,7 +79,7 @@ Electron 壳 ──spawn──▶ dsh --profile desktop --patch <overlay> --port
   - harness stdout（次）：启动/运行日志流 → 「活动流」面板（环形缓冲 300 行）；
   - DOM 轮询/兜底（常驻）：上下文圆环（已用/窗口 tokens + 构成明细）、会话指标（缓存命中/运行时间/轮·步/首 token/速率/输入·输出 tokens + **费用估算**，deepseek 定价表内置可更新）、桥接离线时的会话/任务近似统计（标注「桥接离线」）。
 - **布局（原生让位）**：面板/rail 为固定层 + `#root` padding 让位（展开右让位、折叠 56px、终端打开时内容上移——不覆盖 harness 内容与对话框）；折叠 rail 56px 全高对仗左侧（顶部面板图标按钮、底部终端开关按钮）；终端 `left` 跟随 harness 侧栏宽、右缘随面板/rail 宽，不覆盖左右侧边栏。
-- **底栏终端**：xterm.js + 管道后端（PowerShell/cmd/pwsh 可选 tab；`-NoProfile` 快速启动；就绪横幅；Ctrl+C 会话复位）。「⧉」在独立窗口打开完整 TTY 系统终端。管道模式无 TTY（vim/top 等交互程序不可用）；如需完整 TTY，设置环境变量 `DSH_DESKTOP_TERM=pty` 并在本机为 Electron ABI 构建 `node-pty`（预编译包仅覆盖 Node ABI，`npmRebuild: false` 不会自动重编）。
+- **底栏终端**：xterm.js + **node-pty（Windows winpty 模式）完整 TTY**——ANSI 颜色、方向键历史、vim/top 等交互程序可用，Ctrl+C 真实信号；**多会话 tabs**（reasonix/Codex 风格：新建/切换/关闭，PS/cmd/pwsh 快捷新建）；「⧉」独立窗口系统终端；`DSH_DESKTOP_TERM=pipe` 强制回落管道模式（零原生依赖、无 TTY）。node-pty 需为 Electron ABI 编译：`npm run rebuild:native`（需 VS Build Tools；postinstall 自动执行，失败自动回落管道后端）。
 - 面板资产随包分发（`resources/panel-dist`），主进程直接注入（`insertCSS` + `executeJavaScript`），不引入自定义协议。
 - dev 模式使用独立 userData（`%APPDATA%/dsh-desktop-dev`），与已安装版可并行运行（单实例锁隔离）。
 

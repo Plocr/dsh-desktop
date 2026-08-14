@@ -449,8 +449,10 @@ html[data-dshd-term="0"] #dshd-term { transform: translateY(102%); box-shadow: n
   height: 32px;
   padding: 0 8px;
   border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.04));
+  overflow: hidden;
 }
 .dshd-term-tab,
+.dshd-term-newshell,
 #dshd-term-new,
 #dshd-term-close,
 #dshd-term-ext {
@@ -464,18 +466,57 @@ html[data-dshd-term="0"] #dshd-term { transform: translateY(102%); box-shadow: n
   border-radius: 6px;
   cursor: pointer;
   font-family: var(--dsw-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+  white-space: nowrap;
 }
 .dshd-term-tab:hover,
+.dshd-term-newshell:hover,
 #dshd-term-new:hover,
 #dshd-term-close:hover,
 #dshd-term-ext:hover {
   background: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06));
   color: var(--dsw-alias-label-primary, #0f1115);
 }
-.dshd-term-tab[data-active] {
+.dshd-term-tab {
+  position: relative;
+  padding-right: 20px;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dshd-term-tab-active {
   background: var(--dsw-alias-interactive-bg-hover-solid, rgba(38, 49, 72, 0.14));
   color: var(--dsw-alias-label-primary, #0f1115);
 }
+.dshd-term-tab-x {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
+  line-height: 14px;
+  text-align: center;
+  border-radius: 4px;
+  font-size: 9px;
+  color: var(--dsw-alias-label-tertiary, #9aa0a6);
+}
+.dshd-term-tab-x:hover {
+  background: var(--dsw-alias-interactive-bg-hover-solid, rgba(38, 49, 72, 0.2));
+  color: var(--dsw-alias-label-primary, #0f1115);
+}
+.dshd-term-newshell {
+  font-weight: 600;
+  padding: 0 8px;
+}
+#dshd-term-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+#dshd-term-tabs::-webkit-scrollbar { display: none; }
 .dshd-term-spacer { flex: 1; }
 
 #dshd-term-xterm {
@@ -483,8 +524,15 @@ html[data-dshd-term="0"] #dshd-term { transform: translateY(102%); box-shadow: n
   min-height: 0;
   padding: 4px 8px;
   overflow: hidden;
+  position: relative;
 }
-#dshd-term-xterm .xterm { height: 100%; }
+.dshd-term-view {
+  position: absolute;
+  inset: 0;
+  padding: 4px 0;
+  overflow: hidden;
+}
+.dshd-term-view .xterm { height: 100%; }
 #dshd-term-overlay {
   position: absolute;
   inset: 32px 0 0 0;
@@ -494,6 +542,7 @@ html[data-dshd-term="0"] #dshd-term { transform: translateY(102%); box-shadow: n
   font-size: 12px;
   color: var(--dsw-alias-label-tertiary, #9aa0a6);
   background: var(--dsw-alias-bg-layer-1, #ffffff);
+  z-index: 1;
 }
 
 /* ── 上下文圆环 ─────────────────────────────────────────────────────── */

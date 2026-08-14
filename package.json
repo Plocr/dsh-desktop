@@ -13,15 +13,18 @@
     "link:dev": "node scripts/dev-link.mjs",
     "setup:runtime": "node scripts/setup-runtime.mjs",
     "make:icons": "node scripts/make-icons.mjs",
-    "dist:win": "node scripts/build.mjs && node scripts/make-icons.mjs && node scripts/setup-runtime.mjs && electron-builder --win nsis",
-    "dist:win:portable": "node scripts/build.mjs && node scripts/make-icons.mjs && node scripts/setup-runtime.mjs && electron-builder --win portable"
+    "rebuild:native": "node scripts/rebuild-native.mjs",
+    "dist:win": "node scripts/build.mjs && node scripts/rebuild-native.mjs && node scripts/make-icons.mjs && node scripts/setup-runtime.mjs && electron-builder --win nsis",
+    "dist:win:portable": "node scripts/build.mjs && node scripts/rebuild-native.mjs && node scripts/make-icons.mjs && node scripts/setup-runtime.mjs && electron-builder --win portable",
+    "postinstall": "node scripts/rebuild-native.mjs"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
     "@xterm/xterm": "^5.5.0",
-    "electron-updater": "^6.6.2"
+    "electron-updater": "^6.6.2",
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

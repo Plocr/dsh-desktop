@@ -1,6 +1,7 @@
 /**
- * DSH Desktop 底栏终端视图（xterm.js，lazy 加载）。
- * 数据经 preload IPC 与主进程 TerminalManager 互通（pipe/pty 双后端）。
+ * DSH Desktop 底栏终端视图（xterm.js，lazy 加载，多会话 tabs）。
+ * reasonix/Codex 风格：后端持有 tab 级进程所有权，前端按 id 分发数据；
+ * 每会话独立 xterm 实例（保留各自滚动缓冲），tab 切换显示/隐藏。
  * 主题色从 harness 令牌实时读取（三态主题切换自动换肤）。
  */
 import { Terminal } from '@xterm/xterm'
@@ -62,16 +63,95 @@ function fit(term: Terminal, host: HTMLElement): void {
   const rows = Math.max(3, Math.floor(host.clientHeight / h) - 1)
   if (cols !== term.cols || rows !== term.rows) {
     term.resize(cols, rows)
-    void api.termResize(cols, rows)
+    const view = term.element?.closest<HTMLElement>('.dshd-term-view')
+    const id = view?.dataset.id
+    if (id) void api.termResize(id, cols, rows)
   }
 }
 
-function boot(): void {
-  if (document.getElementById('dshd-term-xterm')?.dataset.dshdBooted) return
-  const host = document.getElementById('dshd-term-xterm')
-  if (!host) return
-  host.dataset.dshdBooted = '1'
+interface TermView {
+  id: string
+  label: string
+  term: Terminal
+  host: HTMLElement
+  dead: boolean
+}
 
+const views = new Map<string, TermView>()
+let activeId: string | null = null
+let booted = false
+
+function container(): HTMLElement | null {
+  return document.getElementById('dshd-term-xterm')
+}
+
+function overlay(): HTMLElement | null {
+  return document.getElementById('dshd-term-overlay')
+}
+
+function showOverlay(text: string): void {
+  const o = overlay()
+  if (o) {
+    o.hidden = false
+    o.textContent = text
+  }
+}
+
+function hideOverlay(): void {
+  const o = overlay()
+  if (o) o.hidden = true
+}
+
+function renderTabs(): void {
+  const bar = document.getElementById('dshd-term-tabs')
+  if (!bar) return
+  bar.innerHTML = [...views.values()]
+    .map(
+      (v) =>
+        `<button type="button" class="dshd-term-tab${v.id === activeId ? ' dshd-term-tab-active' : ''}" data-id="${v.id}" title="${v.label}${v.dead ? '（已退出）' : ''}">${v.label}${v.dead ? ' ⚠' : ''}<span class="dshd-term-tab-x" data-id="${v.id}" title="关闭会话">✕</span></button>`,
+    )
+    .join('')
+  // 绑定：tab 点击切换；✕ 关闭（stopPropagation 防止触发切换）
+  bar.querySelectorAll('.dshd-term-tab').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement
+      if (target.classList.contains('dshd-term-tab-x')) {
+        e.stopPropagation()
+        const id = target.dataset.id
+        if (id) void api.termClose(id)
+        return
+      }
+      const id = (btn as HTMLElement).dataset.id
+      if (id && id !== activeId) void api.termActivate(id)
+    })
+  })
+}
+
+function applyActive(): void {
+  for (const v of views.values()) {
+    v.host.style.display = v.id === activeId ? '' : 'none'
+  }
+  const active = activeId ? views.get(activeId) : undefined
+  if (active) {
+    hideOverlay()
+    if (active.dead) showOverlay(`会话已退出 — 点按「＋」新建`)
+    const c = container()
+    if (c) {
+      requestAnimationFrame(() => fit(active.term, c))
+    }
+  } else {
+    showOverlay('无会话 — 点按「＋」新建')
+  }
+  renderTabs()
+}
+
+function createView(id: string, label: string): void {
+  const c = container()
+  if (!c || views.has(id)) return
+  const host = document.createElement('div')
+  host.className = 'dshd-term-view'
+  host.dataset.id = id
+  c.appendChild(host)
   const term = new Terminal({
     fontSize: 12,
     fontFamily: alias('--ds-font-family-code', "Consolas, 'Courier New', monospace"),
@@ -82,86 +162,109 @@ function boot(): void {
     theme: readTheme(),
   })
   term.open(host)
-  fit(term, host)
+  views.set(id, { id, label, term, host, dead: false })
+  term.onData((data) => void api.termWrite(id, data))
+  const c2 = container()
+  if (c2) requestAnimationFrame(() => fit(term, c2))
+}
 
-  term.onData((data) => void api.termWrite(data))
-  // 主进程回流：shell 输出 → xterm
-  api.onTermData((data) => term.write(data))
-  // 会话死亡标记：✕ 关闭/进程退出后，面板再次展开时自动重开
-  let sessionDead = false
-  api.onTermExit((info) => {
-    sessionDead = true
-    const overlay = document.getElementById('dshd-term-overlay')
-    if (overlay) {
-      overlay.hidden = false
-      overlay.textContent = `进程已退出（${info.code === null ? '已关闭' : `code ${String(info.code)}`}）— 点按上方「＋」重新打开`
-    }
-  })
-  const overlay = document.getElementById('dshd-term-overlay')
-  if (overlay) overlay.hidden = true
-
-  // 面板打开即启动真实 shell 会话（auto → PowerShell/cmd）
-  const openSession = (shell?: string): void => {
-    void api.termOpen(shell).then((r) => {
-      const res = r as { ok?: boolean; backend?: string | null } | null
-      if (res && !res.ok) {
-        if (overlay) {
-          overlay.hidden = false
-          overlay.textContent = '终端启动失败（壳不可用）— 点按上方「＋」重试'
-        }
-      } else if (overlay) {
-        overlay.hidden = true
-      }
-    })
+function removeView(id: string): void {
+  const v = views.get(id)
+  if (!v) return
+  try {
+    v.term.dispose()
+  } catch {
+    /* ignore */
   }
-  // 面板收起→展开时：若会话已死亡则自动重开（存活则保持现状）
-  api.onDashboardLayout((l) => {
-    if (l.term && sessionDead) {
-      sessionDead = false
-      openSession()
+  v.host.remove()
+  views.delete(id)
+  if (activeId === id) activeId = null
+  renderTabs()
+}
+
+function openSession(shell?: string): void {
+  void api.termOpen(shell)
+}
+
+function boot(): void {
+  if (booted) return
+  const c = container()
+  if (!c) return
+  booted = true
+  // 与主进程 injectTerminalAssets 的守卫对齐（防重复注入）
+  c.dataset.dshdBooted = '1'
+
+  api.onTermCreated(({ id, label }) => {
+    createView(id, label)
+    activeId = id
+    applyActive()
+  })
+  api.onTermData(({ id, data }) => {
+    const v = views.get(id)
+    if (v) v.term.write(data)
+  })
+  api.onTermExit(({ id, code }) => {
+    const v = views.get(id)
+    if (v) {
+      v.dead = true
+      if (activeId === id) showOverlay(`会话已退出（${code === null ? '已关闭' : `code ${String(code)}`}）— 点按「＋」新建`)
+      renderTabs()
     }
   })
-  openSession()
+  api.onTermClosed((id) => removeView(id))
+  api.onTermActive((id) => {
+    activeId = id
+    applyActive()
+  })
 
-  // ✕ = 真正关闭会话并收起面板；＋/tab = 重开（新会话）；⧉ = 独立窗口系统终端
-  const closeBtn = document.getElementById('dshd-term-close')
-  closeBtn?.addEventListener('click', () => {
-    void api.termClose()
+  // ✕ = 收起面板（会话保留，reasonix 抽屉语义）；⧉ = 系统终端；＋ = 新建会话
+  document.getElementById('dshd-term-close')?.addEventListener('click', () => {
     void api.dashAction('toggleTerminal')
   })
   document.getElementById('dshd-term-ext')?.addEventListener('click', () => {
     void api.dashAction('openSystemTerminal')
   })
-  document.querySelectorAll('.dshd-term-tab').forEach((btn) => {
+  document.getElementById('dshd-term-new')?.addEventListener('click', () => openSession())
+  document.querySelectorAll('.dshd-term-newshell').forEach((btn) => {
     btn.addEventListener('click', () => openSession((btn as HTMLElement).dataset.shell))
   })
-  document.getElementById('dshd-term-new')?.addEventListener('click', () => openSession())
 
-  // 窗口缩放自适应（与 harness 面板共用 CSS 变量变化节流）
+  // 窗口缩放自适应
   let t: number | null = null
   window.addEventListener('resize', () => {
     if (t !== null) clearTimeout(t)
     t = window.setTimeout(() => {
       t = null
-      if (host.isConnected) fit(term, host)
+      const active = activeId ? views.get(activeId) : undefined
+      const c2 = container()
+      if (active && c2 && c2.isConnected) fit(active.term, c2)
     }, 150)
   })
 
-  // 主题实时换肤：body[data-ds-dark-theme] 属性变化 + prefers-color-scheme
+  // 主题实时换肤
   const observer = new MutationObserver(() => {
-    term.options.theme = readTheme()
+    for (const v of views.values()) v.term.options.theme = readTheme()
   })
   observer.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme', 'class'] })
-  const media = window.matchMedia('(prefers-color-scheme: dark)')
-  media.addEventListener('change', () => {
-    term.options.theme = readTheme()
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    for (const v of views.values()) v.term.options.theme = readTheme()
   })
 
-  // 供 CDP 验证（真实输入链路）
+  // 供 CDP 验证
   Object.defineProperty(window, '__dshdTerm', {
-    value: { booted: true, cols: () => term.cols, rows: () => term.rows, write: (d: string) => void api.termWrite(d) },
+    value: {
+      booted: true,
+      activeId: () => activeId,
+      sessions: () => [...views.keys()],
+      write: (data: string) => {
+        if (activeId) void api.termWrite(activeId, data)
+      },
+    },
     configurable: true,
   })
+
+  // 面板展开即启动首个会话（auto → PowerShell/cmd）
+  openSession()
 }
 
 void boot()

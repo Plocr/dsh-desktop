@@ -44,6 +44,10 @@ portable:
 
 npmRebuild: false
 
+# node-pty（Windows ConPTY）为 Electron ABI 预编译，需从 asar 解包加载
+asarUnpack:
+  - "**/node_modules/node-pty/**"
+
 # 自动更新源（generic）。默认占位地址不可达（.invalid 保留域名），
 # 真实部署时覆盖：npx electron-builder --win nsis --config.publish.url=https://你的更新服务器/
 # 或设置 DSH_DESKTOP_UPDATE_URL 运行时覆盖。

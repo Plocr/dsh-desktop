@@ -133,29 +133,35 @@ export function registerIpc(deps: IpcDeps): void {
     }
   })
 
-  /* ── 终端（注入面板） ── */
+  /* ── 终端（注入面板，多会话） ── */
 
   ipcMain.handle('dsh:term:open', (e, shell: unknown) => {
     if (!isMainFrame(deps, e)) return { ok: false, error: 'forbidden' }
-    const ok = deps.terminal.spawn(typeof shell === 'string' && shell ? (shell as TermShell) : 'auto')
-    return { ok, backend: deps.terminal.backend }
+    const id = deps.terminal.create(typeof shell === 'string' && shell ? (shell as TermShell) : 'auto')
+    return { ok: id !== null, id, backend: deps.terminal.backend }
   })
 
-  ipcMain.handle('dsh:term:write', (e, data: unknown) => {
+  ipcMain.handle('dsh:term:activate', (e, id: unknown) => {
     if (!isMainFrame(deps, e)) return { ok: false, error: 'forbidden' }
-    if (typeof data === 'string') deps.terminal.write(data)
+    const ok = typeof id === 'string' && deps.terminal.activate(id)
+    return { ok }
+  })
+
+  ipcMain.handle('dsh:term:write', (e, id: unknown, data: unknown) => {
+    if (!isMainFrame(deps, e)) return { ok: false, error: 'forbidden' }
+    if (typeof id === 'string' && typeof data === 'string') deps.terminal.write(id, data)
     return { ok: true }
   })
 
-  ipcMain.handle('dsh:term:resize', (e, cols: unknown, rows: unknown) => {
+  ipcMain.handle('dsh:term:resize', (e, id: unknown, cols: unknown, rows: unknown) => {
     if (!isMainFrame(deps, e)) return { ok: false, error: 'forbidden' }
-    deps.terminal.resize(Number(cols) || 80, Number(rows) || 24)
+    if (typeof id === 'string') deps.terminal.resize(id, Number(cols) || 80, Number(rows) || 24)
     return { ok: true }
   })
 
-  ipcMain.handle('dsh:term:close', (e) => {
+  ipcMain.handle('dsh:term:close', (e, id: unknown) => {
     if (!isMainFrame(deps, e)) return { ok: false, error: 'forbidden' }
-    deps.terminal.close()
+    if (typeof id === 'string') deps.terminal.close(id)
     return { ok: true }
   })
 }

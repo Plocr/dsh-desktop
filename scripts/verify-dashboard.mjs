@@ -186,6 +186,15 @@ check('展开恢复', expanded === '1')
 /* 6. 终端：打开 → 输入 echo → 读到输出 */
 await evalJs(`window.__dshd.toggleTerm()`)
 await sleep(2500)
+// 归一化：关闭可能残留的会话（跨运行幂等），随后显式新建首个会话
+await evalJs(`(() => {
+  const ids = window.__dshdTerm.sessions()
+  ids.forEach((id) => window.dshDesktop.termClose(id))
+  return ids.length
+})()`)
+await sleep(1200)
+await evalJs(`window.dshDesktop.termOpen()`)
+await sleep(2500)
 const termBooted = await evalJs(`!!window.__dshdTerm?.booted`)
 check('终端（xterm）已引导', termBooted)
 const termOpen = await evalJs(`document.documentElement.dataset.dshdTerm`)
@@ -203,8 +212,23 @@ for (let i = 0; i < 12; i++) {
 }
 check('终端后端就绪', backendReady, `backend=${backendReady ? 'pipe/pty' : 'none'}`)
 
-// 输入一行 PowerShell 命令并回车（真实链路：xterm 输入 → IPC → shell stdin → 输出回流）
-await evalJs(`window.dshDesktop.termWrite('Write-Output DSH_DASHBOARD_OK\\r')`)
+// 等待 shell 提示符出现（安装后冷启动 + PTY/PSReadLine 初始化最慢，最长 30s）
+let promptReady = false
+for (let i = 0; i < 30; i++) {
+  const t = await evalJs(`document.querySelector('#dshd-term-xterm .dshd-term-view:not([style*="none"])')?.innerText ?? ''`)
+  if (t.includes('PS C:') || t.includes('C:\\')) {
+    promptReady = true
+    break
+  }
+  await sleep(1000)
+}
+check('终端提示符就绪', promptReady)
+
+// 输入一行 PowerShell 命令并回车（真实链路：xterm 输入 → IPC → pty/pipe → 输出回流）
+// 多会话：经 __dshdTerm.write 路由到当前激活会话；先发回车丢弃残留未完成输入
+await evalJs(`window.__dshdTerm.write('\\r')`)
+await sleep(500)
+await evalJs(`window.__dshdTerm.write('Write-Output DSH_DASHBOARD_OK\\r')`)
 // 冷启动（安装后首启）shell 初始化较慢：轮询等待输出（最长 20s）
 let termText = ''
 for (let i = 0; i < 20; i++) {
@@ -213,6 +237,16 @@ for (let i = 0; i < 20; i++) {
   await sleep(1000)
 }
 check('终端回环输出', termText.includes('DSH_DASHBOARD_OK'), termText.replace(/\n/g, '⏎').slice(-120))
+
+// 6.5 多会话 tabs：新建 cmd 会话 → 双 tab → 关闭多余的
+const multiOpen = await evalJs(`document.querySelector('.dshd-term-newshell[data-shell="cmd"]')?.click(); true`)
+await sleep(2500)
+const multiSessions = await evalJs(`window.__dshdTerm.sessions()`)
+check('多会话：新建 cmd 后双 tab', multiSessions.length === 2, `sessions=${JSON.stringify(multiSessions)}`)
+const multiClose = await evalJs(`window.dshDesktop.termClose(${JSON.stringify(multiSessions[0])}); true`)
+await sleep(1500)
+const multiRemain = await evalJs(`window.__dshdTerm.sessions()`)
+check('多会话：关闭后剩 1', multiRemain.length === 1, `sessions=${JSON.stringify(multiRemain)}`)
 
 /* 7. 收尾：关终端 */
 await evalJs(`window.__dshd.toggleTerm()`)

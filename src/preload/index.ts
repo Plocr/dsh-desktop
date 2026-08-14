@@ -35,20 +35,38 @@ const api = {
   dashAction: (action: string, payload?: unknown): Promise<unknown> =>
     ipcRenderer.invoke('dsh:dash:action', action, payload),
 
-  /* ── 终端（注入面板） ── */
-  termOpen: (shell?: string): Promise<unknown> => ipcRenderer.invoke('dsh:term:open', shell),
-  termWrite: (data: string): Promise<unknown> => ipcRenderer.invoke('dsh:term:write', data),
-  termResize: (cols: number, rows: number): Promise<unknown> => ipcRenderer.invoke('dsh:term:resize', cols, rows),
-  termClose: (): Promise<unknown> => ipcRenderer.invoke('dsh:term:close'),
-  onTermData: (cb: (data: string) => void): (() => void) => {
-    const listener = (_e: Electron.IpcRendererEvent, data: string): void => cb(data)
+  /* ── 终端（注入面板，多会话） ── */
+  termOpen: (shell?: string): Promise<{ ok: boolean; id?: string; backend?: string | null }> =>
+    ipcRenderer.invoke('dsh:term:open', shell),
+  termActivate: (id: string): Promise<unknown> => ipcRenderer.invoke('dsh:term:activate', id),
+  termWrite: (id: string, data: string): Promise<unknown> => ipcRenderer.invoke('dsh:term:write', id, data),
+  termResize: (id: string, cols: number, rows: number): Promise<unknown> =>
+    ipcRenderer.invoke('dsh:term:resize', id, cols, rows),
+  termClose: (id: string): Promise<unknown> => ipcRenderer.invoke('dsh:term:close', id),
+  onTermData: (cb: (msg: { id: string; data: string }) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, msg: { id: string; data: string }): void => cb(msg)
     ipcRenderer.on('dsh:term:data', listener)
     return () => ipcRenderer.removeListener('dsh:term:data', listener)
   },
-  onTermExit: (cb: (info: { code: number | null }) => void): (() => void) => {
-    const listener = (_e: Electron.IpcRendererEvent, info: { code: number | null }): void => cb(info)
+  onTermExit: (cb: (msg: { id: string; code: number | null }) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, msg: { id: string; code: number | null }): void => cb(msg)
     ipcRenderer.on('dsh:term:exit', listener)
     return () => ipcRenderer.removeListener('dsh:term:exit', listener)
+  },
+  onTermCreated: (cb: (msg: { id: string; label: string; backend: string | null }) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, msg: { id: string; label: string; backend: string | null }): void => cb(msg)
+    ipcRenderer.on('dsh:term:created', listener)
+    return () => ipcRenderer.removeListener('dsh:term:created', listener)
+  },
+  onTermClosed: (cb: (id: string) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, id: string): void => cb(id)
+    ipcRenderer.on('dsh:term:closed', listener)
+    return () => ipcRenderer.removeListener('dsh:term:closed', listener)
+  },
+  onTermActive: (cb: (id: string | null) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, id: string | null): void => cb(id)
+    ipcRenderer.on('dsh:term:active', listener)
+    return () => ipcRenderer.removeListener('dsh:term:active', listener)
   },
 }
 

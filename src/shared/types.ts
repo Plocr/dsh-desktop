@@ -81,10 +81,14 @@ export interface PanelApi {
   onDashboardLog: (cb: (batch: DashLogBatch) => void) => () => void
   onDashboardLayout: (cb: (l: DashLayout) => void) => () => void
   dashAction: (action: string, payload?: unknown) => Promise<unknown>
-  termOpen: (shell?: string) => Promise<unknown>
-  termWrite: (data: string) => Promise<unknown>
-  termResize: (cols: number, rows: number) => Promise<unknown>
-  termClose: () => Promise<unknown>
-  onTermData: (cb: (data: string) => void) => () => void
-  onTermExit: (cb: (info: { code: number | null }) => void) => () => void
+  termOpen: (shell?: string) => Promise<{ ok: boolean; id?: string; backend?: string | null }>
+  termActivate: (id: string) => Promise<unknown>
+  termWrite: (id: string, data: string) => Promise<unknown>
+  termResize: (id: string, cols: number, rows: number) => Promise<unknown>
+  termClose: (id: string) => Promise<unknown>
+  onTermData: (cb: (msg: { id: string; data: string }) => void) => () => void
+  onTermExit: (cb: (msg: { id: string; code: number | null }) => void) => () => void
+  onTermCreated: (cb: (msg: { id: string; label: string; backend: string | null }) => void) => () => void
+  onTermClosed: (cb: (id: string) => void) => () => void
+  onTermActive: (cb: (id: string | null) => void) => () => void
 }

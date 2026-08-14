@@ -63,6 +63,7 @@
 | D15 | **面板/rail/终端为固定层 + #root 布局让位**（原生侧边栏语义：展开 `padding-right`、终端 `padding-bottom` 上移内容不遮挡 composer） | 对照实验确认让位**不会**触发 harness 响应式折叠（左侧 280px 保持）；overlay 覆盖方案会盖住 harness 内容/对话框，弃用；左栏宽度经 DOM 轮询写入 `--dshd-left-w`，终端 `left/right` 偏移避开左右侧边栏 |
 | D16 | **上下文环/会话指标 = 常驻 DOM 轮询**（2s，与 bridge 状态无关） | 该数据仅存在于 harness UI（上下文按钮 aria-label + stats 行）；计费按官方定价表内置常量（pricing.ts，可随调价更新） |
 | D17 | **余额 = bridge RPC `billing.balance`**（`https://api.deepseek.com/user/balance`） | API key 经 harness credentials 服务解析，**只在 harness 进程内使用、不离开 harness**；snake_case 字段在 bridge 侧规范化；余额不敏感（仅金额） |
+| D18 | **终端默认 PtyBackend（node-pty，Windows winpty 模式）**；多会话 tab（reasonix/Codex 风格） | 参考 esengine/DeepSeek-Reasonix PR #6994 的集成终端设计；实测 node-pty ConPTY 销毁后重建无输出 → winpty（useConpty:false）无此问题；prebuild 仅 Node ABI → 本机为 Electron ABI 编译（rebuild-native.mjs）并 asarUnpack 分发 |
 
 ## 3. 关键事实（实测确认）
 
@@ -149,10 +150,10 @@ cordis.patch.yml  []（用户补丁层，壳不写它）
 
 ### 4.7 底栏终端（src/panel/term.ts + src/main/terminal.ts）
 
-- **面板**：xterm.js（`@xterm/xterm`，lazy 注入：首次打开时主进程注入 xterm.css + term.js，422KB 不进首屏）；tab 切换 PowerShell/cmd/pwsh；拖拽调高（120–480px，持久化）；主题色从 body 令牌实时读取（MutationObserver + matchMedia，三态换肤）；**系统终端按钮**（⧉）在独立窗口打开完整 TTY（`detached` spawn）。
-- **位置（D15）**：`left: var(--dshd-left-w)`（harness 侧边栏宽，不覆盖左栏）、右缘 = 面板宽（展开）或 rail 宽（折叠），**不覆盖左右侧边栏**。
-- **后端**（D13）：PipeBackend = spawn shell 接管 stdio（PowerShell 带 `-NoProfile` 加速启动），ANSI 剥离、Ctrl+C 复位（杀壳重开并提示）、spawn 即打印就绪横幅（后端模式/壳/cwd）；PtyBackend = try-require('node-pty')（需 `DSH_DESKTOP_TERM=pty` + 本机 Electron ABI 构建）。
-- **生命周期**：独立于 harness 子进程（harness 崩溃重启不影响已开终端）；✕ 真正关闭会话（overlay 提示），面板收起→展开且会话已死时自动重开；「＋」以当前工作区重开；退出显示 overlay 提示。
+- **面板**：xterm.js（`@xterm/xterm`，lazy 注入）+ **多会话 tabs**（reasonix/Codex 风格）：每会话独立 xterm 实例（保留各自缓冲），tab 新建/切换/关闭（tab 内 ✕），PS/cmd/pwsh 快捷新建按钮，退出/已关闭状态徽标；拖拽调高（120–480px，持久化）；主题色从 body 令牌实时读取（MutationObserver + matchMedia，三态换肤）；「⧉」在独立窗口打开完整 TTY 系统终端；面板 ✕ 仅收起（会话保留，抽屉语义）。
+- **位置（D15）**：`left: var(--dshd-left-w)`（harness 侧边栏宽，不覆盖左栏）、右缘 = 面板宽（展开）或 rail 宽（折叠），**不覆盖左右侧边栏**；`#root` 展开终端时 `padding-bottom` 上移内容（composer 不被遮挡）。
+- **后端（D13/D18）**：**PtyBackend 默认**（node-pty，Windows **winpty 模式** `useConpty:false`）：完整 TTY（ANSI 颜色、方向键历史、vim/top 等交互程序）。实测 node-pty 的 ConPTY 在同一进程**销毁后重建的会话无输出**（疑似句柄/agent 问题，dev/打包版均复现），winpty 模式无此问题；node-pty 需为 Electron ABI 编译（`npm run rebuild:native`，含 MSB8040 Spectre 库缺失时的 MSBuild 兜底），`electron-builder.yml` 已 `asarUnpack`。PipeBackend 保底（`DSH_DESKTOP_TERM=pipe` 强制）：零原生依赖、无 TTY、Ctrl+C 复位。
+- **生命周期**：tab 级进程所有权（reasonix 同款）：create 生成并激活、activate 切换、write/resize 按 id 路由、close 清理并激活相邻；面板收起→展开且会话已死时自动重开；harness 崩溃重启不影响终端。
 
 ### 4.8 共享类型（src/shared/types.ts）
 
@@ -270,7 +271,8 @@ E2E（`scripts/e2e-turn.mjs` / `scripts/verify-dashboard.mjs`，需 `DSH_DESKTOP
 - 面板 DOM 兜底为近似统计（`[data-state]` 可能被其他组件复用），仅作桥接离线时的参考；选择器按 harness 0.1.0-rc.6 校准，升级需复查。
 - 上下文环/会话指标依赖 harness 上下文按钮与 stats 行的 DOM 文案；harness 改文案时解析器容错显示「—」，需按新格式校准（stats.ts 集中）。
 - 费用估算按官方定价表内置常量（2026-08-13 抓取；2026-08-16 峰谷价已含）；调价后需更新 `pricing.ts`；请求数以步骤数近似（harness 未暴露请求计数）。
-- 管道终端无 TTY：vim/top/ssh 等交互程序不可用；Ctrl+C 为会话复位（非信号中断）；pty 后端需本机构建（D13）；「⧉」可开独立窗口完整终端。
+- **PTY 终端（D18）**：默认 winpty 模式（node-pty 的 ConPTY 有"销毁后重建无输出"缺陷）；vim/top/ssh 等交互程序可用；Ctrl+C 为真实信号；node-pty 需为 Electron ABI 编译（`npm run rebuild:native`，无工具链时自动回落管道后端）；「⧉」可开独立窗口系统终端。
+- 终端多会话 tab 的后端会话在应用退出时随进程清理；面板收起不杀会话（抽屉语义）。
 - 窗口内快捷键依赖键盘布局（`Ctrl+Shift+\`` / `Ctrl+Shift+.` 在部分布局下不同），可在 settings 调整。
 - macOS/Linux 未实机验证（配置就绪；终端壳解析已覆盖 bash/zsh/pwsh）。
 - harness 版本锁定 0.1.0-rc.6；升级需重跑 setup-runtime.mjs 并同步 bridge 版本。

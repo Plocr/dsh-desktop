@@ -162,13 +162,14 @@ const SHELL_HTML = `
 <div id="dshd-term" aria-label="DSH Desktop 终端">
   <div id="dshd-term-resize" title="拖拽调整高度"></div>
   <div id="dshd-term-bar">
-    <button class="dshd-term-tab" data-shell="powershell" type="button">PowerShell</button>
-    <button class="dshd-term-tab" data-shell="cmd" type="button">cmd</button>
-    <button class="dshd-term-tab" data-shell="pwsh" type="button">pwsh</button>
+    <button class="dshd-term-newshell" data-shell="powershell" type="button" title="新建 PowerShell 会话">PS</button>
+    <button class="dshd-term-newshell" data-shell="cmd" type="button" title="新建 cmd 会话">cmd</button>
+    <button class="dshd-term-newshell" data-shell="pwsh" type="button" title="新建 pwsh 会话">pwsh</button>
+    <div id="dshd-term-tabs"></div>
     <span class="dshd-term-spacer"></span>
     <button id="dshd-term-ext" type="button" title="在独立窗口打开系统终端（完整 TTY）">⧉</button>
-    <button id="dshd-term-new" type="button" title="新终端（当前工作区）">＋</button>
-    <button id="dshd-term-close" type="button" title="关闭（Ctrl+Shift+\`）">✕</button>
+    <button id="dshd-term-new" type="button" title="新建终端（当前工作区）">＋</button>
+    <button id="dshd-term-close" type="button" title="收起终端（Ctrl+Shift+\`）">✕</button>
   </div>
   <div id="dshd-term-xterm"></div>
   <div id="dshd-term-overlay" hidden></div>

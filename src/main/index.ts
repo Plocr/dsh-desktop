@@ -218,7 +218,8 @@ function currentInfo(): unknown {
     globalShortcut: currentShortcut(),
     panel: panelLayout(),
     terminalBackend: terminal?.backend ?? null,
-    terminalShell: terminal?.activeShell?.label ?? null,
+    terminalShell: terminal?.activeLabel ?? null,
+    terminalSessions: terminal?.sessions.length ?? 0,
   }
 }
 
@@ -546,11 +547,20 @@ async function main(): Promise<void> {
 
   terminal = createTerminalManager(
     {
-      onData: (data) => {
-        if (uiReady()) win?.win.webContents.send('dsh:term:data', data)
+      onData: (sessionId, data) => {
+        if (uiReady()) win?.win.webContents.send('dsh:term:data', { id: sessionId, data })
       },
-      onExit: (info) => {
-        if (uiReady()) win?.win.webContents.send('dsh:term:exit', { code: info.code })
+      onExit: (sessionId, info) => {
+        if (uiReady()) win?.win.webContents.send('dsh:term:exit', { id: sessionId, code: info.code })
+      },
+      onCreated: (sessionId, info) => {
+        if (uiReady()) win?.win.webContents.send('dsh:term:created', { id: sessionId, ...info })
+      },
+      onClosed: (sessionId) => {
+        if (uiReady()) win?.win.webContents.send('dsh:term:closed', sessionId)
+      },
+      onActive: (sessionId) => {
+        if (uiReady()) win?.win.webContents.send('dsh:term:active', sessionId)
       },
     },
     () => harness?.cwd ?? defaultWorkspace(),
