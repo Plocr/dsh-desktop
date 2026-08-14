@@ -7,23 +7,31 @@
 <style>
   html, body {
     height: 100%; margin: 0; overflow: hidden;
-    background: #0e1116; color: #d7dee8;
+    background: #ffffff; color: #0f1115;
     font-family: "Segoe UI", system-ui, sans-serif;
   }
-  .stage { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-  .whale-wrap { position: relative; width: min(62vw, 460px); aspect-ratio: 4 / 3; }
+  .stage {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    opacity: 0;
+    animation: fadeIn 0.5s ease forwards;
+  }
+  @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+  /* 淡出由壳在 ready 时触发（window.__fadeOut） */
+  .stage.fading { transition: opacity 0.35s ease; opacity: 0; }
+  .whale-wrap { position: relative; width: min(52vw, 380px); aspect-ratio: 4 / 3; }
   canvas#glow {
     position: absolute; inset: 0; width: 100%; height: 100%;
-    filter: blur(18px); opacity: 0.75;
+    filter: blur(16px); opacity: 0.8;
   }
   canvas#whale { position: absolute; inset: 0; width: 100%; height: 100%; }
-  .brand { margin-top: 18px; text-align: center; }
-  .title { font-size: 15px; font-weight: 600; margin-bottom: 6px; letter-spacing: 0.2px; }
-  .sub { font-size: 12px; color: #7d8aa0; }
+  .brand { margin-top: 14px; text-align: center; }
+  .title { font-size: 15px; font-weight: 600; margin-bottom: 5px; letter-spacing: 0.2px; color: #0f1115; }
+  .sub { font-size: 12px; color: #6b7280; }
 </style>
 </head>
 <body>
-  <div class="stage">
+  <div class="stage" id="stage">
     <div class="whale-wrap">
       <canvas id="glow"></canvas>
       <canvas id="whale"></canvas>
@@ -34,15 +42,16 @@
     </div>
   </div>
 <script>
-/* 粒子鲸鱼加载动画：SVG 剪影像素采样 + 弹性粒子系统 + 呼吸游动 + 光晕层。
+/* 粒子鲸鱼加载动画：SVG 剪影像素采样 + 方块粒子 + 白色主题（与工作台一致）。
    鲸鱼形状取自 DeepSeek 官网品牌素材（hero-whale.svg，viewBox 24x18）。 */
 const WHALE_PATH = "M22.9168 1.43018C22.6713 1.31018 22.5658 1.53918 22.4223 1.65519C22.3733 1.69269 22.3318 1.74169 22.2903 1.78669C21.9317 2.1697 21.5127 2.42121 20.9657 2.39121C20.1657 2.34621 19.4827 2.59771 18.8787 3.20973C18.7502 2.45521 18.3236 2.0047 17.6746 1.71569C17.3351 1.56568 16.9916 1.41518 16.7536 1.08867C16.5876 0.856163 16.5421 0.597155 16.4591 0.341647C16.4061 0.187643 16.3536 0.0301382 16.1761 0.00363739C15.9836 -0.0263635 15.9081 0.135141 15.8326 0.270145C15.5306 0.822162 15.4136 1.43018 15.4251 2.0462C15.4516 3.43174 16.0366 4.53527 17.1991 5.3203C17.3311 5.4103 17.3651 5.5003 17.3236 5.63181C17.2441 5.90231 17.1501 6.16482 17.0671 6.43533C17.0141 6.60784 16.9351 6.64584 16.7501 6.57033C16.1121 6.30383 15.5611 5.90931 15.074 5.4328C14.2475 4.63328 13.5 3.75075 12.568 3.05973C12.349 2.89822 12.13 2.74822 11.9034 2.60522C10.9524 1.68169 12.028 0.923165 12.277 0.833162C12.5375 0.739159 12.3675 0.41615 11.5259 0.42015C10.6844 0.42365 9.91439 0.705658 8.93286 1.08117C8.78935 1.13767 8.63835 1.17867 8.48384 1.21267C7.59332 1.04367 6.66829 1.00617 5.70226 1.11517C3.88321 1.31768 2.43016 2.1777 1.36213 3.64575C0.0790928 5.4103 -0.222916 7.41536 0.146595 9.50642C0.535106 11.7105 1.66014 13.535 3.38869 14.9616C5.18125 16.4406 7.24581 17.1657 9.60138 17.0266C11.0319 16.9441 12.6245 16.7526 14.421 15.2321C14.874 15.4576 15.3496 15.5476 16.1381 15.6151C16.7456 15.6716 17.3306 15.5851 17.7836 15.4911C18.4931 15.3411 18.4441 14.6841 18.1876 14.5636C16.1081 13.595 16.5646 13.9891 16.1496 13.67C17.2061 12.42 18.8202 10.1979 19.3182 7.17235C19.3672 6.83834 19.4297 6.36783 19.4222 6.09732C19.4182 5.93231 19.4562 5.86831 19.6447 5.84931C20.1657 5.78931 20.6712 5.64681 21.1357 5.3913C22.4833 4.65528 23.0268 3.44624 23.1548 1.9972C23.1738 1.77569 23.1508 1.54668 22.9168 1.43018ZM11.1749 14.4736C9.15936 12.889 8.18184 12.3675 7.77832 12.39C7.40081 12.4125 7.46881 12.8445 7.55182 13.126C7.63882 13.404 7.75182 13.5955 7.91033 13.8396C8.01983 14.0011 8.09533 14.2411 7.80083 14.4216C7.15181 14.8231 6.02327 14.2866 5.97027 14.2601C4.65673 13.4865 3.5587 12.4655 2.78467 11.069C2.03715 9.72493 1.60314 8.28289 1.53164 6.74384C1.51264 6.37233 1.62214 6.24082 1.99215 6.17332C2.47916 6.08332 2.98118 6.06432 3.46769 6.13582C5.52476 6.43633 7.27581 7.35586 8.74385 8.8129C9.58188 9.64243 10.2159 10.634 10.8689 11.6025C11.5634 12.631 12.3105 13.611 13.262 14.4146C13.598 14.6961 13.866 14.9101 14.1225 15.0681C13.349 15.1546 12.058 15.1731 11.1749 14.4746V14.4736ZM12.141 8.25988C12.141 8.09488 12.273 7.96338 12.439 7.96338C12.4765 7.96338 12.5105 7.97088 12.541 7.98188C12.5825 7.99688 12.6205 8.01938 12.6505 8.05338C12.7035 8.10588 12.7335 8.18088 12.7335 8.25988C12.7335 8.42489 12.6015 8.55639 12.4355 8.55639C12.2695 8.55639 12.141 8.42489 12.141 8.25988ZM15.1415 9.79893C14.949 9.87793 14.7565 9.94544 14.5715 9.95294C14.2845 9.96794 13.9715 9.85143 13.8015 9.70893C13.5375 9.48742 13.3485 9.36342 13.2695 8.97691C13.2355 8.8119 13.2545 8.55639 13.2845 8.40989C13.3525 8.09438 13.277 7.89187 13.0545 7.70787C12.8735 7.55786 12.643 7.51636 12.39 7.51636C12.2955 7.51636 12.209 7.47486 12.1445 7.44136C12.039 7.38886 11.9519 7.25735 12.035 7.09585C12.0615 7.04335 12.19 6.91584 12.22 6.89334C12.5635 6.69784 12.9595 6.76184 13.326 6.90834C13.6655 7.04735 13.9225 7.30236 14.292 7.66287C14.6695 8.09838 14.7375 8.21838 14.9525 8.54539C15.1225 8.8009 15.277 9.06341 15.3831 9.36392C15.4471 9.55142 15.3641 9.70493 15.1415 9.79893Z"
-const WHALE_SVG = '<svg width="24" height="18" viewBox="0 0 24 18" fill="white" xmlns="http://www.w3.org/2000/svg"><path d="' + WHALE_PATH + '"/></svg>'
+const WHALE_SVG = '<svg width="24" height="18" viewBox="0 0 24 18" fill="black" xmlns="http://www.w3.org/2000/svg"><path d="' + WHALE_PATH + '"/></svg>'
 const ASPECT = 24 / 18
-const BG = [14, 17, 22]
-const BLUE_A = [77, 124, 255]
-const BLUE_B = [122, 160, 255]
-const WHITE = [232, 240, 255]
+const BG = [255, 255, 255]          // 与工作台 body 背景一致
+const INK_A = [15, 17, 21]          // 近黑（工作台正文色）
+const INK_B = [41, 66, 120]         // 深品牌蓝
+const ACCENT = [77, 124, 255]       // 品牌蓝（少量点缀）
+const MAX_PARTICLES = 900
 
 const main = document.getElementById('whale')
 const glow = document.getElementById('glow')
@@ -50,8 +59,9 @@ const ctx = main.getContext('2d')
 const gctx = glow.getContext('2d')
 let W = 0, H = 0, DPR = 1
 let targets = []          // 归一化目标点 [{x, y}]
-let particles = []        // {tx, ty, x, y, vx, vy, phase, size, alpha, white}
+let particles = []        // {tx, ty, x, y, vx, vy, phase, size, alpha, colorIdx}
 let running = false
+let rafId = null
 
 /* ── 尺寸 ── */
 function resize() {
@@ -67,9 +77,7 @@ function resize() {
 }
 window.addEventListener('resize', resize)
 
-/* ── SVG 像素采样 ──
-   注意：离屏画布必须保持透明背景（不能预填不透明色），
-   否则 alpha>阈值 会把背景也算进目标点，粒子铺满整个矩形。 */
+/* ── SVG 像素采样（透明底，只取鲸鱼像素） ── */
 async function sampleTargets() {
   const img = new Image()
   img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(WHALE_SVG)
@@ -91,46 +99,44 @@ async function sampleTargets() {
   return pts
 }
 
-/* ── 粒子 ── */
+/* ── 粒子：方块、颜色创建时固定（不再每帧随机） ── */
 function makeParticles() {
-  const count = Math.max(360, Math.min(targets.length, 900))
+  const count = Math.max(360, Math.min(targets.length, MAX_PARTICLES))
   particles = []
   for (let i = 0; i < count; i++) {
     const tp = targets[(Math.random() * targets.length) | 0]
-    // 起点：从鲸鱼水平范围下方升起（而非全屏乱飞）
-    const startX = Math.min(W - 4, Math.max(4, (tp.x - 0.5) * Math.min(W * 0.96, 460) + W / 2 + (Math.random() - 0.5) * W * 0.16))
+    const startX = Math.min(W - 4, Math.max(4, (tp.x - 0.5) * Math.min(W * 0.96, 380) + W / 2 + (Math.random() - 0.5) * W * 0.16))
     particles.push({
       tx: tp.x, ty: tp.y,
       x: startX,
-      y: H + 30 + Math.random() * H * 0.5,
+      y: H + 24 + Math.random() * H * 0.45,
       vx: 0, vy: 0,
       phase: Math.random() * Math.PI * 2,
-      size: 0.7 + Math.random() * 1.6,
-      alpha: 0.5 + Math.random() * 0.5,
-      white: Math.random() < 0.08,
-      born: performance.now() + Math.random() * 1200, // 错峰上浮
+      size: 1.5 + Math.random() * 2.5,
+      alpha: 0.55 + Math.random() * 0.45,
+      colorIdx: Math.random() < 0.72 ? 0 : Math.random() < 0.6 ? 1 : 2, // 72% 近黑、其余深蓝/点缀
+      born: performance.now() + Math.random() * 1200,
     })
   }
 }
 
-/* 目标绘制坐标：居中 + 呼吸缩放 + 相位游动 */
+/* 目标绘制坐标：wrap 正中（鲸鱼与文字整体垂直居中，顶部不再被遮） */
 function targetFor(p, t) {
-  const ww = Math.min(W * 0.96, 460)
-  const wh = ww / ASPECT
+  const ww = W
+  const wh = H
   const cx = W / 2
-  const cy = H / 2 - wh * 0.08
-  const breathe = 1 + 0.022 * Math.sin(t / 2600)
-  const wob = 0.008 * Math.sin(t / 1700 + p.phase)
+  const cy = H / 2
+  const breathe = 1 + 0.015 * Math.sin(t / 3200)
+  const wob = 0.006 * Math.sin(t / 2100 + p.phase)
   return {
     x: cx + (p.tx - 0.5) * ww * breathe + wob * ww,
     y: cy + (p.ty - 0.5) * wh * breathe,
   }
 }
 
-let last = 0
-let rafId = null
-/* 标准 rAF 管理：running 为逻辑开关，rafId 保证单链；
-   hidden 时 rAF 被浏览器暂停，visible 后必须重新调度（不能因 running 已 true 而跳过）。 */
+const COLORS = [INK_A, INK_B, ACCENT]
+
+/* rAF 管理：单链；hidden 时浏览器暂停 rAF，visible 后必须重新调度 */
 function schedule() {
   if (rafId === null && running) rafId = requestAnimationFrame(step)
 }
@@ -139,33 +145,40 @@ function step(now) {
   if (!running) return
   window.__frames = (window.__frames || 0) + 1 // 帧计数钩子（验证用）
   const t = now
-  // 半透明拖尾清屏（数值低一点，让鲸鱼形状更清晰）
-  ctx.fillStyle = 'rgba(14,17,22,0.16)'
+  // 白色拖尾（背景恒白，粒子运动留下浅色轨迹）
+  ctx.fillStyle = 'rgba(255,255,255,0.55)'
   ctx.fillRect(0, 0, W, H)
+  const pulse = 0.9 + 0.1 * Math.sin(t / 4000) // 极缓全局脉动（取代高频闪烁）
   for (const p of particles) {
     const g = targetFor(p, t)
-    const k = 0.014
-    p.vx += (g.x - p.x) * k
-    p.vy += (g.y - p.y) * k
-    p.vx *= 0.90
-    p.vy *= 0.90
-    p.x += p.vx
-    p.y += p.vy
-    // 淡入：粒子出生后 1.6s 内 alpha 从 0 增长（错峰升起、汇聚成鲸鱼）
+    // 弹性趋近 + 接近锁定（消除跳动）
+    const dx = g.x - p.x
+    const dy = g.y - p.y
+    const dist2 = dx * dx + dy * dy
+    if (dist2 < 0.25) {
+      p.x = g.x
+      p.y = g.y
+      p.vx = 0
+      p.vy = 0
+    } else {
+      p.vx += dx * 0.02
+      p.vy += dy * 0.02
+      p.vx *= 0.88
+      p.vy *= 0.88
+      p.x += p.vx
+      p.y += p.vy
+    }
+    // 淡入：出生后 1.6s 内 alpha 从 0 增长
     const fade = Math.min(1, (t - p.born) / 1600)
     if (fade <= 0) continue
-    const a = (p.alpha * fade).toFixed(3)
-    const c = p.white ? WHITE : (Math.random() < 0.5 ? BLUE_A : BLUE_B)
-    const shimmer = 0.75 + 0.25 * Math.sin(t / 900 + p.phase)
-    // 双层绘制：大而淡的光晕 + 小而亮的核心（星云质感，替代 shadowBlur）
-    ctx.beginPath()
-    ctx.fillStyle = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (a * 0.16 * shimmer).toFixed(3) + ')'
-    ctx.arc(p.x, p.y, p.size * 3, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.beginPath()
-    ctx.fillStyle = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (a * shimmer).toFixed(3) + ')'
-    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2)
-    ctx.fill()
+    const c = COLORS[p.colorIdx]
+    const a = (p.alpha * fade * pulse).toFixed(3)
+    const s = p.size
+    // 双层方块：大而淡的方形光晕 + 小而实的核心（像素块）
+    ctx.fillStyle = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (a * 0.14).toFixed(3) + ')'
+    ctx.fillRect(p.x - s * 1.6, p.y - s * 1.6, s * 3.2, s * 3.2)
+    ctx.fillStyle = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'
+    ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s)
   }
   // 光晕层：复制主画面 + CSS blur
   gctx.clearRect(0, 0, W, H)
@@ -177,9 +190,17 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) running = false
   else {
     running = true
-    schedule() // hidden 期间 rAF 被暂停，恢复后必须重新调度
+    schedule()
   }
 })
+
+/* 淡出钩子：壳在 ready 时调用，让加载页渐变淡出后再切到工作台 */
+window.__fadeOut = () =>
+  new Promise((resolve) => {
+    const stage = document.getElementById('stage')
+    stage.classList.add('fading')
+    setTimeout(resolve, 380)
+  })
 
 /* ── 启动 ── */
 window.__errs = []
@@ -197,7 +218,6 @@ sampleTargets().then((pts) => {
   window.__running = () => running
   schedule()
 }).catch(() => {
-  // 采样失败（极端环境）：退化为纯文字
   document.querySelector('.whale-wrap').style.display = 'none'
 })
 

@@ -55,11 +55,25 @@ export function createWindow(
   const loadingPage = path.join(resourcesDir, 'shell-pages', 'loading.html')
   const errorPage = path.join(resourcesDir, 'shell-pages', 'error.html')
 
-  const loadApp = (url: string): void => {
+  const loadURL = (url: string): void => {
     if (win.isDestroyed()) return
     void win.loadURL(url).catch((err) => {
       showError(`加载 ${url} 失败: ${err instanceof Error ? err.message : String(err)}`)
     })
+  }
+
+  const loadApp = (url: string): void => {
+    if (win.isDestroyed()) return
+    // 若当前在加载页（file://），先触发页面淡出，再切换——转场不突变
+    const current = win.webContents.getURL()
+    if (current.startsWith('file://')) {
+      void win.webContents
+        .executeJavaScript(`window.__fadeOut ? window.__fadeOut() : Promise.resolve()`)
+        .then(() => loadURL(url))
+        .catch(() => loadURL(url))
+    } else {
+      loadURL(url)
+    }
   }
 
   const showLoading = (state?: string): void => {

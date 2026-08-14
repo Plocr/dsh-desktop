@@ -4,11 +4,16 @@
  *  - resources/icons/tray.png   (32x32)
  *  - resources/icons/tray@2x.png(64x64)
  *  - resources/icons/icon.ico   (16/32/48/256 多尺寸，PNG-in-ICO)
- * 图案：品牌蓝圆角方块 + 白色 "H"（Harness）。
+ * 设计：白底（与工作台一致）+ 黑色 DeepSeek 鲸鱼 logo（官网品牌 path，whale-path.txt）。
+ * 鲸鱼光栅化：SVG path 解析（M/C/Z 绝对坐标）→ 三次贝塞尔采样 → 多边形
+ * → nonzero 绕数 ray-casting 逐像素填充。
  */
 import { deflateSync } from 'node:zlib'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 /* ── PNG 编码 ────────────────────────────────────────────────────────── */
 
@@ -42,103 +47,137 @@ function encodePng(width, height, rgba) {
   const ihdr = Buffer.alloc(13)
   ihdr.writeUInt32BE(width, 0)
   ihdr.writeUInt32BE(height, 4)
-  ihdr[8] = 8 // bit depth
-  ihdr[9] = 6 // color type RGBA
+  ihdr[8] = 8
+  ihdr[9] = 6
   const stride = width * 4
   const raw = Buffer.alloc((stride + 1) * height)
   for (let y = 0; y < height; y++) {
-    raw[y * (stride + 1)] = 0 // filter: none
-    for (let x = 0; x < stride; x++) {
-      raw[y * (stride + 1) + 1 + x] = rgba[y * stride + x]
-    }
+    raw[y * (stride + 1)] = 0
+    for (let x = 0; x < stride; x++) raw[y * (stride + 1) + 1 + x] = rgba[y * stride + x]
   }
   return Buffer.concat([sig, pngChunk('IHDR', ihdr), pngChunk('IDAT', deflateSync(raw, { level: 9 })), pngChunk('IEND', Buffer.alloc(0))])
 }
 
-/* ── 绘制 ────────────────────────────────────────────────────────────── */
+/* ── SVG path 解析与光栅化 ───────────────────────────────────────────── */
 
-const clamp01 = (v) => Math.min(1, Math.max(0, v))
-
-/** 圆角矩形 SDF。 */
-function sdRoundRect(x, y, cx, cy, hw, hh, r) {
-  const qx = Math.abs(x - cx) - (hw - r)
-  const qy = Math.abs(y - cy) - (hh - r)
-  return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - r
-}
-
-function render(size) {
-  const SS = 4 // 超采样
-  const S = size * SS
-  const buf = new Float32Array(S * S * 4) // premultiplied alpha
-  const cx = S / 2
-  const cy = S / 2
-  const hw = S * 0.46
-  const hh = S * 0.46
-  const r = S * 0.22
-  const top = [0x4d, 0x7c, 0xff]
-  const bottom = [0x35, 0x54, 0xd8]
-
-  // 白色 "H" 条（圆角 SDF）
-  const barR = S * 0.06
-  const bars = [
-    { x: S * 0.30, w: S * 0.10, y: S * 0.25, h: S * 0.50 }, // 左竖
-    { x: S * 0.60, w: S * 0.10, y: S * 0.25, h: S * 0.50 }, // 右竖
-    { x: S * 0.30, w: S * 0.40, y: S * 0.44, h: S * 0.12 }, // 横梁
-  ]
-
-  for (let py = 0; py < S; py++) {
-    for (let px = 0; px < S; px++) {
-      const x = px + 0.5
-      const y = py + 0.5
-      const d = sdRoundRect(x, y, cx, cy, hw, hh, r)
-      const bgA = clamp01(0.5 - d)
-      if (bgA <= 0) continue
-      const t = (y / S) * 0.6 // 背景垂直渐变
-      const bg = [top[0] + (bottom[0] - top[0]) * t, top[1] + (bottom[1] - top[1]) * t, top[2] + (bottom[2] - top[2]) * t]
-      let glyphA = 0
-      for (const b of bars) {
-        const gd = sdRoundRect(x, y, b.x + b.w / 2, b.y + b.h / 2, b.w / 2, b.h / 2, barR)
-        glyphA = Math.max(glyphA, clamp01(0.5 - gd))
+/** 解析 M/C/Z 绝对坐标 path → 子路径多边形（贝塞尔采样 40 段）。 */
+function parsePathToPolys(d) {
+  const tokens = d.match(/[MCZ]|-?\d*\.?\d+(?:e[+-]?\d+)?/gi)
+  if (!tokens) return []
+  const polys = []
+  let cur = null
+  let i = 0
+  const num = () => Number(tokens[i++])
+  while (i < tokens.length) {
+    const cmd = tokens[i++].toUpperCase()
+    if (cmd === 'M') {
+      if (cur && cur.pts.length > 1) polys.push(cur.pts)
+      cur = { pts: [{ x: num(), y: num() }] }
+    } else if (cmd === 'C') {
+      const c1x = num(), c1y = num(), c2x = num(), c2y = num(), x = num(), y = num()
+      const p0 = cur.pts[cur.pts.length - 1]
+      const N = 40
+      for (let s = 1; s <= N; s++) {
+        const t = s / N
+        const mt = 1 - t
+        cur.pts.push({
+          x: mt * mt * mt * p0.x + 3 * mt * mt * t * c1x + 3 * mt * t * t * c2x + t * t * t * x,
+          y: mt * mt * mt * p0.y + 3 * mt * mt * t * c1y + 3 * mt * t * t * c2y + t * t * t * y,
+        })
       }
-      const i = (py * S + px) * 4
-      // 混合：白条覆盖背景（完整预乘 alpha，供降采样后反预乘）
-      const r_ = bg[0] * (1 - glyphA) + 255 * glyphA
-      const g_ = bg[1] * (1 - glyphA) + 255 * glyphA
-      const b_ = bg[2] * (1 - glyphA) + 255 * glyphA
-      buf[i] = r_ * bgA * 255
-      buf[i + 1] = g_ * bgA * 255
-      buf[i + 2] = b_ * bgA * 255
-      buf[i + 3] = bgA * 255
+    } else if (cmd === 'Z') {
+      if (cur && cur.pts.length > 1) polys.push(cur.pts)
+      cur = null
     }
   }
+  if (cur && cur.pts.length > 1) polys.push(cur.pts)
+  return polys
+}
 
-  // 盒式降采样（含 alpha 归一化）
+/** nonzero 绕数：点是否在多边形组内。 */
+function windingAt(p, polys) {
+  let w = 0
+  for (const pts of polys) {
+    for (let k = 0; k < pts.length - 1; k++) {
+      const a = pts[k]
+      const b = pts[k + 1]
+      if (a.y <= p.y) {
+        if (b.y > p.y && (b.x - a.x) * (p.y - a.y) - (p.x - a.x) * (b.y - a.y) > 0) w++
+      } else {
+        if (b.y <= p.y && (b.x - a.x) * (p.y - a.y) - (p.x - a.x) * (b.y - a.y) < 0) w--
+      }
+    }
+  }
+  return w
+}
+
+/**
+ * 渲染图标：白底圆角方块 + 黑色鲸鱼。
+ * @param size 输出边长
+ * @param whaleScale 鲸鱼占图标高度的比例
+ */
+function render(size, whaleScale = 0.66) {
   const out = new Uint8Array(size * size * 4)
-  const step = SS
+  const r = size * 0.2
+  const hw = size / 2
+  const border = Math.max(1, Math.round(size * 0.01))
+  const bg = [255, 255, 255]
+  const edge = [228, 231, 236]
+  const ink = [15, 17, 21]
+
+  const sdRound = (x, y, cx, cy, hw2, hh2, rr) => {
+    const qx = Math.abs(x - cx) - (hw2 - rr)
+    const qy = Math.abs(y - cy) - (hh2 - rr)
+    return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - rr
+  }
+
+  const whalePath = readFileSync(path.join(root, 'resources', 'shell-pages', 'whale-path.txt'), 'utf8').trim()
+  const polys = parsePathToPolys(whalePath)
+  const VB_W = 24
+  const VB_H = 18
+  const targetH = size * whaleScale
+  const targetW = targetH * (VB_W / VB_H)
+  const ox = (size - targetW) / 2
+  const oy = (size - targetH) / 2
+  const toPx = (p) => ({ x: ox + (p.x / VB_W) * targetW, y: oy + (p.y / VB_H) * targetH })
+
+  // 鲸鱼 bbox（裁剪遍历范围，加速）
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+  for (const pts of polys) {
+    for (const p of pts) {
+      const q = toPx(p)
+      if (q.x < minX) minX = q.x
+      if (q.x > maxX) maxX = q.x
+      if (q.y < minY) minY = q.y
+      if (q.y > maxY) maxY = q.y
+    }
+  }
+  minX = Math.max(0, Math.floor(minX - 1))
+  maxX = Math.min(size - 1, Math.ceil(maxX + 1))
+  minY = Math.max(0, Math.floor(minY - 1))
+  maxY = Math.min(size - 1, Math.ceil(maxY + 1))
+
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      let r = 0
-      let g = 0
-      let b = 0
-      let a = 0
-      for (let sy = 0; sy < step; sy++) {
-        for (let sx = 0; sx < step; sx++) {
-          const i = ((y * step + sy) * S + (x * step + sx)) * 4
-          r += buf[i]
-          g += buf[i + 1]
-          b += buf[i + 2]
-          a += buf[i + 3]
-        }
-      }
-      const n = step * step
+      const px = x + 0.5
+      const py = y + 0.5
       const o = (y * size + x) * 4
-      const alpha = a / n // 平均 alpha（0..255）
-      if (a > 0) {
-        out[o] = Math.round(r / a)
-        out[o + 1] = Math.round(g / a)
-        out[o + 2] = Math.round(b / a)
+      const d = sdRound(px, py, size / 2, size / 2, hw - 0.5, hw - 0.5, r)
+      if (d > 0.5) {
+        out[o + 3] = 0
+        continue
       }
-      out[o + 3] = Math.round(alpha)
+      let col = bg
+      if (d > 0.5 - border) col = edge
+      if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
+        const wx = ((x + 0.5 - ox) / targetW) * VB_W
+        const wy = ((y + 0.5 - oy) / targetH) * VB_H
+        if (windingAt({ x: wx, y: wy }, polys) !== 0) col = ink
+      }
+      out[o] = col[0]
+      out[o + 1] = col[1]
+      out[o + 2] = col[2]
+      out[o + 3] = 255
     }
   }
   return out
@@ -148,8 +187,8 @@ function render(size) {
 
 function encodeIco(sizes, pngs) {
   const header = Buffer.alloc(6)
-  header.writeUInt16LE(0, 0) // reserved
-  header.writeUInt16LE(1, 2) // type: icon
+  header.writeUInt16LE(0, 0)
+  header.writeUInt16LE(1, 2)
   header.writeUInt16LE(sizes.length, 4)
   const entries = []
   let offset = 6 + sizes.length * 16
@@ -157,10 +196,10 @@ function encodeIco(sizes, pngs) {
     const e = Buffer.alloc(16)
     e[0] = sizes[i] >= 256 ? 0 : sizes[i]
     e[1] = sizes[i] >= 256 ? 0 : sizes[i]
-    e[2] = 0 // colors
-    e[3] = 0 // reserved
-    e.writeUInt16LE(1, 4) // planes
-    e.writeUInt16LE(32, 6) // bit count
+    e[2] = 0
+    e[3] = 0
+    e.writeUInt16LE(1, 4)
+    e.writeUInt16LE(32, 6)
     e.writeUInt32LE(pngs[i].length, 8)
     e.writeUInt32LE(offset, 12)
     offset += pngs[i].length
@@ -171,14 +210,14 @@ function encodeIco(sizes, pngs) {
 
 /* ── 输出 ────────────────────────────────────────────────────────────── */
 
-const outDir = path.resolve('resources', 'icons')
+const outDir = path.join(root, 'resources', 'icons')
 mkdirSync(outDir, { recursive: true })
 
 const sizes = [16, 32, 48, 256]
-const pngs = sizes.map((s) => encodePng(s, s, render(s)))
+const pngs = sizes.map((s) => encodePng(s, s, render(s, s <= 32 ? 0.72 : 0.66)))
 
-writeFileSync(path.join(outDir, 'icon.png'), pngs[3]) // 256
-writeFileSync(path.join(outDir, 'tray.png'), pngs[1]) // 32
-writeFileSync(path.join(outDir, 'tray@2x.png'), encodePng(64, 64, render(64)))
+writeFileSync(path.join(outDir, 'icon.png'), pngs[3])
+writeFileSync(path.join(outDir, 'tray.png'), pngs[1])
+writeFileSync(path.join(outDir, 'tray@2x.png'), encodePng(64, 64, render(64, 0.7)))
 writeFileSync(path.join(outDir, 'icon.ico'), encodeIco(sizes, pngs))
 console.log(`[icons] generated ${outDir}`)

@@ -1,4 +1,4 @@
-// 受控可见性验证：CDP 强制页面 visible 后测帧增长
+// 验证白底方块粒子：黑色粒子包围盒（鲸鱼形状）+ 背景白色 + 动画帧
 const targets = await (await fetch('http://127.0.0.1:9222/json')).json()
 const page = targets.find((t) => t.type === 'page')
 const ws = new WebSocket(page.webSocketDebuggerUrl)
@@ -20,33 +20,40 @@ ws.onmessage = (ev) => {
 }
 await new Promise((r) => (ws.onopen = r))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-const evalJ = async (e) => (await call('Runtime.evaluate', { expression: e, returnByValue: true })).result.value
-
 await call('Page.navigate', { url: 'file:///E:/Dsh/dsh-desktop/resources/shell-pages/loading.html' })
 await call('Emulation.setFocusEmulationEnabled', { enabled: true })
-try {
-  await call('Emulation.setPageVisibilityState', { visibilityState: 'visible' })
-  console.log('forced visibility: visible')
-} catch (e) {
-  console.log('setPageVisibilityState unsupported:', e.message.slice(0, 80))
-}
-await sleep(2500)
-console.log('vis:', await evalJ('document.visibilityState'))
-const f1 = await evalJ('window.__frames || 0')
-await sleep(1200)
-const f2 = await evalJ('window.__frames || 0')
-console.log('frames in 1.2s:', f2 - f1)
-const lit = await evalJ(`(() => {
-  const c = document.getElementById('whale');
-  if (!c) return -1;
-  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-  let n = 0;
-  for (let i = 0; i < d.length; i += 8) {
-    const lum = (d[i] + d[i+1] + d[i+2]) / 3;
-    if (lum > 90) n++;
-  }
-  return n;
-})()`)
-console.log('lit pixels:', lit)
+await sleep(5000)
+
+const state = await call('Runtime.evaluate', {
+  expression: `(() => {
+    const c = document.getElementById('whale');
+    const g = c.getContext('2d');
+    const d = g.getImageData(0, 0, c.width, c.height).data;
+    const w = c.width, h = c.height;
+    let dark = 0, minX = w, maxX = 0, minY = h, maxY = 0;
+    for (let y = 0; y < h; y += 2) {
+      for (let x = 0; x < w; x += 2) {
+        const i = (y * w + x) * 4;
+        if (d[i] < 100 && d[i+1] < 110 && d[i+2] < 150) { // 深色粒子（黑/深蓝）
+          dark++;
+          if (x < minX) minX = x; if (x > maxX) maxX = x;
+          if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+      }
+    }
+    return {
+      canvas: [w, h],
+      darkPixels: dark,
+      spanX: (maxX - minX) / w,
+      spanY: (maxY - minY) / h,
+      errs: window.__errs || [],
+      particles: window.__particles ? window.__particles.length : -1,
+      fadeOut: typeof window.__fadeOut === 'function',
+      bgSample: Array.from(d.slice(0, 12)).join(','), // 角落背景像素
+    };
+  })()`,
+  returnByValue: true,
+})
+console.log('state:', JSON.stringify(state.result.value))
 ws.close()
 process.exit(0)

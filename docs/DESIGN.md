@@ -107,15 +107,17 @@ cordis.patch.yml  []（用户补丁层，壳不写它）
 
 ### 4.5 加载页：粒子鲸鱼动画（shell-pages/loading.html）
 
-启动/重启/崩溃恢复时的过渡页，以 [DeepSeek 官网](https://www.deepseek.com/harness/) 背景的**粒子鲸鱼**为视觉母题（自研实现，非复制官网代码）：
+启动/重启/崩溃恢复时的过渡页，以 [DeepSeek 官网](https://www.deepseek.com/harness/) 背景的**粒子鲸鱼**为视觉母题（自研实现，非复制官网代码）。**白色主题**（实测工作台 body 背景 `#ffffff`，加载页与其完全一致，避免切换色差）：
 
-- 鲸鱼剪影：官网品牌素材 `hero-whale.svg`（24×18 viewBox）的 path 存于 `whale-path.txt`，经 `scripts/inject-whale.mjs` 注入模板 `loading.template.html` 生成 `loading.html`（`__WHALE_PATH__` 占位符）。
-- 渲染：SVG → data URI → 离屏 canvas（480×360）→ `getImageData` 像素采样（alpha>128，步长 4）→ 归一化目标点；900 个弹性粒子从鲸鱼下方升起、淡入聚合。
-- 动画：速度积分 + 阻尼弹簧（k=0.014, damp=0.90）；整体呼吸缩放（sin 2.6s ±2.2%）；逐粒子相位游动（1.7s）；亮度闪烁（0.9s）；半透明拖尾（rgba 背景 0.16）形成光带。
-- 分层：清晰 canvas + blur(18px) 光晕复制层（`drawImage` 每帧），还原官网"粒子 + 光晕"质感；品牌蓝渐变 + 8% 白粒点缀；**双层绘制**（大而淡的光晕圆 + 小而亮的核）替代 shadowBlur。
-- 工程细节：DPR 上限 2；`visibilitychange` 隐藏时暂停 rAF、恢复时**无条件重新调度**（schedule/step 单链模式，避免"初始 hidden 后 rAF 永不恢复"）；`?state=` 状态文字；采样失败退化纯文字；CSP 收紧（`script-src 'unsafe-inline'`，无网络依赖）。
-- 实测修复（用户反馈"矩形粒子"）：采样前误填不透明黑底导致 alpha 阈值把背景也采为目标点（10800 点铺满全画布）——改为透明底采样后，ASCII 渲染目标点呈清晰鲸鱼剪影（头部/鱼眼/身体/分叉尾鳍）。
-- 验证（CDP 实测）：目标点包围盒回到鲸鱼形状（spanX≈0.93 / spanY≈0.86）；无 JS 错误；帧计数增长（动画循环存活，遮挡时被 Chromium 节流属正常省电）；真实重启流程中窗口 URL 确认切至 `loading.html?state=…` 并自动恢复。
+- 鲸鱼剪影：官网品牌素材 `hero-whale.svg`（24×18 viewBox）的 path 存于 `whale-path.txt`，经 `scripts/inject-whale.mjs` 注入模板 `loading.template.html` 生成 `loading.html`（`__WHALE_PATH__` 占位符）。该 path 为**负空间设计**（头部实心、身体中部镂空、眼睛/鳍），ASCII 渲染与图标目检一致。
+- 渲染：SVG → data URI → 离屏 canvas（480×360，**透明底采样**）→ `getImageData` 像素采样（alpha>128，步长 4）→ 归一化目标点；900 个**方块粒子**（`fillRect`，大而淡的方形光晕 + 小而实的核心）从下方升起、淡入聚合。
+- 配色：粒子 72% 近黑 `#0f1115`（工作台正文色）+ 深品牌蓝 + 少量亮蓝点缀；白底拖尾（rgba 255 0.55）形成运动轨迹；blur(16px) 光晕层。
+- 防跳动：粒子颜色**创建时固定**（不再每帧随机）；高频闪烁改为极缓全局脉动（sin 4s ±10%）；**接近目标锁定**（距离 <0.5px 吸附、速度清零），只保留平滑的呼吸缩放（3.2s）与相位游动（2.1s）。
+- 布局：鲸鱼在画布正中（`cy = H/2`），wrap 上限 380px，与文字整体垂直居中，顶部不再被遮。
+- 转场：加载页自带淡入（0.5s）；壳 `loadApp` 在 file:// 页面时先调用 `window.__fadeOut()`（0.35s 淡出）再 `loadURL`——加载页 → 工作台**渐变过渡**而非突变。
+- 工程细节：DPR 上限 2；`visibilitychange` 隐藏时暂停 rAF、恢复时无条件重新调度（schedule/step 单链）；`?state=` 状态文字；采样失败退化纯文字；CSP 收紧零网络依赖。
+- 实测修复：① 采样前误填不透明黑底导致目标点铺满全矩形 → 透明底采样，形状恢复鲸鱼剪影；② 初始 hidden 时 rAF 被暂停后永不恢复 → schedule/step 重构；③ 每帧随机选色 + 高频闪烁导致"跳动" → 颜色固定 + 缓脉动 + 目标锁定。
+- 验证（CDP 实测）：背景纯白 `255,255,255`；深色粒子包围盒呈鲸鱼形状；动画满帧（1.2s 174 帧）；`__fadeOut` 生效；真实重启流程窗口切至 `loading.html?state=…` 并自动恢复。
 | `tray.ts` | 显示窗口/浏览器版/切换工作区/重启 Harness/查看日志/开机自启/通知开关/退出 |
 | `notify.ts` | 系统通知 + `app.setBadgeCount` 徽标 |
 | `ipc.ts` | 壳页面白名单（pickWorkspace/revealInFolder/openExternal/restartHarness/openLogs/getInfo） |
@@ -126,7 +128,7 @@ cordis.patch.yml  []（用户补丁层，壳不写它）
 
 ### 4.4 数据流
 
-1. **启动**：单实例锁 → 设置/日志 → token+overlay → 确保 profile/bridge → 定位运行时 → 建窗口（loading 页）→ `harness.start()` → 解析 `dsh web:`/`dsh desktop:` → `loadURL` → bridge 连接（自检 ping）→ 工作区注册（若刚切换）。
+1. **启动**：单实例锁 → 设置/日志 → token+overlay → 确保 profile/bridge → 定位运行时 → 建窗口（loading 页，粒子鲸鱼淡入）→ `harness.start()` → 解析 `dsh web:`/`dsh desktop:` → **触发加载页淡出（0.35s）** → `loadURL` → bridge 连接（自检 ping）→ 工作区注册（若刚切换）。
 2. **使用**：窗口内即官方 Web UI，零改动。
 3. **事件**：任务注册/完成/审批 → bridge WS → 徽标/系统通知 → 点击聚焦窗口。
 4. **退出**：托盘退出 → SIGTERM → 等 5s → SIGKILL → `app.exit(0)`；窗口关闭默认 hide（托盘常驻）。
@@ -141,7 +143,7 @@ dsh-desktop/
 │  ├─ dev.mjs            # build + dev-link + electron .
 │  ├─ build.mjs          # esbuild main/preload + bridge → resources/bridge
 │  ├─ dev-link.mjs       # junction: profile node_modules ← packages/bridge（仅 dev）
-│  ├─ make-icons.mjs     # 纯 JS PNG/ICO 图标生成（品牌蓝 + "H"）
+│  ├─ make-icons.mjs     # 纯 JS PNG/ICO 图标生成（白底 + 黑鲸，SVG path 自研光栅化）
 │  ├─ setup-runtime.mjs  # 便携 Node + npm install dsh → resources/dsh-runtime
 │  ├─ cdp.mjs            # CDP 调试辅助（探查页面）
 │  └─ e2e-turn.mjs       # CDP E2E：驱动真实 agent 轮次
