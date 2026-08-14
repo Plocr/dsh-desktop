@@ -51,6 +51,83 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /* ── 快照数据源（dashboard.snapshot / 事件共用） ───────────────────── */
+
+  // 审批请求环：最近 20 条 approval.asked（含时间戳），供仪表盘快照。
+  const approvals = []
+  function pushApproval(sessionId) {
+    approvals.push({ sessionId, askedAt: Date.now() })
+    if (approvals.length > 20) approvals.shift()
+  }
+
+  /** 跨会话聚合全部后台任务（owner 相对，须逐会话以 live Agent 为 caller）。 */
+  function listAllJobs() {
+    const sessions = safe(() => ctx.get('sessions')?.list() ?? [], [])
+    const agents = ctx.get('agents')
+    const jobs = ctx.get('jobs')
+    const out = []
+    for (const session of sessions) {
+      const agent = safe(() => agents?.get(session.id), undefined)
+      const list = safe(() => jobs?.list(agent), [])
+      out.push(...list)
+    }
+    return out
+  }
+
+  /** 会话目录：live 会话带标题；持久化会话只带 id/createdAt。 */
+  async function listSessions() {
+    const sessions = ctx.get('sessions')
+    const out = []
+    if (sessions) {
+      for (const session of safe(() => sessions.list(), [])) {
+        const title = safe(() => {
+          const events = session.events
+          const found = Array.isArray(events)
+            ? [...events].reverse().find((e) => e && e.type === 'session/title')
+            : undefined
+          return found && typeof found.data?.title === 'string' ? found.data.title : null
+        }, null)
+        out.push({ id: safe(() => session.id, null), title, live: true, createdAt: safe(() => session.header?.createdAt, null) })
+      }
+    }
+    const persistence = ctx.get('sessionPersistence')
+    if (persistence && typeof persistence.list === 'function') {
+      const liveIds = new Set(out.map((s) => s.id))
+      try {
+        const headers = await persistence.list()
+        for (const h of safe(() => headers, [])) {
+          if (!liveIds.has(safe(() => h.id, null))) {
+            out.push({ id: safe(() => h.id, null), title: null, live: false, createdAt: safe(() => h.createdAt, null) })
+          }
+        }
+      } catch (err) {
+        console.log(`[bridge] sessions.list persisted failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+    return out
+  }
+
+  /** 运行时信息（runtime.info 与 dashboard.snapshot 共用）。 */
+  function runtimeInfo() {
+    const registry = ctx.get('workspaceRegistry')
+    const workspaces = registry
+      ? safe(() =>
+          registry
+            .list()
+            .map((w) => ({ id: safe(() => w.id, undefined), title: safe(() => w.title, undefined) })),
+          [],
+        )
+      : []
+    return {
+      pid: process.pid,
+      dshHome: process.env.DSH_HOME ?? null,
+      cwd: process.cwd(),
+      node: process.version,
+      uptimeMs: Math.round(process.uptime() * 1000),
+      workspaces,
+    }
+  }
+
   /* ── RPC：shell -> harness ─────────────────────────────────────────── */
 
   async function handleCall(ws, msg) {
@@ -75,25 +152,9 @@ export function apply(ctx, config = {}) {
           reply({ pong: true, pid: process.pid })
           break
 
-        case 'runtime.info': {
-          const registry = ctx.get('workspaceRegistry')
-          const workspaces = registry
-            ? safe(() =>
-                registry
-                  .list()
-                  .map((w) => ({ id: safe(() => w.id, undefined), title: safe(() => w.title, undefined) })),
-                [],
-              )
-            : []
-          reply({
-            pid: process.pid,
-            dshHome: process.env.DSH_HOME ?? null,
-            cwd: process.cwd(),
-            node: process.version,
-            workspaces,
-          })
+        case 'runtime.info':
+          reply(runtimeInfo())
           break
-        }
 
         case 'workspace.register': {
           const path = typeof msg.params?.path === 'string' ? msg.params.path : ''
@@ -107,35 +168,19 @@ export function apply(ctx, config = {}) {
 
         case 'sessions.list': {
           // 会话目录：live 会话带标题；持久化会话只带 id/createdAt（轻量 list，不逐个 inspect）。
-          const sessions = ctx.get('sessions')
-          const out = []
-          if (sessions) {
-            for (const session of safe(() => sessions.list(), [])) {
-              const title = safe(() => {
-                const events = session.events
-                const found = Array.isArray(events)
-                  ? [...events].reverse().find((e) => e && e.type === 'session/title')
-                  : undefined
-                return found && typeof found.data?.title === 'string' ? found.data.title : null
-              }, null)
-              out.push({ id: safe(() => session.id, null), title, live: true, createdAt: safe(() => session.header?.createdAt, null) })
-            }
-          }
-          const persistence = ctx.get('sessionPersistence')
-          if (persistence && typeof persistence.list === 'function') {
-            const liveIds = new Set(out.map((s) => s.id))
-            try {
-              const headers = await persistence.list()
-              for (const h of safe(() => headers, [])) {
-                if (!liveIds.has(safe(() => h.id, null))) {
-                  out.push({ id: safe(() => h.id, null), title: null, live: false, createdAt: safe(() => h.createdAt, null) })
-                }
-              }
-            } catch (err) {
-              console.log(`[bridge] sessions.list persisted failed: ${err instanceof Error ? err.message : String(err)}`)
-            }
-          }
-          reply({ sessions: out })
+          reply({ sessions: await listSessions() })
+          break
+        }
+
+        case 'dashboard.snapshot': {
+          // 仪表盘全量快照：运行时 + 会话 + 跨会话任务聚合 + 最近审批。
+          // 壳在 bridge 连接后调用一次，之后靠事件增量更新。
+          reply({
+            runtime: runtimeInfo(),
+            sessions: await listSessions(),
+            jobs: listAllJobs().map(minimalJob),
+            approvals: [...approvals],
+          })
           break
         }
 
@@ -217,6 +262,17 @@ export function apply(ctx, config = {}) {
     /* 端口冲突等；print 环节会因无端口而不宣告 ready */
   })
 
+  /** 任务最小字段（绝不序列化 live 对象）。 */
+  function minimalJob(s) {
+    return {
+      id: safe(() => s.id, undefined),
+      kind: safe(() => s.kind, undefined),
+      label: safe(() => s.label, undefined),
+      status: safe(() => s.status, undefined),
+      owner: safe(() => s.ownerSession ?? s.owner ?? s.sessionId, undefined),
+    }
+  }
+
   /* ── harness 事件 -> 推送 ───────────────────────────────────────────── */
 
   // 后台任务：可见集变化（注册/stopping/结算/移除）与单个任务完成。
@@ -225,28 +281,8 @@ export function apply(ctx, config = {}) {
     const jobs = ctx.get('jobs')
     console.log(`[bridge] jobs service: ${jobs === undefined ? 'absent (after settle)' : 'present'}`)
     if (!jobs) return
-    const minimalJob = (s) => ({
-      id: safe(() => s.id, undefined),
-      kind: safe(() => s.kind, undefined),
-      label: safe(() => s.label, undefined),
-      status: safe(() => s.status, undefined),
-      owner: safe(() => s.ownerSession ?? s.owner ?? s.sessionId, undefined),
-    })
-    // jobs.list(caller) 是 owner 相对的；宿主侧要跨会话计数，须逐会话以
-    // 该会话的 live Agent 为 caller 聚合（与 host-apiproxy 的 session/jobs 帧同法）。
-    const listAll = () => {
-      const sessions = safe(() => ctx.get('sessions')?.list() ?? [], [])
-      const agents = ctx.get('agents')
-      const out = []
-      for (const session of sessions) {
-        const agent = safe(() => agents?.get(session.id), undefined)
-        const list = safe(() => jobs.list(agent), [])
-        out.push(...list)
-      }
-      return out
-    }
     const pushChanged = () => {
-      const list = listAll()
+      const list = listAllJobs().map(minimalJob)
       console.log(`[bridge] jobs.changed fired, ${list.length} jobs: ${JSON.stringify(list)}`)
       broadcast('jobs.changed', { jobs: list })
     }
@@ -279,9 +315,9 @@ export function apply(ctx, config = {}) {
   ctx.on('session/event', (event) => {
     const type = safe(() => event?.type, null)
     if (type === 'approval/asked') {
-      broadcast('approval.asked', {
-        sessionId: safe(() => event?.sessionId ?? event?.session?.id, null),
-      })
+      const sessionId = safe(() => event?.sessionId ?? event?.session?.id, null)
+      pushApproval(sessionId)
+      broadcast('approval.asked', { sessionId })
     }
   })
 
