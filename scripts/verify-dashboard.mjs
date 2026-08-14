@@ -52,6 +52,18 @@ const check = (name, ok, detail = '') => {
 
 /* 1. 面板注入与结构 */
 await sleep(3000)
+
+// 状态归一化：确保从「侧栏展开 + 终端收起」的基线开始（verify 幂等）
+const initLayout = await evalJs(`window.__dshd.getLayout()`)
+if (initLayout && !initLayout.sidebar) {
+  await evalJs(`window.__dshd.toggleSidebar()`)
+  await sleep(800)
+}
+if (initLayout && initLayout.term) {
+  await evalJs(`window.__dshd.toggleTerm()`)
+  await sleep(800)
+}
+
 const shell = await evalJs(`(() => {
   const root = document.getElementById('dshd-root')
   const tab = document.getElementById('dshd-tab')
@@ -118,10 +130,27 @@ check('终端（xterm）已引导', termBooted)
 const termOpen = await evalJs(`document.documentElement.dataset.dshdTerm`)
 check('终端面板展开', termOpen === '1')
 
+// 等待真实 shell 后端就绪（spawn 异步，未就绪时输入会丢失）
+let backendReady = false
+for (let i = 0; i < 12; i++) {
+  const info = await evalJs(`window.dshDesktop.getInfo()`)
+  if (info && info.terminalBackend) {
+    backendReady = true
+    break
+  }
+  await sleep(500)
+}
+check('终端后端就绪', backendReady, `backend=${backendReady ? 'pipe/pty' : 'none'}`)
+
 // 输入一行 PowerShell 命令并回车（真实链路：xterm 输入 → IPC → shell stdin → 输出回流）
 await evalJs(`window.dshDesktop.termWrite('Write-Output DSH_DASHBOARD_OK\\r')`)
-await sleep(3000)
-const termText = await evalJs(`document.querySelector('#dshd-term-xterm .xterm-screen')?.innerText || ''`)
+// 冷启动（安装后首启）shell 初始化较慢：轮询等待输出（最长 20s）
+let termText = ''
+for (let i = 0; i < 20; i++) {
+  termText = await evalJs(`document.querySelector('#dshd-term-xterm .xterm-screen')?.innerText || ''`)
+  if (termText.includes('DSH_DASHBOARD_OK')) break
+  await sleep(1000)
+}
 check('终端回环输出', termText.includes('DSH_DASHBOARD_OK'), termText.replace(/\n/g, '⏎').slice(-120))
 
 /* 7. 收尾：关终端 */
