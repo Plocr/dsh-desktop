@@ -313,7 +313,8 @@ function renderLogs(): void {
         `<div class="dshd-log-line" data-stream="${l.stream}"><span class="dshd-log-t">${fmtTime(l.ts)}</span><span class="dshd-log-dot"></span><span class="dshd-log-text">${esc(l.text)}</span></div>`,
     )
     .join('')
-  if (state.logAuto && (nearBottom || !host.dataset.paused)) {
+  // 自动滚动仅在用户位于底部附近时生效（手动上翻阅读不被打断）
+  if (state.logAuto && nearBottom) {
     host.scrollTop = host.scrollHeight
   }
 }
@@ -485,16 +486,7 @@ function wireEvents(): void {
     const chip = (e.target as HTMLElement).closest('.dshd-ws-chip') as HTMLElement | null
     if (chip) void api.dashAction('pickWorkspace')
   })
-  $('#dshd-term-new')?.addEventListener('click', () => {
-    void api.termOpen()
-  })
-  $('#dshd-term-close')?.addEventListener('click', toggleTerm)
-  document.querySelectorAll('.dshd-term-tab').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const shell = (btn as HTMLElement).dataset.shell
-      void api.termOpen(shell)
-    })
-  })
+  // 终端按钮（tab/＋/✕）由 term.ts 接管（lazy 加载后绑定，避免双重 spawn）
   // 侧栏宽度拖拽（左缘 handle）
   const resizer = $('#dshd-resize')
   if (resizer) {
