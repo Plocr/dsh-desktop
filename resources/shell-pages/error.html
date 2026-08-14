@@ -7,8 +7,10 @@
 <style>
   :root { --bg: #ffffff; --ink: #0f1115; --sub: #6b7280; --panel: #f6f7f9; --border: #e4e7ec; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #0f1115; --ink: #f5f6f8; --sub: #9aa4b2; --panel: #161a22; --border: #2a3342; }
+    :root:not([data-theme]) { --bg: #151517; --ink: #f9fafb; --sub: #9aa0a6; --panel: #1e1e21; --border: #2e2f33; }
   }
+  :root[data-theme="dark"] { --bg: #151517; --ink: #f9fafb; --sub: #9aa0a6; --panel: #1e1e21; --border: #2e2f33; }
+  :root[data-theme="light"] { --bg: #ffffff; --ink: #0f1115; --sub: #6b7280; --panel: #f6f7f9; --border: #e4e7ec; }
   html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink); font-family: "Segoe UI", system-ui, sans-serif; display: flex; align-items: center; justify-content: center; }
   .box { max-width: 560px; text-align: left; padding: 24px; border: 1px solid var(--border); border-radius: 10px; }
   h1 { font-size: 16px; color: #b42318; margin: 0 0 10px; }
@@ -25,11 +27,11 @@
     <button onclick="window.dshDesktop && window.dshDesktop.restartHarness()">重启 Harness</button>
   </div>
   <script>
-    if (location.search) {
-      const q = new URLSearchParams(location.search)
-      const msg = q.get('msg')
-      if (msg) document.getElementById('msg').textContent = decodeURIComponent(msg)
-    }
+    const q = new URLSearchParams(location.search)
+    const theme = q.get('theme')
+    if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme
+    const msg = q.get('msg')
+    if (msg) document.getElementById('msg').textContent = decodeURIComponent(msg)
   </script>
 </body>
 </html>

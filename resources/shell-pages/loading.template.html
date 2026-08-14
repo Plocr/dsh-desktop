@@ -10,13 +10,24 @@
     --ink: #0f1115;
     --sub: #6b7280;
   }
-  /* 跟随系统主题：深色模式下深底浅鲸，夜间不刺眼 */
+  /* 兜底：跟随系统主题 */
   @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0f1115;
-      --ink: #f5f6f8;
-      --sub: #9aa4b2;
+    :root:not([data-theme]) {
+      --bg: #151517;
+      --ink: #f9fafb;
+      --sub: #9aa0a6;
     }
+  }
+  /* 壳传入 ?theme= 强制主题（跟随 harness 设置：浅色/深色/跟随系统） */
+  :root[data-theme="dark"] {
+    --bg: #151517;
+    --ink: #f9fafb;
+    --sub: #9aa0a6;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff;
+    --ink: #0f1115;
+    --sub: #6b7280;
   }
   html, body {
     height: 100%; margin: 0; overflow: hidden;
@@ -76,6 +87,12 @@
     <div class="dots"><span></span><span></span><span></span></div>
   </div>
 <script>
+/* 壳传入 ?theme=light|dark 时强制主题（跟随 harness 设置）；缺省跟随系统 */
+const theme = new URLSearchParams(location.search).get('theme')
+if (theme === 'light' || theme === 'dark') {
+  document.documentElement.dataset.theme = theme
+}
+
 /* 淡出钩子：壳在 ready 时调用，渐变淡出后再切到工作台 */
 window.__fadeOut = () =>
   new Promise((resolve) => {

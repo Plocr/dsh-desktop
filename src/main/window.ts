@@ -2,21 +2,23 @@
  * 主窗口：加载 harness Web UI（http://127.0.0.1:<port>），
  * 内置 loading/error 过渡页；导航锁 + 外链拦截。
  */
-import { BrowserWindow, nativeTheme, shell } from 'electron'
+import { BrowserWindow, shell } from 'electron'
 import path from 'node:path'
+import { THEME_COLORS } from './theme'
 
 export interface WindowHandle {
   win: BrowserWindow
   loadApp: (url: string) => void
-  showLoading: (state?: string) => void
-  showError: (msg: string) => void
+  showLoading: (state?: string, theme?: 'light' | 'dark') => void
+  showError: (msg: string, theme?: 'light' | 'dark') => void
 }
 
 export function createWindow(
   preloadPath: string,
   resourcesDir: string,
-  opts: { isAllowed: (url: string) => boolean },
+  opts: { isAllowed: (url: string) => boolean; theme: 'light' | 'dark' },
 ): WindowHandle {
+  const theme = opts.theme
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -25,8 +27,8 @@ export function createWindow(
     show: false,
     autoHideMenuBar: true,
     title: 'DSH Desktop',
-    // 窗口底色跟随系统主题（与加载页一致，避免绘制前闪错底色）
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0f1115' : '#ffffff',
+    // 窗口底色跟随 harness 主题（与加载页一致，避免绘制前闪错底色）
+    backgroundColor: THEME_COLORS[theme].bg,
     icon: path.join(resourcesDir, 'icons', 'icon.png'),
     webPreferences: {
       preload: preloadPath,
@@ -90,15 +92,20 @@ export function createWindow(
     }
   }
 
-  const showLoading = (state?: string): void => {
+  const showLoading = (state?: string, themeArg?: 'light' | 'dark'): void => {
     if (win.isDestroyed()) return
     loadingShownAt = Date.now()
-    void win.loadFile(loadingPage, state ? { query: { state } } : undefined)
+    const query: Record<string, string> = {}
+    if (state) query.state = state
+    if (themeArg) query.theme = themeArg
+    void win.loadFile(loadingPage, { query })
   }
 
-  const showError = (msg: string): void => {
+  const showError = (msg: string, themeArg?: 'light' | 'dark'): void => {
     if (win.isDestroyed()) return
-    void win.loadFile(errorPage, { query: { msg } })
+    const query: Record<string, string> = { msg }
+    if (themeArg) query.theme = themeArg
+    void win.loadFile(errorPage, { query })
   }
 
   return { win, loadApp, showLoading, showError }

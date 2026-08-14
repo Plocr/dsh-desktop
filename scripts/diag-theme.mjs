@@ -1,4 +1,4 @@
-// 验证加载页双主题：dark/light 下背景与鲸鱼颜色
+// 验证加载页 ?theme= 强制主题（settings.yaml 当前为 dark）
 const targets = await (await fetch('http://127.0.0.1:9222/json')).json()
 const page = targets.find((t) => t.type === 'page')
 const ws = new WebSocket(page.webSocketDebuggerUrl)
@@ -21,36 +21,42 @@ ws.onmessage = (ev) => {
 await new Promise((r) => (ws.onopen = r))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-await call('Page.navigate', { url: 'file:///E:/Dsh/dsh-desktop/resources/shell-pages/loading.html' })
-await sleep(1500)
-
 async function read() {
-  return (await call('Runtime.evaluate', {
+  const r = await call('Runtime.evaluate', {
     expression: `(() => {
       const body = getComputedStyle(document.body);
-      const svg = document.querySelector('.whale');
+      const title = getComputedStyle(document.querySelector('.title'));
       const path = document.querySelector('.whale path');
-      const dot = document.querySelector('.dots span');
       return {
-        scheme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
+        url: location.search,
+        themeAttr: document.documentElement.dataset.theme || null,
         bodyBg: body.backgroundColor,
-        titleColor: getComputedStyle(document.querySelector('.title')).color,
-        whaleColor: getComputedStyle(svg).color,
-        pathFill: path.getAttribute('fill'),
-        dotBg: getComputedStyle(dot).backgroundColor,
-        fadeOut: typeof window.__fadeOut === 'function',
+        titleColor: title.color,
+        pathFill: path ? path.getAttribute('fill') : null,
       };
     })()`,
     returnByValue: true,
-  })).result.value
+  })
+  return r.result.value
 }
 
+// 1) 无 ?theme：跟随媒体查询（模拟 light）
+await call('Page.navigate', { url: 'file:///E:/Dsh/dsh-desktop/resources/shell-pages/loading.html' })
 await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] })
-await sleep(300)
-console.log('LIGHT:', JSON.stringify(await read()))
+await sleep(600)
+console.log('no-theme + media light:', JSON.stringify(await read()))
 
+// 2) ?theme=dark 强制深色（即使 media light）
+await call('Page.navigate', { url: 'file:///E:/Dsh/dsh-desktop/resources/shell-pages/loading.html?theme=dark' })
+await sleep(600)
+console.log('?theme=dark + media light:', JSON.stringify(await read()))
+
+// 3) ?theme=light 强制浅色（即使 media dark）
 await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] })
-await sleep(300)
-console.log('DARK :', JSON.stringify(await read()))
+await call('Page.navigate', { url: 'file:///E:/Dsh/dsh-desktop/resources/shell-pages/loading.html?theme=light' })
+await sleep(600)
+console.log('?theme=light + media dark:', JSON.stringify(await read()))
+
+// 4) 壳真实流程：settings=dark 时 showLoading 传 ?theme=dark（重启 harness 观察）
 ws.close()
 process.exit(0)

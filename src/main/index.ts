@@ -15,6 +15,7 @@ import { appResourcesDir, ensureProfile, resolveRuntime, writeOverlay } from './
 import { HarnessManager, type HarnessReady } from './harness'
 import { BridgeClient } from './bridge'
 import { createWindow, type WindowHandle } from './window'
+import { resolveEffectiveTheme } from './theme'
 import { createTray, type TrayHandle } from './tray'
 import { notify, setBadge } from './notify'
 import { handleBridgeEvent, runningJobCount } from './bridgeEvents'
@@ -244,8 +245,9 @@ async function main(): Promise<void> {
 
   win = createWindow(path.join(__dirname, '..', 'preload', 'index.cjs'), resourcesDir, {
     isAllowed: (url) => url.startsWith('http://127.0.0.1:') || url.startsWith('file://'),
+    theme: resolveEffectiveTheme(dshHome()),
   })
-  win.showLoading()
+  win.showLoading(undefined, resolveEffectiveTheme(dshHome()))
   win.win.on('close', (e) => {
     if (settings.trayOnClose && !quitting) {
       e.preventDefault()
@@ -278,14 +280,14 @@ async function main(): Promise<void> {
       },
       onExit: ({ code, willRestart }) => {
         if (willRestart) {
-          win?.showLoading('Harness 异常退出，正在自动重启…')
+          win?.showLoading('Harness 异常退出，正在自动重启…', resolveEffectiveTheme(dshHome()))
         }
         refreshTray()
       },
       onLog: (stream, line) => log(stream === 'stdout' ? 'info' : 'error', `[harness:${stream}] ${line}`),
       onState: (s) => {
         if (s === 'starting') {
-          if (!lastUrl) win?.showLoading()
+          if (!lastUrl) win?.showLoading(undefined, resolveEffectiveTheme(dshHome()))
         }
         refreshTray()
       },
