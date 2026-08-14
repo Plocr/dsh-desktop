@@ -109,13 +109,17 @@ html[data-dshd-sidebar="0"] #dshd-root {
   border: none;
   background: transparent;
   color: var(--dsw-alias-label-secondary, #61666b);
-  font-size: 16px;
-  line-height: 1;
   width: 24px;
   height: 24px;
   border-radius: 6px;
   cursor: pointer;
   padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#dshd-collapse svg {
+  display: block;
 }
 #dshd-collapse:hover {
   background: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06));
