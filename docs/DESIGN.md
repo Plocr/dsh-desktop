@@ -174,11 +174,23 @@ E2E（`scripts/e2e-turn.mjs`，需 `DSH_DESKTOP_ELECTRON_ARGS=--remote-debugging
 
 - M0 脚手架 ✅ ｜ M1 核心壳 ✅（含自愈）｜ M2 桥接与原生集成 ✅（事件链路+单测）
 - M3 打包 ✅：setup-runtime（tar.gz 自包含运行时）+ electron-builder NSIS；干净首启验证通过（profile 创建、bridge 同步、运行时解压、从解压运行时 spawn、UI 加载）
-- M4（可选）：electron-updater 自动更新、`dsh://` 深链、全局快捷键、多 profile 切换
+- M4 全部完成 ✅：
+  - **全局快捷键**：默认 `CommandOrControl+Shift+Space` 唤出窗口（settings.json 可改）；实测：最小化 → 发键 → 窗口恢复
+  - **dsh:// 深链**：`dsh://`（聚焦）、`dsh://new`（新建会话）、`dsh://session/<id>`（打开会话——bridge `session.resolve` 解析标题 → 展开折叠区 → 侧边栏点击）；热启动与冷启动均实测
+  - **自动更新**：electron-updater + generic feed（`electron-builder.yml` publish + `DSH_DESKTOP_UPDATE_URL` 运行时覆盖）；启动 15s 自动检查、托盘手动检查、30s 超时保护、下载完成通知点击即装；实测本地 feed 全链路（发现 9.9.9 → 差分回退全量 → 100% → 就绪事件）
+- M4 过程中的修复（实测发现）：
+  - 单实例锁失败改用 `app.exit(0)`（`app.quit()` 会让 main() 半途执行）
+  - 协议注册用 `app.getAppPath()` 而非 `argv[1]`（dev 启动参数会占用 argv[1]）
+  - `proxy-bypass-list` 加入 127.0.0.1（系统代理会劫持本地更新请求）
+  - dev-link 把打包版同步的旧 bridge 副本替换为 junction
+  - bridge 0.1.0 → 0.2.0（新增 `sessions.list` / `session.resolve` RPC），app 0.1.0 → 0.2.0
 
 ## 9. 已知限制与后续
 
 - `jobs.list` 逐会话聚合在会话数多时 O(n)；后续可改为监听 `session/jobs` 帧或注册表扩展。
+- `dsh://session/<id>` 依赖侧边栏渲染该会话（当前工作区可见的会话）；未分组/其他工作区的会话只聚焦窗口。
 - 通知/徽标仅在任务事件到达时更新；harness 不在前台时任务列表为启动时快照（服务端持久化，重启后恢复）。
 - macOS/Linux 未实机验证（配置就绪）。
 - harness 版本锁定 0.1.0-rc.6；升级需重跑 setup-runtime.mjs 并同步 bridge 版本。
+- 自动更新源默认占位 URL（`.invalid` 保留域名）；正式部署需覆盖（构建时 `--config.publish.url=` 或运行时 `DSH_DESKTOP_UPDATE_URL`）并上传 `latest.yml` + 安装包。
+- 更新安装依赖 NSIS 安装器（`quitAndInstall` 静默执行）；`oneClick: false` 下更新流程已验证到"就绪"事件，安装动作留待真实发布后人工确认。

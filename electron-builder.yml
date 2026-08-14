@@ -43,5 +43,12 @@ portable:
 
 npmRebuild: false
 
+# 自动更新源（generic）。默认占位地址不可达（.invalid 保留域名），
+# 真实部署时覆盖：npx electron-builder --win nsis --config.publish.url=https://你的更新服务器/
+# 或设置 DSH_DESKTOP_UPDATE_URL 运行时覆盖。
+publish:
+  provider: generic
+  url: https://updates.dsh-desktop.invalid/dsh-desktop
+
 # 复用 node_modules/electron/dist，避免 electron-builder 重新下载
 electronDist: node_modules/electron/dist

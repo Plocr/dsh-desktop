@@ -12,7 +12,7 @@ const common = {
   format: 'cjs',
   target: 'node22',
   sourcemap: true,
-  external: ['electron'],
+  external: ['electron', 'electron-updater'],
   logLevel: 'info',
 }
 

@@ -105,6 +105,70 @@ export function apply(ctx, config = {}) {
           break
         }
 
+        case 'sessions.list': {
+          // 会话目录：live 会话带标题；持久化会话只带 id/createdAt（轻量 list，不逐个 inspect）。
+          const sessions = ctx.get('sessions')
+          const out = []
+          if (sessions) {
+            for (const session of safe(() => sessions.list(), [])) {
+              const title = safe(() => {
+                const events = session.events
+                const found = Array.isArray(events)
+                  ? [...events].reverse().find((e) => e && e.type === 'session/title')
+                  : undefined
+                return found && typeof found.data?.title === 'string' ? found.data.title : null
+              }, null)
+              out.push({ id: safe(() => session.id, null), title, live: true, createdAt: safe(() => session.header?.createdAt, null) })
+            }
+          }
+          const persistence = ctx.get('sessionPersistence')
+          if (persistence && typeof persistence.list === 'function') {
+            const liveIds = new Set(out.map((s) => s.id))
+            try {
+              const headers = await persistence.list()
+              for (const h of safe(() => headers, [])) {
+                if (!liveIds.has(safe(() => h.id, null))) {
+                  out.push({ id: safe(() => h.id, null), title: null, live: false, createdAt: safe(() => h.createdAt, null) })
+                }
+              }
+            } catch (err) {
+              console.log(`[bridge] sessions.list persisted failed: ${err instanceof Error ? err.message : String(err)}`)
+            }
+          }
+          reply({ sessions: out })
+          break
+        }
+
+        case 'session.resolve': {
+          // 深链用：按会话 id 解析标题（live 优先，持久化 inspect 兜底）。
+          const id = typeof msg.params?.id === 'string' ? msg.params.id : ''
+          if (!id) return fail('missing params.id')
+          const titleOf = (events) => {
+            const found = Array.isArray(events)
+              ? [...events].reverse().find((e) => e && e.type === 'session/title')
+              : undefined
+            return found && typeof found.data?.title === 'string' ? found.data.title : null
+          }
+          const sessions = ctx.get('sessions')
+          const live = sessions ? safe(() => sessions.get(id), undefined) : undefined
+          if (live) {
+            reply({ id, live: true, title: titleOf(safe(() => live.events, null)), createdAt: safe(() => live.header?.createdAt, null) })
+            break
+          }
+          const persistence = ctx.get('sessionPersistence')
+          if (persistence && typeof persistence.inspect === 'function') {
+            try {
+              const view = await persistence.inspect(id)
+              reply({ id, live: false, title: titleOf(view?.events), createdAt: safe(() => view?.meta?.createdAt, null) })
+            } catch (err) {
+              reply({ id, live: false, title: null, error: err instanceof Error ? err.message : String(err) })
+            }
+            break
+          }
+          reply({ id, live: false, title: null })
+          break
+        }
+
         default:
           fail(`unknown method: ${msg.method}`)
       }

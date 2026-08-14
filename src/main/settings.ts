@@ -15,6 +15,10 @@ export interface AppSettings {
   isolatedHome: boolean
   /** 最近工作区（新→旧），首个存在的作为默认 cwd */
   recentWorkspaces: string[]
+  /** 全局唤出快捷键（Electron accelerator 语法；空串禁用） */
+  globalShortcut: string
+  /** 启动后自动检查更新 */
+  autoUpdate: boolean
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -23,6 +27,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoStart: false,
   isolatedHome: false,
   recentWorkspaces: [],
+  globalShortcut: 'CommandOrControl+Shift+Space',
+  autoUpdate: true,
 }
 
 export function loadSettings(file: string): AppSettings {
@@ -37,6 +43,8 @@ export function loadSettings(file: string): AppSettings {
       if (Array.isArray(raw.recentWorkspaces)) {
         out.recentWorkspaces = raw.recentWorkspaces.filter((w): w is string => typeof w === 'string')
       }
+      if (typeof raw.globalShortcut === 'string') out.globalShortcut = raw.globalShortcut
+      if (typeof raw.autoUpdate === 'boolean') out.autoUpdate = raw.autoUpdate
     }
   } catch {
     /* 损坏则回退默认 */

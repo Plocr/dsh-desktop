@@ -2,7 +2,7 @@
  * DSH Desktop 主进程入口：
  * 单实例 → 设置/日志 → 确保 desktop profile → 定位运行时 → 生成 overlay →
  * 创建窗口/托盘 → spawn harness → 解析 URL/桥接行 → 加载 Web UI →
- * 桥接事件（徽标/通知）→ 优雅停机。
+ * 桥接事件（徽标/通知）→ 全局快捷键 / dsh:// 深链 / 自动更新 → 优雅停机。
  */
 import { app, dialog, shell } from 'electron'
 import { existsSync } from 'node:fs'
@@ -19,13 +19,20 @@ import { createTray, type TrayHandle } from './tray'
 import { notify, setBadge } from './notify'
 import { handleBridgeEvent, runningJobCount } from './bridgeEvents'
 import { registerIpc } from './ipc'
+import { parseDeepLink, extractDeepLinkFromArgv, type DeepLinkAction } from './deepLink'
+import { registerGlobalShortcut, currentShortcut, unregisterAllShortcuts } from './shortcut'
+import { initUpdater, checkNow } from './updater'
 
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
-  app.quit()
+  // 第二个实例：立即退出（app.exit 不走 before-quit/whenReady，避免 main() 半途执行）
+  app.exit(0)
 }
 
 app.setAppUserModelId('com.dsh.desktop.workbench')
+
+// 本地地址绕过系统代理（electron-updater/Chromium net 走系统代理时会劫持 127.0.0.1 请求）
+app.commandLine.appendSwitch('proxy-bypass-list', '127.0.0.1;localhost;<local>')
 
 let win: WindowHandle | null = null
 let trayHandle: TrayHandle | null = null
@@ -37,6 +44,7 @@ let quitting = false
 let pendingRegisterWorkspace: string | null = null
 let lastUrl: string | null = null
 let runningJobs = 0
+let pendingDeepLinks: DeepLinkAction[] = []
 
 function dshHome(): string {
   return settings.isolatedHome ? path.join(app.getPath('userData'), 'dsh-home') : path.join(os.homedir(), '.dsh')
@@ -74,6 +82,7 @@ function currentInfo(): unknown {
     runningJobs,
     appData: app.getPath('userData'),
     logsDir: logDirPath(),
+    globalShortcut: currentShortcut(),
   }
 }
 
@@ -112,6 +121,117 @@ function handleBridgeEventWrapper(type: string, payload: unknown): void {
     refreshTray()
   }
 }
+
+/* ── dsh:// 深链 ─────────────────────────────────────────────────────── */
+
+/** 注册 dsh:// 协议（Windows/Linux 注册表；macOS 走 open-url）。 */
+function registerProtocol(): void {
+  try {
+    if (process.defaultApp) {
+      // 开发模式：注册到 electron 可执行文件，并带上应用目录（不能用 argv[1]，可能被启动参数占用）
+      app.setAsDefaultProtocolClient('dsh', process.execPath, [app.getAppPath()])
+    } else {
+      app.setAsDefaultProtocolClient('dsh')
+    }
+    log('info', 'dsh:// protocol registered')
+  } catch (err) {
+    log('error', `protocol registration failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+/** 页面是否已加载 harness Web UI。 */
+function uiReady(): boolean {
+  const w = win?.win
+  if (!w || w.isDestroyed()) return false
+  return w.webContents.getURL().startsWith('http://127.0.0.1:')
+}
+
+/** 在侧边栏按匹配器点击一行（React 合成事件可被冒泡 click 触发）。 */
+async function clickSidebarRow(matcherJs: string): Promise<boolean> {
+  const w = win?.win
+  if (!w || w.isDestroyed() || !uiReady()) return false
+  try {
+    const clicked = await w.webContents.executeJavaScript(`(() => {
+      const rows = [...document.querySelectorAll('[role=treeitem]')];
+      const target = rows.find((el) => ${matcherJs});
+      if (!target) return false;
+      target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      return true;
+    })()`)
+    return clicked === true
+  } catch (err) {
+    log('error', `sidebar click failed: ${err instanceof Error ? err.message : String(err)}`)
+    return false
+  }
+}
+
+/** 展开侧边栏折叠的会话区（"展开其余 N 个会话"按钮）。 */
+async function expandOverflowSessions(): Promise<void> {
+  const w = win?.win
+  if (!w || w.isDestroyed() || !uiReady()) return
+  try {
+    await w.webContents.executeJavaScript(`(() => {
+      const btn = [...document.querySelectorAll('button')].find((b) => (b.textContent || '').includes('展开其余'));
+      if (btn) { btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window })); return true; }
+      return false;
+    })()`)
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 处理一条深链：聚焦窗口 + 尽力导航（新会话/指定会话）。 */
+async function handleDeepLink(action: DeepLinkAction): Promise<void> {
+  log('info', `deep link: ${JSON.stringify(action)}`)
+  showWindow()
+  if (action.kind === 'focus') return
+  if (!uiReady()) {
+    pendingDeepLinks.push(action)
+    return
+  }
+  if (action.kind === 'new') {
+    await clickSidebarRow(`(el.textContent || '').trim() === '新会话'`)
+    return
+  }
+  if (action.kind === 'session' && action.sessionId) {
+    let title: unknown = null
+    try {
+      const res = (await bridge.call('session.resolve', { id: action.sessionId }, 8000)) as { title?: unknown }
+      title = res?.title
+    } catch (err) {
+      log('error', `session.resolve failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    if (typeof title === 'string' && title) {
+      await expandOverflowSessions()
+      await new Promise((r) => setTimeout(r, 500))
+      const ok = await clickSidebarRow(`(el.textContent || '').trim().startsWith(${JSON.stringify(title)})`)
+      if (!ok) log('info', `session row not found in sidebar: ${title}`)
+    } else {
+      log('info', `session title unavailable (${String(action.sessionId)}); focusing only`)
+    }
+  }
+}
+
+/** 处理启动 argv / 二次实例携带的深链。 */
+function consumeDeepLinkArgv(argv: string[]): void {
+  const url = extractDeepLinkFromArgv(argv)
+  if (!url) return
+  const action = parseDeepLink(url)
+  if (action) void handleDeepLink(action)
+}
+
+/** 处理排队中的深链（UI 就绪后调用）。 */
+function flushPendingDeepLinks(): void {
+  if (!uiReady() || pendingDeepLinks.length === 0) return
+  const queued = pendingDeepLinks
+  pendingDeepLinks = []
+  // 等 React 渲染完成再点击
+  setTimeout(() => {
+    for (const action of queued) void handleDeepLink(action)
+  }, 1500)
+}
+
+/* ── 主流程 ──────────────────────────────────────────────────────────── */
 
 async function main(): Promise<void> {
   initLogger(path.join(app.getPath('userData'), 'logs'))
@@ -153,6 +273,8 @@ async function main(): Promise<void> {
         win?.loadApp(r.url)
         bridge.connect()
         refreshTray()
+        // UI 加载完成后处理启动时排队的深链
+        setTimeout(() => flushPendingDeepLinks(), 2500)
       },
       onExit: ({ code, willRestart }) => {
         if (willRestart) {
@@ -205,6 +327,7 @@ async function main(): Promise<void> {
       runningJobs,
       harnessState:
         harness?.state === 'ready' ? '运行中' : harness?.state === 'starting' ? '启动中' : '已停止',
+      globalShortcut: currentShortcut(),
     }),
     showWindow,
     openBrowser,
@@ -214,6 +337,7 @@ async function main(): Promise<void> {
       harness.restart()
     },
     openLogs: () => void shell.openPath(logDirPath()),
+    checkUpdate: () => void checkNow(true),
     setAutoStart: (v) => {
       settings.autoStart = v
       saveSettings(settingsFile, settings)
@@ -240,9 +364,23 @@ async function main(): Promise<void> {
     getInfo: currentInfo,
   })
 
-  app.on('second-instance', () => {
+  // dsh:// 协议 + 全局快捷键 + 自动更新
+  registerProtocol()
+  registerGlobalShortcut(settings.globalShortcut, () => showWindow())
+  initUpdater(
+    {
+      onManualResult: (msg) => notify('检查更新', msg, () => showWindow()),
+    },
+    { autoCheck: settings.autoUpdate },
+  )
+
+  app.on('second-instance', (_e, argv) => {
+    consumeDeepLinkArgv(argv)
     showWindow()
   })
+
+  // 通过 dsh:// 协议冷启动时，URL 出现在首个实例的 argv 中
+  consumeDeepLinkArgv(process.argv)
 
   harness.start()
 }
@@ -252,6 +390,7 @@ app.on('before-quit', (e) => {
   e.preventDefault()
   quitting = true
   log('info', 'quitting: stopping harness')
+  unregisterAllShortcuts()
   bridge?.stop()
   void harness
     ?.stop()

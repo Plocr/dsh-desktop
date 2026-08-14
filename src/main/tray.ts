@@ -1,18 +1,25 @@
 /**
  * 托盘：显示窗口 / 打开浏览器版 / 切换工作区 / 重启 Harness / 查看日志 /
- * 开机自启开关 / 通知开关 / 退出。状态变化时重建菜单。
+ * 检查更新 / 开机自启 / 通知开关 / 全局快捷键信息 / 退出。状态变化时重建菜单。
  */
 import { Menu, nativeImage, Tray } from 'electron'
 import type { AppSettings } from './settings'
 
 export interface TrayDeps {
   getUrl: () => string | null
-  getState: () => { autoStart: boolean; notifications: boolean; runningJobs: number; harnessState: string }
+  getState: () => {
+    autoStart: boolean
+    notifications: boolean
+    runningJobs: number
+    harnessState: string
+    globalShortcut: string
+  }
   showWindow: () => void
   openBrowser: () => void
   pickWorkspace: () => void
   restartHarness: () => void
   openLogs: () => void
+  checkUpdate: () => void
   setAutoStart: (v: boolean) => void
   setNotifications: (v: boolean) => void
   quit: () => void
@@ -43,6 +50,11 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
       { label: '切换工作区…', click: () => deps.pickWorkspace() },
       { label: '重启 Harness', click: () => deps.restartHarness() },
       { label: '查看日志', click: () => deps.openLogs() },
+      { label: '检查更新…', click: () => deps.checkUpdate() },
+      {
+        label: s.globalShortcut ? `全局快捷键：${s.globalShortcut}` : '全局快捷键：未启用',
+        enabled: false,
+      },
       { type: 'separator' },
       {
         label: '开机自启',
