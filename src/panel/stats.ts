@@ -119,3 +119,12 @@ export function parseContextUsage(ariaLabel: string, detailText: string): Contex
   if (msg) out.breakdown.messages = parseTokens(msg[1])
   return out
 }
+
+/** deepseek-v4 系列上下文窗口（tokens；官方定价/模型文档同源，harness 未展开明细时用）。 */
+export const CONTEXT_WINDOW_DEFAULT = 1_000_000
+
+/** 明细缺失时按百分比估算已用 tokens（百分比为整数，结果近似）。 */
+export function estimateUsedTokens(percent: number, windowTokens = CONTEXT_WINDOW_DEFAULT): number {
+  const pct = Math.min(100, Math.max(0, percent))
+  return Math.round((pct / 100) * windowTokens)
+}

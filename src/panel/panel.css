@@ -607,6 +607,10 @@ html[data-dshd-term="0"] #dshd-term { transform: translateY(102%); box-shadow: n
   color: var(--dsw-alias-label-secondary, #61666b);
   white-space: nowrap;
 }
+.dshd-ctx-part-hint {
+  color: var(--dsw-alias-label-tertiary, #9aa0a6);
+  font-style: italic;
+}
 
 /* ── 会话指标 ───────────────────────────────────────────────────────── */
 

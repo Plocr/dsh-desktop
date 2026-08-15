@@ -154,6 +154,7 @@ const ctxCard = await evalJs(`(() => {
   return { hasRing: !!fill, dash: fill?.getAttribute('stroke-dasharray'), pct: pct?.textContent, sub: document.getElementById('dshd-ctx-sub')?.textContent }
 })()`)
 check('上下文圆环渲染', ctxCard.hasRing, `pct=${ctxCard.pct} dash=${ctxCard.dash}`)
+check('上下文数值显示（估算或精确）', !!ctxCard.sub && ctxCard.sub !== '— / —' && !ctxCard.sub.startsWith('—'), `sub=${ctxCard.sub}`)
 const metricsCard = await evalJs(`(() => {
   const host = document.getElementById('dshd-metrics')
   const cost = document.getElementById('dshd-cost')
@@ -214,13 +215,19 @@ check('终端后端就绪', backendReady, `backend=${backendReady ? 'pipe/pty' :
 
 // 等待 shell 提示符出现（安装后冷启动 + PTY/PSReadLine 初始化最慢，最长 30s）
 let promptReady = false
-for (let i = 0; i < 30; i++) {
-  const t = await evalJs(`document.querySelector('#dshd-term-xterm .dshd-term-view:not([style*="none"])')?.innerText ?? ''`)
-  if (t.includes('PS C:') || t.includes('C:\\')) {
-    promptReady = true
-    break
+const waitPrompt = async (rounds) => {
+  for (let i = 0; i < rounds; i++) {
+    const t = await evalJs(`document.querySelector('#dshd-term-xterm .dshd-term-view:not([style*="none"])')?.innerText ?? ''`)
+    if (t.includes('PS C:') || t.includes('C:\\')) return true
+    await sleep(1000)
   }
-  await sleep(1000)
+  return false
+}
+promptReady = await waitPrompt(30)
+if (!promptReady) {
+  // PSReadLine 初始化慢时，发送一次回车可触发提示符渲染（对会话无害）
+  await evalJs(`window.__dshdTerm.write('\\r')`)
+  promptReady = await waitPrompt(20)
 }
 check('终端提示符就绪', promptReady)
 

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { estimateCost, formatUsd, formatCny, resolvePricing, modelLabel, PRICING } from '../src/panel/pricing.ts'
-import { parseHarnessStats, parseTokens, parseDuration, parseContextUsage, parseContextWindow } from '../src/panel/stats.ts'
+import { parseHarnessStats, parseTokens, parseDuration, parseContextUsage, parseContextWindow, estimateUsedTokens, CONTEXT_WINDOW_DEFAULT } from '../src/panel/stats.ts'
 
 test('parseTokens：K/M/B 与裸数字', () => {
   assert.equal(parseTokens('450K'), 450_000)
@@ -63,6 +63,15 @@ test('parseContextUsage：按钮 aria + 明细', () => {
   assert.equal(u.breakdown.system, 1500)
   assert.equal(u.breakdown.tools, 6700)
   assert.equal(u.breakdown.messages, 85_000)
+})
+
+test('estimateUsedTokens：明细缺失时按百分比估算（≈）', () => {
+  assert.equal(estimateUsedTokens(8), 80_000)
+  assert.equal(estimateUsedTokens(78), 780_000)
+  assert.equal(estimateUsedTokens(100), CONTEXT_WINDOW_DEFAULT)
+  assert.equal(estimateUsedTokens(120), CONTEXT_WINDOW_DEFAULT) // clamp
+  assert.equal(estimateUsedTokens(-5), 0) // clamp
+  assert.equal(estimateUsedTokens(8, 2_000_000), 160_000) // 自定义窗口
 })
 
 test('estimateCost：缓存命中率影响费用', () => {

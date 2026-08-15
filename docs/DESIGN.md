@@ -162,6 +162,7 @@ preload 与面板共用的纯数据契约（DashSnapshot/DashLogBatch/DashLayout
 ### 4.9 上下文环 / 会话指标与计费（src/panel/stats.ts + pricing.ts）
 
 - **数据源**（常驻 2s DOM 轮询）：harness 上下文按钮（`button[aria-label*="上下文已用"]`，含百分比与 `~X / Y` 明细）与 stats 行（`.FJxK0a_root`，实测格式 `3 轮 · 6 步| LLM 16.2s · 工具调用 9.7s| 首 token 平均 1.2s · 140 tok/s| 缓存命中 82%| 输入 450K tok · 输出 1.2K tok`）；解析函数纯逻辑可单测，缺字段容错（harness 改文案不崩）。
+- **上下文数值无需点击**：`~X / Y` 明细与构成只在 harness 展开上下文明细后渲染于 DOM（点击按钮才展开）——未展开时按 **百分比 × 窗口（deepseek-v4 系列 1M，`CONTEXT_WINDOW_DEFAULT`）估算**并标注 ≈，构成显示「点击查看构成」；展开后轮询自动替换为精确值。
 - **费用估算**：`estimateCost(model, mode, input, output, cacheHitRate)`，定价表按官方文档（api-docs.deepseek.com/quick_start/pricing，fetched 2026-08-13：deepseek-v4-flash 命中 $0.0028/M、未命中 $0.14/M、输出 $0.28/M；v4-pro 相应翻倍；2026-08-16 起峰谷价常量已内置）；模型名从 composer DOM 探测（`DeepSeek-*`，含模式后缀规范化）；请求数 harness 未暴露 → 以步骤数近似并注明。
 
 ### 4.4 数据流

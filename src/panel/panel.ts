@@ -11,7 +11,7 @@
  */
 import type { DashApproval, DashJob, DashLayout, DashLogLine, DashSnapshot } from '../shared/types'
 import { WHALE_PATH } from './whale'
-import { parseHarnessStats, parseContextUsage, type HarnessStats, type ContextUsage } from './stats'
+import { parseHarnessStats, parseContextUsage, estimateUsedTokens, CONTEXT_WINDOW_DEFAULT, type HarnessStats, type ContextUsage } from './stats'
 import { estimateCost, formatUsd, formatCny, modelLabel } from './pricing'
 
 const api = window.dshDesktop
@@ -443,7 +443,15 @@ function pollContext(): void {
   const pct = u.percent ?? 0
   if (ring) ring.setAttribute('stroke-dasharray', `${(pct / 100) * 34.55751918948772} 34.55751918948772`)
   if (pctEl) pctEl.textContent = u.percent != null ? `${Math.round(u.percent)}%` : '—'
-  if (subEl) subEl.textContent = `${fmtTokens(u.usedTokens)} / ${fmtTokens(u.windowTokens)}`
+  // 明细未展开（harness 需点击才渲染 ~X / Y）时：按百分比 × 窗口估算，标注 ≈；
+  // 展开后轮询自动替换为精确值
+  let approx = false
+  if (u.usedTokens == null && u.percent != null) {
+    u.windowTokens = u.windowTokens ?? CONTEXT_WINDOW_DEFAULT
+    u.usedTokens = estimateUsedTokens(u.percent, u.windowTokens)
+    approx = true
+  }
+  if (subEl) subEl.textContent = `${approx ? '≈' : ''}${fmtTokens(u.usedTokens)} / ${fmtTokens(u.windowTokens)}`
   if (meta) meta.textContent = u.windowTokens != null ? `窗口 ${fmtTokens(u.windowTokens)}` : ''
   if (breakdown) {
     const b = u.breakdown
@@ -452,10 +460,15 @@ function pollContext(): void {
       ['工具', b.tools],
       ['对话', b.messages],
     ]
-    breakdown.innerHTML = parts
-      .filter(([, v]) => v != null)
-      .map(([k, v]) => `<span class="dshd-ctx-part">${k} ${fmtTokens(v ?? null)}</span>`)
-      .join('')
+    const filled = parts.filter(([, v]) => v != null)
+    if (filled.length > 0) {
+      breakdown.innerHTML = filled
+        .map(([k, v]) => `<span class="dshd-ctx-part">${k} ${fmtTokens(v ?? null)}</span>`)
+        .join('')
+    } else {
+      // 构成明细需 harness 展开后才可见；点击上下文卡可展开
+      breakdown.innerHTML = `<span class="dshd-ctx-part dshd-ctx-part-hint">点击查看构成</span>`
+    }
   }
 }
 
