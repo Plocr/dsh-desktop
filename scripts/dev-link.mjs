@@ -1,7 +1,7 @@
 /**
  * 开发期把 dsh-desktop-bridge 以 junction 链接进 desktop profile 的 node_modules，
  * 使 overlay 的 `name:` 行（从 profile 目录解析）能加载该插件。
- * （生产打包：壳在首次创建 profile 时从 resources/bridge 复制，见 src/main/runtime.ts。）
+ * （生产打包：壳在首次创建 profile 时从 resources/plugins 复制，见 src/main/runtime.ts。）
  *
  * 若目标已存在且是真实目录（例如打包版首启的同步副本），直接替换为 junction，
  * 保证 dev 始终加载仓库里的最新源码。

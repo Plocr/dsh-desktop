@@ -1,6 +1,7 @@
 /**
  * 托盘：显示窗口 / 打开浏览器版 / 切换工作区 / 重启 Harness / 查看日志 /
  * 检查更新 / 开机自启 / 通知开关 / 全局快捷键信息 / 退出。状态变化时重建菜单。
+ * （0.4.0：仪表盘/终端开关已随面板移入 harness 插件，托盘不再控制。）
  */
 import { Menu, nativeImage, Tray } from 'electron'
 import type { AppSettings } from './settings'
@@ -13,7 +14,6 @@ export interface TrayDeps {
     runningJobs: number
     harnessState: string
     globalShortcut: string
-    panel: { sidebar: boolean; term: boolean }
   }
   showWindow: () => void
   openBrowser: () => void
@@ -23,7 +23,6 @@ export interface TrayDeps {
   checkUpdate: () => void
   setAutoStart: (v: boolean) => void
   setNotifications: (v: boolean) => void
-  setPanel: (kind: 'sidebar' | 'terminal', v: boolean) => void
   quit: () => void
 }
 
@@ -69,19 +68,6 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
         type: 'checkbox',
         checked: s.notifications,
         click: (item) => deps.setNotifications(item.checked),
-      },
-      { type: 'separator' },
-      {
-        label: '显示仪表盘',
-        type: 'checkbox',
-        checked: s.panel.sidebar,
-        click: (item) => deps.setPanel('sidebar', item.checked),
-      },
-      {
-        label: '显示终端',
-        type: 'checkbox',
-        checked: s.panel.term,
-        click: (item) => deps.setPanel('terminal', item.checked),
       },
       { type: 'separator' },
       { label: '退出', click: () => deps.quit() },

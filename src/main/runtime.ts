@@ -6,6 +6,9 @@
  *  - dev：全局安装的 @deepseek-ai/dsh（常见全局根探测），或 DSH_DESKTOP_DSH_BIN 覆盖
  * 首次运行把 resources/profile-template/desktop 复制到 $DSH_HOME/profiles/desktop。
  * 每次启动由壳生成 --patch overlay（注入 bridge 行 + 一次性 token）。
+ *
+ * 插件同步：resources/plugins/bridge 随包分发，首启按版本同步进 profile
+ * node_modules——overlay `name:` 行从 profile 目录解析，这是插件被加载的唯一位置。
  */
 import { app } from 'electron'
 import {
@@ -150,11 +153,14 @@ function copyDir(src: string, dest: string): void {
 }
 
 /**
- * 确保 desktop profile 存在；若打包内带了 bridge 包（resources/bridge），
+ * 确保 desktop profile 存在；若打包内带了插件包（resources/plugins/<name>），
  * 则同步（版本不同或缺失时复制）到 profile 的 node_modules——
  * overlay 的 `name:` 行从 profile 目录解析，这是插件被找到的唯一位置。
+ * 插件清单：bridge（shell 通道，唯一保留的插件）。
  */
-export function ensureProfile(dshHome: string, templateDir: string, bundledBridgeDir?: string): string {
+const PLUGIN_NAMES = ['bridge']
+
+export function ensureProfile(dshHome: string, templateDir: string, bundledPluginsDir?: string): string {
   const profileDir = path.join(dshHome, 'profiles', 'desktop')
   if (!existsSync(profileDir)) {
     if (!existsSync(templateDir)) {
@@ -163,14 +169,18 @@ export function ensureProfile(dshHome: string, templateDir: string, bundledBridg
     copyDir(templateDir, profileDir)
     log('info', `created desktop profile at ${profileDir}`)
   }
-  if (bundledBridgeDir && existsSync(bundledBridgeDir)) {
-    const target = path.join(profileDir, 'node_modules', 'dsh-desktop-bridge')
-    const bundledVersion = readVersion(bundledBridgeDir)
-    const currentVersion = readVersion(target)
-    if (currentVersion !== bundledVersion) {
-      mkdirSync(path.dirname(target), { recursive: true })
-      copyDir(bundledBridgeDir, target)
-      log('info', `bridge synced to profile (${String(currentVersion)} -> ${String(bundledVersion)})`)
+  if (bundledPluginsDir && existsSync(bundledPluginsDir)) {
+    for (const name of PLUGIN_NAMES) {
+      const src = path.join(bundledPluginsDir, name)
+      if (!existsSync(src)) continue
+      const target = path.join(profileDir, 'node_modules', `dsh-desktop-${name}`)
+      const bundledVersion = readVersion(src)
+      const currentVersion = readVersion(target)
+      if (currentVersion !== bundledVersion) {
+        mkdirSync(path.dirname(target), { recursive: true })
+        copyDir(src, target)
+        log('info', `plugin synced to profile: ${name} (${String(currentVersion)} -> ${String(bundledVersion)})`)
+      }
     }
   }
   return profileDir

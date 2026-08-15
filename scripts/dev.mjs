@@ -1,5 +1,5 @@
 /**
- * 开发启动：build → dev-link（bridge 链接进 profile node_modules）→ electron .
+ * 开发启动：build → dev-link（全部插件链接进 profile node_modules）→ electron .
  */
 import { spawn } from 'node:child_process'
 import path from 'node:path'
@@ -11,10 +11,10 @@ try {
   const link = spawn(process.execPath, ['scripts/dev-link.mjs'], { stdio: 'inherit' })
   const code = await new Promise((resolve) => link.on('exit', resolve))
   if (code !== 0) {
-    console.warn(`[dev] bridge 链接失败（code=${code}，harness 将无法加载 bridge 插件）`)
+    console.warn(`[dev] 插件链接失败（code=${code}，harness 将无法加载插件）`)
   }
 } catch (err) {
-  console.warn(`[dev] bridge 链接失败: ${err instanceof Error ? err.message : String(err)}`)
+  console.warn(`[dev] 插件链接失败: ${err instanceof Error ? err.message : String(err)}`)
 }
 
 const exe =

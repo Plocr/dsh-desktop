@@ -1,12 +1,14 @@
 /**
  * DSH Desktop 主进程入口：
- * 单实例 → 设置/日志 → 确保 desktop profile → 定位运行时 → 生成 overlay →
+ * 单实例 → 设置/日志 → 确保 desktop profile（同步 bridge）→ 定位运行时 → 生成 overlay →
  * 创建窗口/托盘 → spawn harness → 解析 URL/桥接行 → 加载 Web UI →
- * 桥接事件（徽标/通知/仪表盘）→ 全局快捷键 / dsh:// 深链 / 自动更新 →
- * 面板注入（右栏仪表盘 + 底栏终端）→ 优雅停机。
+ * 桥接事件（徽标/通知，仅桌面原生部分）→ 全局快捷键 / dsh:// 深链 / 自动更新 →
+ * 优雅停机。
+ *
+ * 架构（0.4.1）：壳只保留桌面原生能力；与 harness 之间仅通过 dsh-desktop-bridge
+ * 插件通信（通知/徽标/深链/工作区注册），壳不注入任何 UI。
  */
 import { app, dialog, shell } from 'electron'
-import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -25,11 +27,6 @@ import { registerIpc } from './ipc'
 import { parseDeepLink, extractDeepLinkFromArgv, type DeepLinkAction } from './deepLink'
 import { registerGlobalShortcut, currentShortcut, unregisterAllShortcuts } from './shortcut'
 import { initUpdater, checkNow } from './updater'
-import { injectChrome } from './chrome'
-import { createDashboardState } from './dashboard'
-import { createTerminalManager, type TermManager } from './terminal'
-import { resolveShellSpec } from './termShell'
-import type { DashLayout, DashLogLine } from '../shared/types'
 
 // dev 模式与已安装版隔离 userData（app 名解析为 productName → 默认同名目录，
 // 已安装版运行中时 dev 会因单实例锁冲突直接退出；隔离后两者可并行）
@@ -48,18 +45,10 @@ app.setAppUserModelId('com.dsh.desktop.workbench')
 // 本地地址绕过系统代理（electron-updater/Chromium net 走系统代理时会劫持 127.0.0.1 请求）
 app.commandLine.appendSwitch('proxy-bypass-list', '127.0.0.1;localhost;<local>')
 
-// 【调试】验证导航黑帧是否由深色系统占位背景引起
-if (process.env.DSH_DEBUG_THEME_SOURCE) {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { nativeTheme } = require('electron') as typeof import('electron')
-  nativeTheme.themeSource = process.env.DSH_DEBUG_THEME_SOURCE as 'light' | 'dark'
-}
-
 let win: WindowHandle | null = null
 let trayHandle: TrayHandle | null = null
 let harness: HarnessManager
 let bridge: BridgeClient
-let terminal: TermManager
 let settings: AppSettings
 let settingsFile = ''
 let quitting = false
@@ -67,115 +56,6 @@ let pendingRegisterWorkspace: string | null = null
 let lastUrl: string | null = null
 let runningJobs = 0
 let pendingDeepLinks: DeepLinkAction[] = []
-
-/* ── 仪表盘状态与推送 ────────────────────────────────────────────────── */
-
-const dash = createDashboardState()
-let dashPushTimer: NodeJS.Timeout | null = null
-let logQueue: DashLogLine[] = []
-let logPushTimer: NodeJS.Timeout | null = null
-
-function panelLayout(): DashLayout {
-  return {
-    sidebar: settings.sidebar.enabled,
-    term: settings.terminal.enabled,
-    sidebarWidth: settings.sidebar.width,
-    termHeight: settings.terminal.height,
-  }
-}
-
-function uiReady(): boolean {
-  const w = win?.win
-  if (!w || w.isDestroyed()) return false
-  return w.webContents.getURL().startsWith('http://127.0.0.1:')
-}
-
-/** 节流推送仪表盘快照（仅 harness 页接收）。 */
-function pushDash(): void {
-  if (dashPushTimer) return
-  dashPushTimer = setTimeout(() => {
-    dashPushTimer = null
-    if (!uiReady()) return
-    const w = win?.win
-    if (!w || w.isDestroyed()) return
-    w.webContents.send('dsh:dash:state', dash.toSnapshot())
-  }, 200)
-}
-
-/** 批量推送日志行（300ms 批）。 */
-function pushLogs(): void {
-  if (logPushTimer) return
-  logPushTimer = setTimeout(() => {
-    logPushTimer = null
-    if (logQueue.length === 0 || !uiReady()) return
-    const w = win?.win
-    if (!w || w.isDestroyed()) return
-    const batch = logQueue
-    logQueue = []
-    w.webContents.send('dsh:dash:log', { sync: false, lines: batch })
-  }, 300)
-}
-
-/** 面板 hello：补发全量基线（state/layout/日志）——面板 boot 可能晚于 dom-ready 推送。 */
-function sendPanelBaseline(): void {
-  if (!uiReady()) return
-  const w = win?.win
-  if (!w || w.isDestroyed()) return
-  w.webContents.send('dsh:dash:state', dash.toSnapshot())
-  w.webContents.send('dsh:dash:layout', panelLayout())
-  const lines = dash.logs.all
-  if (lines.length > 0) w.webContents.send('dsh:dash:log', { sync: true, lines })
-}
-
-/** 拉取 DeepSeek 账户余额（bridge RPC，key 不出 harness 进程）。 */
-function refreshBalance(): void {
-  if (!bridge) return
-  void bridge
-    .call('billing.balance', undefined, 15_000)
-    .then((res) => {
-      dash.mergeBalance(res)
-      log('info', `balance fetched: ${JSON.stringify(res).slice(0, 200)}`)
-      pushDash()
-    })
-    .catch((err) => {
-      dash.mergeBalance({ isAvailable: false, infos: [], fetchedAt: Date.now(), error: err instanceof Error ? err.message : String(err) })
-      log('error', `balance fetch failed: ${err instanceof Error ? err.message : String(err)}`)
-      pushDash()
-    })
-}
-
-/** 推送布局状态（面板开合/尺寸）。 */
-function pushLayout(): void {
-  if (!uiReady()) return
-  win?.win.webContents.send('dsh:dash:layout', panelLayout())
-}
-
-/** 面板动作：开合/尺寸 → 设置持久化 + 布局推送 + 托盘刷新。 */
-function toggleSidebar(): void {
-  settings.sidebar.enabled = !settings.sidebar.enabled
-  saveSettings(settingsFile, settings)
-  pushLayout()
-  refreshTray()
-}
-
-function toggleTerminal(): void {
-  settings.terminal.enabled = !settings.terminal.enabled
-  saveSettings(settingsFile, settings)
-  pushLayout()
-  refreshTray()
-}
-
-function setSidebarWidth(w: number): void {
-  settings.sidebar.width = w
-  saveSettings(settingsFile, settings)
-  pushLayout()
-}
-
-function setTerminalHeight(h: number): void {
-  settings.terminal.height = h
-  saveSettings(settingsFile, settings)
-  pushLayout()
-}
 
 /* ── 既有基础设施 ───────────────────────────────────────────────────── */
 
@@ -216,23 +96,6 @@ function currentInfo(): unknown {
     appData: app.getPath('userData'),
     logsDir: logDirPath(),
     globalShortcut: currentShortcut(),
-    panel: panelLayout(),
-    terminalBackend: terminal?.backend ?? null,
-    terminalShell: terminal?.activeLabel ?? null,
-    terminalSessions: terminal?.sessions.length ?? 0,
-  }
-}
-
-/** 独立窗口打开系统终端（管道模式无 TTY 的逃生口；detached + 新控制台窗口）。 */
-function openSystemTerminal(): void {
-  const spec = terminal?.activeShell ?? resolveShellSpec('auto')
-  if (!spec) return
-  try {
-    const child = spawn(spec.cmd, spec.args, { detached: true, stdio: 'ignore', windowsHide: false })
-    child.unref()
-    log('info', `system terminal opened: ${spec.cmd} ${spec.args.join(' ')}`)
-  } catch (err) {
-    log('error', `system terminal failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
@@ -270,9 +133,6 @@ function handleBridgeEventWrapper(type: string, payload: unknown): void {
     runningJobs = runningJobCount(jobs)
     refreshTray()
   }
-  // 仪表盘增量更新
-  dash.applyBridgeEvent(type, payload)
-  pushDash()
 }
 
 /* ── dsh:// 深链 ─────────────────────────────────────────────────────── */
@@ -326,6 +186,12 @@ async function expandOverflowSessions(): Promise<void> {
   }
 }
 
+function uiReady(): boolean {
+  const w = win?.win
+  if (!w || w.isDestroyed()) return false
+  return w.webContents.getURL().startsWith('http://127.0.0.1:')
+}
+
 /** 处理一条深链：聚焦窗口 + 尽力导航（新会话/指定会话）。 */
 async function handleDeepLink(action: DeepLinkAction): Promise<void> {
   log('info', `deep link: ${JSON.stringify(action)}`)
@@ -377,53 +243,6 @@ function flushPendingDeepLinks(): void {
   }, 1500)
 }
 
-/* ── 窗口内快捷键（面板开关，非全局） ───────────────────────────────── */
-
-function acceleratorParts(acc: string): { mods: Set<string>; key: string } {
-  const parts = acc.split('+').map((p) => p.trim().toLowerCase()).filter(Boolean)
-  const key = parts.pop() ?? ''
-  return { mods: new Set(parts), key }
-}
-
-function matchAccelerator(
-  acc: string,
-  input: { type: string; key?: string; control?: boolean; shift?: boolean; alt?: boolean },
-): boolean {
-  if (input.type !== 'keyDown') return false
-  const { mods, key } = acceleratorParts(acc)
-  const wantCtrl = mods.has('control') || mods.has('commandorcontrol')
-  const wantShift = mods.has('shift')
-  const wantAlt = mods.has('alt')
-  if (wantCtrl !== !!input.control) return false
-  if (wantShift !== !!input.shift) return false
-  if (wantAlt !== !!input.alt) return false
-  const k = (input.key || '').toLowerCase()
-  if (k !== key) {
-    // 兼容不同键盘布局下的符号键别名
-    const alias: Record<string, string> = { '`': 'backquote', '~': 'backquote', '.': 'period', '>': 'period' }
-    if (alias[k] !== key && alias[key] !== k) return false
-  }
-  return true
-}
-
-function installPanelShortcuts(): void {
-  const w = win?.win
-  if (!w) return
-  w.webContents.on('before-input-event', (event, input) => {
-    if (!uiReady()) return
-    const st = settings.panelShortcuts
-    if (st.terminal && matchAccelerator(st.terminal, input)) {
-      event.preventDefault()
-      toggleTerminal()
-      return
-    }
-    if (st.sidebar && matchAccelerator(st.sidebar, input)) {
-      event.preventDefault()
-      toggleSidebar()
-    }
-  })
-}
-
 /* ── 主流程 ──────────────────────────────────────────────────────────── */
 
 async function main(): Promise<void> {
@@ -432,36 +251,24 @@ async function main(): Promise<void> {
   settings = loadSettings(settingsFile)
 
   const token = randomBytes(16).toString('hex')
-  const overlayPath = writeOverlay(app.getPath('userData'), token)
   const resourcesDir = appResourcesDir()
+
+  // 先定位运行时，再确保 profile（同步 bridge 插件）与生成 overlay
+  const profileDir = ensureProfile(dshHome(), path.join(resourcesDir, 'profile-template', 'desktop'), path.join(resourcesDir, 'plugins'))
+  const runtime = await resolveRuntime()
+  const overlayPath = writeOverlay(app.getPath('userData'), token)
 
   win = createWindow(path.join(__dirname, '..', 'preload', 'index.cjs'), resourcesDir, {
     isAllowed: (url) => url.startsWith('http://127.0.0.1:') || url.startsWith('file://'),
     theme: resolveEffectiveTheme(dshHome()),
-    onDomReady: (w) => {
-      injectChrome(w)
-      // 面板就绪前补发最新状态/布局（panel 订阅早于 hello）
-      const url = w.webContents.getURL()
-      if (url.startsWith('http://127.0.0.1:')) {
-        setTimeout(() => {
-          w.webContents.send('dsh:dash:state', dash.toSnapshot())
-          w.webContents.send('dsh:dash:layout', panelLayout())
-        }, 400)
-      }
-    },
   })
   win.showLoading(undefined, resolveThemePreference(dshHome()))
-  installPanelShortcuts()
   win.win.on('close', (e) => {
     if (settings.trayOnClose && !quitting) {
       e.preventDefault()
       win?.win.hide()
     }
   })
-
-  // profile 确保 + 运行时定位（打包模式含首次解压，窗口此时显示 loading 页）
-  const profileDir = ensureProfile(dshHome(), path.join(resourcesDir, 'profile-template', 'desktop'), path.join(resourcesDir, 'bridge'))
-  const runtime = await resolveRuntime()
 
   harness = new HarnessManager(
     {
@@ -476,15 +283,14 @@ async function main(): Promise<void> {
       onReady: (r: HarnessReady) => {
         lastUrl = r.url
         log('info', `harness ready: ${r.url} bridgePort=${r.bridgePort}`)
-        dash.state.readyUrl = r.url
         win?.loadApp(r.url)
         bridge.connect()
         refreshTray()
         // UI 加载完成后处理启动时排队的深链
         setTimeout(() => flushPendingDeepLinks(), 2500)
       },
-      onExit: ({ code, willRestart }) => {
-        dash.state.readyUrl = null
+      onExit: ({ code, signal, willRestart }) => {
+        log('info', `harness exited code=${code} signal=${String(signal)} willRestart=${willRestart}`)
         if (willRestart) {
           win?.showLoading('Harness 异常退出，正在自动重启…', resolveThemePreference(dshHome()))
         }
@@ -492,12 +298,8 @@ async function main(): Promise<void> {
       },
       onLog: (stream, line) => {
         log(stream === 'stdout' ? 'info' : 'error', `[harness:${stream}] ${line}`)
-        dash.applyHarnessLog(stream, line)
-        pushLogs()
       },
       onState: (s) => {
-        dash.applyHarnessState(s)
-        pushDash()
         if (s === 'starting') {
           if (!lastUrl) win?.showLoading(undefined, resolveThemePreference(dshHome()))
         }
@@ -514,24 +316,12 @@ async function main(): Promise<void> {
     {
       onEvent: handleBridgeEventWrapper,
       onConnected: (connected) => {
-        dash.setBridge(connected)
-        pushDash()
         if (connected) {
           // 自检：验证 shell -> harness RPC 通路
           void bridge
             .call('ping')
             .then(() => log('info', 'bridge RPC self-test OK'))
             .catch((err) => log('error', `bridge RPC self-test failed: ${err instanceof Error ? err.message : String(err)}`))
-          // 拉取仪表盘全量快照（之后靠事件增量）
-          void bridge
-            .call('dashboard.snapshot', undefined, 10_000)
-            .then((snap) => {
-              dash.mergeSnapshot(snap)
-              pushDash()
-            })
-            .catch((err) => log('error', `dashboard.snapshot failed: ${err instanceof Error ? err.message : String(err)}`))
-          // 拉取账户余额（异步，不阻塞 ready）
-          refreshBalance()
           if (pendingRegisterWorkspace) {
             const dir = pendingRegisterWorkspace
             pendingRegisterWorkspace = null
@@ -545,37 +335,14 @@ async function main(): Promise<void> {
     },
   )
 
-  terminal = createTerminalManager(
-    {
-      onData: (sessionId, data) => {
-        if (uiReady()) win?.win.webContents.send('dsh:term:data', { id: sessionId, data })
-      },
-      onExit: (sessionId, info) => {
-        if (uiReady()) win?.win.webContents.send('dsh:term:exit', { id: sessionId, code: info.code })
-      },
-      onCreated: (sessionId, info) => {
-        if (uiReady()) win?.win.webContents.send('dsh:term:created', { id: sessionId, ...info })
-      },
-      onClosed: (sessionId) => {
-        if (uiReady()) win?.win.webContents.send('dsh:term:closed', sessionId)
-      },
-      onActive: (sessionId) => {
-        if (uiReady()) win?.win.webContents.send('dsh:term:active', sessionId)
-      },
-    },
-    () => harness?.cwd ?? defaultWorkspace(),
-  )
-
   trayHandle = createTray(path.join(resourcesDir, 'icons', 'tray.png'), {
     getUrl: () => harness?.ready?.url ?? lastUrl,
     getState: () => ({
       autoStart: settings.autoStart,
       notifications: settings.notifications,
       runningJobs,
-      harnessState:
-        harness?.state === 'ready' ? '运行中' : harness?.state === 'starting' ? '启动中' : '已停止',
+      harnessState: harness?.state === 'ready' ? '运行中' : harness?.state === 'starting' ? '启动中' : '已停止',
       globalShortcut: currentShortcut(),
-      panel: panelLayout(),
     }),
     showWindow,
     openBrowser,
@@ -597,13 +364,6 @@ async function main(): Promise<void> {
       saveSettings(settingsFile, settings)
       refreshTray()
     },
-    setPanel: (kind, v) => {
-      if (kind === 'sidebar') settings.sidebar.enabled = v
-      else settings.terminal.enabled = v
-      saveSettings(settingsFile, settings)
-      pushLayout()
-      refreshTray()
-    },
     quit: () => app.quit(),
   })
 
@@ -611,7 +371,6 @@ async function main(): Promise<void> {
     getWindow: () => win?.win ?? null,
     harness,
     bridge,
-    terminal,
     pickWorkspace,
     restartHarness: () => {
       lastUrl = null
@@ -619,13 +378,6 @@ async function main(): Promise<void> {
     },
     getInfo: currentInfo,
     openSession: (sessionId) => handleDeepLink({ kind: 'session', sessionId }),
-    toggleSidebar,
-    toggleTerminal,
-    setSidebarWidth,
-    setTerminalHeight,
-    sendPanelBaseline,
-    openSystemTerminal,
-    refreshBalance,
   })
 
   // dsh:// 协议 + 全局快捷键 + 自动更新
@@ -656,7 +408,6 @@ app.on('before-quit', (e) => {
   log('info', 'quitting: stopping harness')
   unregisterAllShortcuts()
   bridge?.stop()
-  terminal?.close()
   void harness
     ?.stop()
     .catch((err) => log('error', `stop failed: ${err instanceof Error ? err.message : String(err)}`))

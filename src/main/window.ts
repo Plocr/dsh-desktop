@@ -19,8 +19,6 @@ export function createWindow(
   opts: {
     isAllowed: (url: string) => boolean
     theme: 'light' | 'dark'
-    /** harness 文档（http://127.0.0.1:*）每次 dom-ready 时回调（注入面板等）。 */
-    onDomReady?: (win: BrowserWindow) => void
   },
 ): WindowHandle {
   const theme = opts.theme
@@ -111,7 +109,6 @@ export function createWindow(
     // 导航间隙占位帧颜色随 themeSource（已持久设为有效主题）→ 无黑/白闪
     win.webContents.once('dom-ready', () => {
       applyThemeBoot()
-      opts.onDomReady?.(win)
     })
     void win.loadURL(url).catch((err) => {
       showError(`加载 ${url} 失败: ${err instanceof Error ? err.message : String(err)}`)

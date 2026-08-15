@@ -1,42 +1,21 @@
 /**
- * IPC：壳页面（loading/error）、注入面板与托盘动作的后端。
- * harness Web UI 不调用这些 API（仍保持最小只读白名单）。
- * 面板/终端通道全部校验 sender 为工作台窗口的主 frame。
+ * IPC：壳页面（loading/error）白名单。
+ * harness Web UI 不调用这些 API（仪表盘/终端/主题均为 harness 插件，
+ * 数据走插件自身 webServer 路由，不再经过壳 IPC）。
  */
-import { dialog, ipcMain, shell, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
+import { dialog, ipcMain, shell, type BrowserWindow } from 'electron'
 import type { HarnessManager } from './harness'
 import type { BridgeClient } from './bridge'
-import type { TermManager, TermShell } from './terminal'
 import { logDirPath } from './logger'
-import { clampSize } from './dashboard'
-import { injectTerminalAssets } from './chrome'
 
 export interface IpcDeps {
   getWindow: () => BrowserWindow | null
   harness: HarnessManager
   bridge: BridgeClient
-  terminal: TermManager
   pickWorkspace: () => Promise<string | null>
   restartHarness: () => void
   getInfo: () => unknown
   openSession: (sessionId: string) => Promise<void>
-  toggleSidebar: () => void
-  toggleTerminal: () => void
-  setSidebarWidth: (w: number) => void
-  setTerminalHeight: (h: number) => void
-  /** hello 时向面板补发全量基线（state + layout + 日志 sync 批）。 */
-  sendPanelBaseline: () => void
-  /** 在独立窗口打开系统终端（逃生口：管道模式无 TTY 时用）。 */
-  openSystemTerminal: () => void
-  /** 拉取 DeepSeek 账户余额（bridge RPC）。 */
-  refreshBalance: () => void
-}
-
-/** 校验调用来自工作台窗口主 frame（防 harness 页内其他 frame/注入滥用）。 */
-function isMainFrame(deps: IpcDeps, e: IpcMainInvokeEvent): boolean {
-  const win = deps.getWindow()
-  if (!win || win.isDestroyed()) return false
-  return e.sender === win.webContents && e.senderFrame === win.webContents.mainFrame
 }
 
 export function registerIpc(deps: IpcDeps): void {
@@ -78,90 +57,13 @@ export function registerIpc(deps: IpcDeps): void {
     return true
   })
 
-  /* ── 仪表盘动作（注入面板） ── */
-
-  ipcMain.handle('dsh:dash:action', (e, action: unknown, payload: unknown) => {
-    if (!isMainFrame(deps, e)) return { ok: false, error: 'forbidden' }
-    if (typeof action !== 'string') return { ok: false, error: 'bad action' }
-    switch (action) {
-      case 'hello':
-        // 面板就绪（可能晚于 dom-ready 推送）：补发 state/layout/日志基线
-        deps.sendPanelBaseline()
-        return { ok: true }
-      case 'toggleSidebar':
-        deps.toggleSidebar()
-        return { ok: true }
-      case 'toggleTerminal':
-        deps.toggleTerminal()
-        return { ok: true }
-      case 'setSidebarWidth':
-        deps.setSidebarWidth(clampSize(Number(payload) || 300, 240, 420))
-        return { ok: true }
-      case 'setTerminalHeight':
-        deps.setTerminalHeight(clampSize(Number(payload) || 200, 120, 480))
-        return { ok: true }
-      case 'openSession':
-        if (typeof payload === 'string' && payload) void deps.openSession(payload)
-        return { ok: true }
-      case 'pickWorkspace':
-        void deps.pickWorkspace()
-        return { ok: true }
-      case 'restartHarness':
-        deps.restartHarness()
-        return { ok: true }
-      case 'openLogs':
-        void shell.openPath(logDirPath())
-        return { ok: true }
-      case 'clearLogs':
-        return { ok: true }
-      case 'forceSnapshot':
-        return { ok: true }
-      case 'bootTerm': {
-        // 终端 lazy 资产（xterm.css + term.js）由主进程注入，避免自定义协议
-        const w = deps.getWindow()
-        if (w) injectTerminalAssets(w)
-        return { ok: true }
-      }
-      case 'openSystemTerminal':
-        deps.openSystemTerminal()
-        return { ok: true }
-      case 'refreshBalance':
-        deps.refreshBalance()
-        return { ok: true }
-      default:
-        return { ok: false, error: `unknown action: ${action}` }
-    }
-  })
-
-  /* ── 终端（注入面板，多会话） ── */
-
-  ipcMain.handle('dsh:term:open', (e, shell: unknown) => {
-    if (!isMainFrame(deps, e)) return { ok: false, error: 'forbidden' }
-    const id = deps.terminal.create(typeof shell === 'string' && shell ? (shell as TermShell) : 'auto')
-    return { ok: id !== null, id, backend: deps.terminal.backend }
-  })
-
-  ipcMain.handle('dsh:term:activate', (e, id: unknown) => {
-    if (!isMainFrame(deps, e)) return { ok: false, error: 'forbidden' }
-    const ok = typeof id === 'string' && deps.terminal.activate(id)
-    return { ok }
-  })
-
-  ipcMain.handle('dsh:term:write', (e, id: unknown, data: unknown) => {
-    if (!isMainFrame(deps, e)) return { ok: false, error: 'forbidden' }
-    if (typeof id === 'string' && typeof data === 'string') deps.terminal.write(id, data)
+  ipcMain.handle('dsh:open-session', (_e, sessionId: unknown) => {
+    if (typeof sessionId === 'string' && sessionId) void deps.openSession(sessionId)
     return { ok: true }
   })
 
-  ipcMain.handle('dsh:term:resize', (e, id: unknown, cols: unknown, rows: unknown) => {
-    if (!isMainFrame(deps, e)) return { ok: false, error: 'forbidden' }
-    if (typeof id === 'string') deps.terminal.resize(id, Number(cols) || 80, Number(rows) || 24)
-    return { ok: true }
-  })
-
-  ipcMain.handle('dsh:term:close', (e, id: unknown) => {
-    if (!isMainFrame(deps, e)) return { ok: false, error: 'forbidden' }
-    if (typeof id === 'string') deps.terminal.close(id)
-    return { ok: true }
-  })
+  // 保留：无窗口时也能触发的原生对话框兜底
+  void dialog
+  void deps.bridge
+  void deps.harness
 }

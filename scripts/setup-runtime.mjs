@@ -72,15 +72,15 @@ async function installDsh() {
     path.join(runtimeDir, 'package.json'),
     JSON.stringify({ name: 'dsh-runtime', private: true, type: 'module' }, null, 2),
   )
-  const bridgeSrc = path.join(root, 'packages', 'bridge')
-  if (!existsSync(bridgeSrc)) throw new Error(`bridge package missing: ${bridgeSrc}`)
-  // 打包 bridge（输出到 runtimeDir 下的 _pack）
+  // 打包 bridge 插件（唯一保留的插件，输出到 runtimeDir 下的 _pack）
   const packDir = path.join(runtimeDir, '_pack')
   mkdirSync(packDir, { recursive: true })
+  const bridgeSrc = path.join(root, 'packages', 'bridge')
+  if (!existsSync(bridgeSrc)) throw new Error(`plugin package missing: ${bridgeSrc}`)
   run(nodeBin(), [npmCli(), 'pack', '--pack-destination', packDir, '--silent', bridgeSrc])
   const tgz = readdirSync(packDir).find((f) => f.endsWith('.tgz'))
   if (!tgz) throw new Error('bridge pack failed')
-  const bridgeTar = path.join(packDir, tgz)
+  const pluginTar = path.join(packDir, tgz)
   // 安装 dsh + bridge（同一次 install，保证解析一致）
   run(nodeBin(), [
     npmCli(),
@@ -89,7 +89,7 @@ async function installDsh() {
     '--no-fund',
     '--loglevel=error',
     `@deepseek-ai/dsh@${DSH_VERSION}`,
-    bridgeTar,
+    pluginTar,
     '--prefix',
     runtimeDir,
   ])
@@ -101,8 +101,8 @@ async function installDsh() {
 function verifyDist() {
   const dist = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist', 'index.html')
   if (!existsSync(dist)) throw new Error(`frontend dist missing: ${dist} —— dsh-web-app 无法 serve UI`)
-  const bridge = path.join(runtimeDir, 'node_modules', 'dsh-desktop-bridge', 'lib', 'index.js')
-  if (!existsSync(bridge)) throw new Error(`bridge not installed in runtime: ${bridge}`)
+  const plugin = path.join(runtimeDir, 'node_modules', 'dsh-desktop-bridge', 'lib', 'index.js')
+  if (!existsSync(plugin)) throw new Error(`plugin not installed in runtime: ${plugin}`)
   console.log('[runtime] dist + bridge verified')
 }
 
