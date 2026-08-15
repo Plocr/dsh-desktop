@@ -151,10 +151,13 @@ await sleep(5000)
 const ctxCard = await evalJs(`(() => {
   const fill = document.querySelector('#dshd-ctx .dshd-ctx-fill')
   const pct = document.getElementById('dshd-ctx-pct')
-  return { hasRing: !!fill, dash: fill?.getAttribute('stroke-dasharray'), pct: pct?.textContent, sub: document.getElementById('dshd-ctx-sub')?.textContent }
+  const breakdown = document.getElementById('dshd-ctx-breakdown')?.innerText ?? ''
+  return { hasRing: !!fill, dash: fill?.getAttribute('stroke-dasharray'), pct: pct?.textContent, sub: document.getElementById('dshd-ctx-sub')?.textContent, breakdown }
 })()`)
 check('上下文圆环渲染', ctxCard.hasRing, `pct=${ctxCard.pct} dash=${ctxCard.dash}`)
 check('上下文数值显示（估算或精确）', !!ctxCard.sub && ctxCard.sub !== '— / —' && !ctxCard.sub.startsWith('—'), `sub=${ctxCard.sub}`)
+// 构成直接展示（自动展开读取 + 缓存，不依赖手动点击）
+check('上下文构成直接展示', ctxCard.breakdown.length > 0 && !ctxCard.breakdown.includes('点击查看构成'), ctxCard.breakdown.replace(/\n/g, ' | '))
 const metricsCard = await evalJs(`(() => {
   const host = document.getElementById('dshd-metrics')
   const cost = document.getElementById('dshd-cost')

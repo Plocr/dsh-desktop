@@ -47,6 +47,19 @@ interface PanelState {
   logAuto: boolean
   lastApprovalCount: number
   termBooted: boolean
+  /** 上下文明细缓存（harness 收起后明细 DOM 被移除，面板自持副本直接展示） */
+  ctxCache: {
+    percent: number
+    used: number
+    window: number
+    system?: number | null
+    tools?: number | null
+    messages?: number | null
+    ts: number
+  } | null
+  /** 面板自动展开 harness 上下文明细的标志（读取后自动收起，不干扰用户手动展开） */
+  ctxAutoExpanded: boolean
+  ctxAutoExpandedAt: number | null
 }
 
 const state: PanelState = {
@@ -56,6 +69,9 @@ const state: PanelState = {
   logAuto: true,
   lastApprovalCount: 0,
   termBooted: false,
+  ctxCache: null,
+  ctxAutoExpanded: false,
+  ctxAutoExpandedAt: null,
 }
 
 const STATUS_TEXT: Record<string, string> = {
@@ -428,7 +444,7 @@ function pollContext(): void {
     if (ring) ring.setAttribute('stroke-dasharray', '0 34.55751918948772')
     return
   }
-  // 明细：上溯含 "~X / Y" 的容器文本
+  // 明细：上溯含 "~X / Y" 的容器文本（harness 展开上下文明细后才渲染）
   let detail = ''
   let el: HTMLElement | null = btn
   for (let i = 0; i < 5 && el; i++) {
@@ -441,24 +457,56 @@ function pollContext(): void {
   }
   const u = parseContextUsage(btn.getAttribute('aria-label') ?? '', detail)
   const pct = u.percent ?? 0
+  const expanded = btn.getAttribute('aria-expanded') === 'true'
   if (ring) ring.setAttribute('stroke-dasharray', `${(pct / 100) * 34.55751918948772} 34.55751918948772`)
   if (pctEl) pctEl.textContent = u.percent != null ? `${Math.round(u.percent)}%` : '—'
-  // 明细未展开（harness 需点击才渲染 ~X / Y）时：按百分比 × 窗口估算，标注 ≈；
-  // 展开后轮询自动替换为精确值
+
+  // 1) 明细可读 → 更新缓存（精确）；自动展开读取完成后收起（不干扰用户手动展开）
+  if (u.usedTokens != null) {
+    state.ctxCache = {
+      percent: u.percent ?? 0,
+      used: u.usedTokens,
+      window: u.windowTokens ?? CONTEXT_WINDOW_DEFAULT,
+      system: u.breakdown.system,
+      tools: u.breakdown.tools,
+      messages: u.breakdown.messages,
+      ts: Date.now(),
+    }
+    if (state.ctxAutoExpanded && expanded) {
+      state.ctxAutoExpanded = false
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+    }
+  }
+
+  // 2) 展示数值：本次精确 → 缓存（直接展示，无 ≈）→ 估算（≈ 兜底）
+  let used = u.usedTokens
+  let windowTokens = u.windowTokens
   let approx = false
-  if (u.usedTokens == null && u.percent != null) {
-    u.windowTokens = u.windowTokens ?? CONTEXT_WINDOW_DEFAULT
-    u.usedTokens = estimateUsedTokens(u.percent, u.windowTokens)
+  if (used == null && state.ctxCache) {
+    used = state.ctxCache.used
+    windowTokens = state.ctxCache.window
+  } else if (used == null && u.percent != null) {
+    windowTokens = windowTokens ?? CONTEXT_WINDOW_DEFAULT
+    used = estimateUsedTokens(u.percent, windowTokens)
     approx = true
   }
-  if (subEl) subEl.textContent = `${approx ? '≈' : ''}${fmtTokens(u.usedTokens)} / ${fmtTokens(u.windowTokens)}`
-  if (meta) meta.textContent = u.windowTokens != null ? `窗口 ${fmtTokens(u.windowTokens)}` : ''
+  if (subEl) subEl.textContent = `${approx ? '≈' : ''}${fmtTokens(used)} / ${fmtTokens(windowTokens)}`
+  if (meta) meta.textContent = windowTokens != null ? `窗口 ${fmtTokens(windowTokens)}` : ''
+
+  // 3) 构成：本次明细 → 缓存 → （无缓存时自动展开读取，下轮填充）
+  let system = u.breakdown.system
+  let tools = u.breakdown.tools
+  let messages = u.breakdown.messages
+  if (system == null && state.ctxCache) {
+    system = state.ctxCache.system ?? null
+    tools = state.ctxCache.tools ?? null
+    messages = state.ctxCache.messages ?? null
+  }
   if (breakdown) {
-    const b = u.breakdown
     const parts: [string, number | null | undefined][] = [
-      ['系统', b.system],
-      ['工具', b.tools],
-      ['对话', b.messages],
+      ['系统', system],
+      ['工具', tools],
+      ['对话', messages],
     ]
     const filled = parts.filter(([, v]) => v != null)
     if (filled.length > 0) {
@@ -466,9 +514,25 @@ function pollContext(): void {
         .map(([k, v]) => `<span class="dshd-ctx-part">${k} ${fmtTokens(v ?? null)}</span>`)
         .join('')
     } else {
-      // 构成明细需 harness 展开后才可见；点击上下文卡可展开
-      breakdown.innerHTML = `<span class="dshd-ctx-part dshd-ctx-part-hint">点击查看构成</span>`
+      breakdown.innerHTML = ''
     }
+  }
+
+  // 4) 自动展开读取：缓存缺失或过期（60s / 百分比变化 ≥2）且明细未展开时
+  //    防御：自动展开超 10s 未读到明细则重置并收起（避免卡在展开态）
+  if (state.ctxAutoExpanded && Date.now() - (state.ctxAutoExpandedAt ?? 0) > 10_000) {
+    state.ctxAutoExpanded = false
+    state.ctxAutoExpandedAt = null
+    if (expanded) btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+  }
+  const stale =
+    state.ctxCache == null ||
+    Date.now() - state.ctxCache.ts > 60_000 ||
+    (u.percent != null && state.ctxCache && Math.abs(state.ctxCache.percent - u.percent) >= 2)
+  if (stale && !expanded && !state.ctxAutoExpanded) {
+    state.ctxAutoExpanded = true
+    state.ctxAutoExpandedAt = Date.now()
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
   }
 }
 
