@@ -50,8 +50,19 @@ function runInherit(cmd: string, args: string[], timeoutMs: number): Promise<voi
   })
 }
 
-/** Windows 下获取 %LOCALAPPDATA%（Electron 不支持 app.getPath('localAppData')）。 */
-function localAppData(): string {
+/**
+ * 跨平台的应用数据根目录：
+ *  - Windows：%LOCALAPPDATA% （Electron 不支持 app.getPath('localAppData')）
+ *  - macOS：~/Library/Application Support
+ *  - Linux：$XDG_DATA_HOME 或 ~/.local/share
+ */
+function appDataRoot(): string {
+  if (process.platform === 'darwin') return path.join(os.homedir(), 'Library', 'Application Support')
+  if (process.platform === 'linux') {
+    const xdg = process.env.XDG_DATA_HOME
+    if (xdg) return xdg
+    return path.join(os.homedir(), '.local', 'share')
+  }
   const env = process.env.LOCALAPPDATA
   if (env) return env
   return path.join(os.homedir(), 'AppData', 'Local')
@@ -83,7 +94,7 @@ async function extractPackagedRuntime(tarPath: string, markerPath: string): Prom
     log('error', `packaged runtime archive missing: ${tarPath} / ${markerPath}`)
     return null
   }
-  const localRoot = path.join(localAppData(), 'DSH Desktop')
+  const localRoot = path.join(appDataRoot(), 'DSH Desktop')
   const runtimeDir = path.join(localRoot, 'runtime')
   const marker = readFileSync(markerPath, 'utf8').trim()
   const localMarker = path.join(localRoot, 'runtime.version')

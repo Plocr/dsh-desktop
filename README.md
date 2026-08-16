@@ -47,10 +47,11 @@ dev 模式依赖全局 `@deepseek-ai/dsh`（或设置 `DSH_DESKTOP_DSH_BIN` 指�
 ```sh
 npm test                 # 事件逻辑单测（node --test）
 npm run build            # esbuild 构建 + bridge → resources/plugins
-npm run make:icons       # 生成应用图标（纯 JS）
+npm run make:icons       # 生成应用图标（纯 JS，含 ico/icns）
 npm run setup:runtime    # 构建自包含运行时 resources/dsh-runtime
 npm run dist:win         # Windows NSIS 安装包（release/）
 npm run dist:win:portable
+npm run dist:mac         # macOS dmg（arm64 + x64；需在 macOS 上执行）
 ```
 
 ## 打包
@@ -59,7 +60,13 @@ npm run dist:win:portable
 2. `npm run setup:runtime`（下载便携 Node、`npm install @deepseek-ai/dsh@0.1.0-rc.6`、安装 bridge、打包 `resources/dsh-runtime.tar.gz`）
 3. `npm run dist:win`（electron-builder NSIS；`electronDist` 复用本地 Electron 二进制）
 
-安装后首次运行：自动创建 `~/.dsh/profiles/desktop` 并同步 bridge；运行时 tar.gz 解压到 `%LOCALAPPDATA%/DSH Desktop/runtime`（约 40s，二次启动免解压）；窗口内选择工作区即可开始会话。
+安装后首次运行：自动创建 `~/.dsh/profiles/desktop` 并同步 bridge；运行时 tar.gz 解压到应用数据目录（Windows `%LOCALAPPDATA%/DSH Desktop/runtime`，macOS `~/Library/Application Support/DSH Desktop/runtime`；约 40s，二次启动免解压）；窗口内选择工作区即可开始会话。
+
+## 平台支持
+
+- **Windows**（主平台，实测）：NSIS 安装包、托盘、系统通知、任务栏徽标、开机自启、`dsh://` 深链（注册表）
+- **macOS**（配置就绪，未实机验证）：dmg（arm64/x64）、`dsh://` 深链（Info.plist protocols + open-url 事件）、运行时路径走 `~/Library/Application Support`；打包需在 macOS 上执行（`npm run dist:mac`）
+- **Linux**：代码兼容（运行时路径走 `$XDG_DATA_HOME`），未提供打包配置
 
 ## 版本锁定
 

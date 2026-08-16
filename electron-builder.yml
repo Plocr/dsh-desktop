@@ -30,6 +30,24 @@ win:
   icon: resources/icons/icon.ico
   executableName: dsh-desktop
 
+mac:
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  icon: resources/icons/icon.icns
+  category: public.app-category.developer-tools
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  # macOS 深链：Info.plist 声明 dsh:// scheme（setAsDefaultProtocolClient 依赖）
+  protocols:
+    - name: DSH Desktop Link
+      schemes:
+        - dsh
+
+dmg:
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
@@ -50,5 +68,8 @@ publish:
   provider: generic
   url: https://updates.dsh-desktop.invalid/dsh-desktop
 
-# 复用 node_modules/electron/dist，避免 electron-builder 重新下载
+# 复用 node_modules/electron/dist，避免 electron-builder 重新下载。
+# 注意：electronDist 内的二进制是平台相关的——在本机（Windows）上打包 win 目标
+# 可复用；打包 mac 目标时 electron-builder 会自动下载 mac 版 Electron，
+# 此配置仅对当前平台生效，不会污染 mac 产物。
 electronDist: node_modules/electron/dist

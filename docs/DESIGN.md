@@ -156,7 +156,8 @@ E2E（`scripts/e2e-turn.mjs`，需 `DSH_DESKTOP_ELECTRON_ARGS=--remote-debugging
 - `jobs.list` 逐会话聚合在会话数多时 O(n)；后续可改为监听 `session/jobs` 帧或注册表扩展。
 - `dsh://session/<id>` 依赖侧边栏渲染该会话（当前工作区可见的会话）；未分组/其他工作区的会话只聚焦窗口。
 - 通知/徽标仅在任务事件到达时更新；harness 不在前台时任务列表为启动时快照（服务端持久化，重启后恢复）。
-- macOS/Linux 未实机验证（配置就绪；终端壳解析已覆盖 bash/zsh/pwsh）。
+- **macOS**：dmg 打包（arm64/x64）、`dsh://` 深链（Info.plist protocols + open-url 事件 + 冷启动队列）、运行时路径走 `~/Library/Application Support` 已配置；**未实机验证**（打包须在 macOS 上执行 `npm run dist:mac`，且运行时 tar.gz 需在 mac 上重建）。
+- **Linux**：代码兼容（运行时路径走 `$XDG_DATA_HOME`），未提供打包配置。
 - harness 版本锁定 0.1.0-rc.6；升级需重跑 setup-runtime.mjs 并同步 bridge 版本。
 - 自动更新源默认占位 URL（`.invalid` 保留域名）；正式部署需覆盖（构建时 `--config.publish.url=` 或运行时 `DSH_DESKTOP_UPDATE_URL`）并上传 `latest.yml` + 安装包。
 - 更新安装依赖 NSIS 安装器（`quitAndInstall` 静默执行）；`oneClick: false` 下更新流程已验证到"就绪"事件，安装动作留待真实发布后人工确认。

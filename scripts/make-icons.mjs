@@ -208,6 +208,24 @@ function encodeIco(sizes, pngs) {
   return Buffer.concat([header, ...entries, ...pngs])
 }
 
+/* ── ICNS 编码（macOS 图标容器：header + 每尺寸 PNG chunk） ─────────── */
+
+function encodeIcns(entries) {
+  // ICNS 头部：'icns' magic + 总长度（含 8 字节头）
+  let total = 8
+  const chunks = []
+  for (const { type, data } of entries) {
+    const len = Buffer.alloc(4)
+    len.writeUInt32BE(data.length + 8)
+    chunks.push(Buffer.concat([Buffer.from(type, 'ascii'), len, data]))
+    total += data.length + 8
+  }
+  const header = Buffer.alloc(8)
+  header.write('icns', 0, 'ascii')
+  header.writeUInt32BE(total, 4)
+  return Buffer.concat([header, ...chunks])
+}
+
 /* ── 输出 ────────────────────────────────────────────────────────────── */
 
 const outDir = path.join(root, 'resources', 'icons')
@@ -220,4 +238,17 @@ writeFileSync(path.join(outDir, 'icon.png'), pngs[3])
 writeFileSync(path.join(outDir, 'tray.png'), pngs[1])
 writeFileSync(path.join(outDir, 'tray@2x.png'), encodePng(64, 64, render(64, 0.7)))
 writeFileSync(path.join(outDir, 'icon.ico'), encodeIco(sizes, pngs))
+// macOS：icns 需要 16/32/128/256/512/1024 的 PNG 内嵌（icp4/icp5/ic07/ic08/ic09）
+const icnsSizes = [
+  { type: 'icp4', size: 16 },
+  { type: 'icp5', size: 32 },
+  { type: 'ic07', size: 128 },
+  { type: 'ic08', size: 256 },
+  { type: 'ic09', size: 512 },
+]
+const icnsEntries = icnsSizes.map(({ type, size }) => ({
+  type,
+  data: encodePng(size, size, render(size, 0.66)),
+}))
+writeFileSync(path.join(outDir, 'icon.icns'), encodeIcns(icnsEntries))
 console.log(`[icons] generated ${outDir}`)

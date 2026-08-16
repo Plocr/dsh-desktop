@@ -59,6 +59,9 @@ let pendingDeepLinks: DeepLinkAction[] = []
 
 /* ── 既有基础设施 ───────────────────────────────────────────────────── */
 
+/** macOS 冷启动时早于 ready 的 dsh:// 动作（ready 后处理）。 */
+const openUrlQueue: DeepLinkAction[] = []
+
 function dshHome(): string {
   return settings.isolatedHome ? path.join(app.getPath('userData'), 'dsh-home') : path.join(os.homedir(), '.dsh')
 }
@@ -395,8 +398,31 @@ async function main(): Promise<void> {
     showWindow()
   })
 
+  // macOS：dsh:// 协议经 open-url 事件拉起（热启动）；冷启动时事件先于 ready，
+  // 由本模块顶部收集、就绪后处理（见下方 openUrlQueue）。
+  if (process.platform === 'darwin') {
+    app.on('open-url', (e, url) => {
+      e.preventDefault()
+      const action = parseDeepLink(url)
+      if (action) {
+        if (app.isReady()) void handleDeepLink(action)
+        else openUrlQueue.push(action)
+      }
+    })
+    // Dock 点击重新聚焦（无窗口时）
+    app.on('activate', () => showWindow())
+  }
+
   // 通过 dsh:// 协议冷启动时，URL 出现在首个实例的 argv 中
   consumeDeepLinkArgv(process.argv)
+
+  // macOS 冷启动队列：ready 后统一处理（与 flushPendingDeepLinks 同时序）
+  const queuedMac = openUrlQueue.splice(0)
+  if (queuedMac.length > 0) {
+    setTimeout(() => {
+      for (const action of queuedMac) void handleDeepLink(action)
+    }, 1500)
+  }
 
   harness.start()
 }

@@ -1,5 +1,5 @@
 /**
- * 开发启动：build → dev-link（全部插件链接进 profile node_modules）→ electron .
+ * 开发启动：build → dev-link（bridge 链接进 profile node_modules）→ electron .
  */
 import { spawn } from 'node:child_process'
 import path from 'node:path'
