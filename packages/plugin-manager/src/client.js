@@ -161,6 +161,9 @@ return {
 .pm-stars{font-size:12px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
 .pm-desc2{color:var(--dsw-alias-label-secondary);font-size:13px;line-height:1.6}
 .pm-installed{color:var(--dsw-alias-static-success,#16a34a);font-size:11px;font-weight:500}
+.pm-catTitle{display:flex;align-items:center;gap:8px;margin-top:4px}
+.pm-catLabel{font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary)}
+.pm-catCount{font-size:11px;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-module-platform);border-radius:999px;padding:0 8px;line-height:18px}
 `), 'plugin-manager: styles')
 
     // ---- 通用小组件 ----
@@ -292,20 +295,31 @@ return {
 
     // ---- 各 tab 页面 ----
 
-    /** 官方插件页。 */
+    /** 官方插件页（按分类分组展示）。 */
     function OfficialPage({ data, error, onRefresh }) {
-      const list = data ? data.official : null
+      const cats = data ? data.officialCategories : null
+      const total = cats ? cats.reduce((n, c) => n + c.plugins.length, 0) : 0
       return e('div', { className: 'pm-root' },
         error ? e('div', { className: 'pm-err' }, error) : null,
         e('div', { className: 'pm-head' },
           e('div', { className: 'pm-headText' },
             e('div', { className: 'pm-title' }, t('official.tab')),
-            e('div', { className: 'pm-hint' }, t('official.hint', { count: list ? list.length : '…' })),
+            e('div', { className: 'pm-hint' }, t('official.hint', { count: total || '…' })),
           ),
           e('button', { type: 'button', className: 'pm-refresh', onClick: onRefresh }, t('refresh')),
         ),
-        list && list.length > 0
-          ? e('div', { className: 'pm-list' }, list.map((p) => e(OfficialCard, { key: p.entryId || p.moduleName || p.name, plugin: p })))
+        cats && cats.length > 0
+          ? cats.map((cat) =>
+              e('div', { key: cat.id, style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+                e('div', { className: 'pm-catTitle' },
+                  e('span', { className: 'pm-catLabel' }, cat.label),
+                  e('span', { className: 'pm-catCount' }, String(cat.plugins.length)),
+                ),
+                e('div', { className: 'pm-list' },
+                  cat.plugins.map((p) => e(OfficialCard, { key: p.entryId || p.moduleName || p.name, plugin: p })),
+                ),
+              ),
+            )
           : e('div', { className: 'pm-empty' }, t('empty')),
       )
     }

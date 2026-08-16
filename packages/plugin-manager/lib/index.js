@@ -97,11 +97,54 @@ function listOfficialPlugins(ctx) {
   return []
 }
 
-/** GitHub 仓库搜索：topic:dsh-plugin。无关键词时返回默认 Top15（按 star 排序）。 */
+/** 官方插件分类：按 moduleName 前缀分组。 */
+const OFFICIAL_CATEGORIES = [
+  { id: 'ui', label: 'UI', match: (n) => /^@deepseek-ai\/dsh-client-ui-|^@deepseek-ai\/dsh-client-/.test(n) },
+  { id: 'settings', label: '设置', match: (n) => /settings|config/.test(n) },
+  { id: 'tool', label: '工具', match: (n) => /^@deepseek-ai\/dsh-tool-|^@deepseek-ai\/dsh-tool$/.test(n) },
+  { id: 'llm', label: '模型', match: (n) => /llm|model/.test(n) },
+  { id: 'session', label: '会话', match: (n) => /session/.test(n) },
+  { id: 'agent', label: 'Agent', match: (n) => /agent|subagent/.test(n) },
+  { id: 'storage', label: '存储', match: (n) => /storage|persistence|attachment/.test(n) },
+  { id: 'web', label: '网络', match: (n) => /web|api|remote|proxy/.test(n) },
+  { id: 'core', label: '核心', match: () => true },
+]
+
+function categorizeOfficial(moduleName) {
+  const n = moduleName || ''
+  for (const cat of OFFICIAL_CATEGORIES) {
+    if (cat.match(n)) return cat
+  }
+  return OFFICIAL_CATEGORIES[OFFICIAL_CATEGORIES.length - 1]
+}
+
+/** 市场条目过滤：纯本地启发式（不依赖 raw.githubusercontent 可达性）。 */
+function looksLikePlugin(item) {
+  const fullName = item?.full_name ?? ''
+  const name = (fullName.split('/')[1] ?? '').toLowerCase()
+  const desc = String(item?.description ?? '')
+  const topics = Array.isArray(item?.topics) ? item.topics.join(' ') : ''
+  const hint = name + ' ' + desc + ' ' + topics
+  // 硬黑名单：harness 本体与知名非插件项目
+  const blocked = [
+    'deepseek-harness', 'open-design', 'reactive-resume', 'yao', 'petdex',
+    'voyager', 'ouroboros', 'openpencil', 'archify', 'openviking',
+    'mirage', 'colleague-skill', 'ipollo', 'echo-bird', 'vibe-skills',
+  ]
+  if (blocked.includes(name)) return false
+  // dsh-* / *-plugin / *-harness 命名视为插件
+  if (/^dsh[-/]/.test(name)) return true
+  if (/plugin|harness/i.test(name)) return true
+  // 描述/topic 含插件特征
+  if (/(dsh plugin|harness plugin|dsh-|deepseek harness plugin|for deepseek harness|deepseek-harness plugin)/i.test(hint)) return true
+  return false
+}
+
+/** GitHub 仓库搜索：topic:dsh-plugin。无关键词时返回默认 Top15（按 star 排序，过滤非插件）。 */
 async function marketSearch(query) {
   const q = ['topic:dsh-plugin']
   if (typeof query === 'string' && query.trim()) q.push(query.trim())
-  const perPage = typeof query === 'string' && query.trim() ? 30 : 15
+  const perPage = typeof query === 'string' && query.trim() ? 50 : 30
   const url = `${GITHUB_SEARCH}?q=${encodeURIComponent(q.join(' '))}&sort=stars&order=desc&per_page=${perPage}`
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), 10_000)
@@ -112,17 +155,18 @@ async function marketSearch(query) {
     })
     if (!res.ok) return { status: 'error', message: `GitHub API ${res.status}` }
     const data = await res.json()
-    const items = Array.isArray(data?.items) ? data.items : []
-    return {
-      status: 'ok',
-      items: items.map((r) => ({
+    const raw = Array.isArray(data?.items) ? data.items : []
+    const items = raw
+      .filter(looksLikePlugin)
+      .slice(0, typeof query === 'string' && query.trim() ? 30 : 15)
+      .map((r) => ({
         fullName: r?.full_name ?? r?.name ?? '?',
         description: r?.description ?? null,
         stars: r?.stargazers_count ?? 0,
         url: r?.html_url ?? null,
         updatedAt: r?.updated_at ?? null,
-      })),
-    }
+      }))
+    return { status: 'ok', items }
   } catch (e) {
     return { status: 'error', message: e instanceof Error ? e.message : String(e) }
   } finally {
@@ -143,69 +187,50 @@ function extractZip(zipPath, destDir) {
 }
 
 /**
- * 从市场安装插件：下载仓库 zip → 解压 → 找到含 package.json 的插件目录
- * → 以包名安装到 userPluginsDir。
+ * 从市场安装插件：按官方文档命令安装。
+ *   git 仓库：dsh plugin --profile <name> add github:owner/repo
+ *   npm 包：  dsh plugin --profile <name> add <pkg>
+ * （官方 publish 文档：https://deepseek-harness.github.io/deepseek-harness/develop/basic/publish）
  */
 async function marketInstall(repo, config) {
-  const fullName = typeof repo === 'string' ? repo.trim() : ''
-  if (!/^[^/]+\/[^/]+$/.test(fullName)) return { status: 'error', message: '仓库格式应为 owner/repo' }
-  const userDir = config?.userPluginsDir
-  if (!userDir) return { status: 'error', message: 'userPluginsDir 未配置' }
-  const ctrl = new AbortController()
-  const t = setTimeout(() => ctrl.abort(), 60_000)
-  try {
-    const rel = await fetch(`https://api.github.com/repos/${fullName}/releases/latest`, {
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'dsh-desktop' },
-      signal: ctrl.signal,
-    })
-    let zipUrl = null
-    let tag = null
-    if (rel.ok) {
-      const data = await rel.json()
-      zipUrl = data?.zipball_url ?? null
-      tag = data?.tag_name ?? null
-    }
-    if (!zipUrl) {
-      const repoRes = await fetch(`https://api.github.com/repos/${fullName}`, {
-        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'dsh-desktop' },
-        signal: ctrl.signal,
-      })
-      if (!repoRes.ok) return { status: 'error', message: `仓库不可达: ${repoRes.status}` }
-      const repoData = await repoRes.json()
-      zipUrl = repoData?.default_branch
-        ? `https://github.com/${fullName}/archive/refs/heads/${repoData.default_branch}.zip`
-        : null
-    }
-    if (!zipUrl) return { status: 'error', message: '无法确定下载地址' }
+  const target = typeof repo === 'string' ? repo.trim() : ''
+  if (!target) return { status: 'error', message: 'missing repo/package' }
+  const profile = config?.profileName ?? 'desktop'
+  const dshHome = config?.dshHome
+  const dshBin = config?.dshBin
+  if (!dshBin || !dshHome) return { status: 'error', message: 'dsh CLI 路径未注入（dshBin/dshHome）' }
 
-    mkdirSync(userDir, { recursive: true })
-    const tmpZip = path.join(userDir, `.install-${Date.now()}.zip`)
-    const tmpDir = path.join(userDir, `.install-${Date.now()}`)
-    mkdirSync(tmpDir, { recursive: true })
-    try {
-      const dl = await fetch(zipUrl, { signal: ctrl.signal })
-      if (!dl.ok) return { status: 'error', message: `下载失败: ${dl.status}` }
-      const buf = Buffer.from(await dl.arrayBuffer())
-      writeFileSync(tmpZip, buf)
-      await extractZip(tmpZip, tmpDir)
-      // 在解压结果里找含 package.json 的插件包目录（zip 通常包一层仓库根目录）
-      const pkgDir = findPluginPackageDir(tmpDir)
-      if (!pkgDir) return { status: 'error', message: '仓库未包含插件包（无 package.json）' }
-      const pkg = readJson(path.join(pkgDir, 'package.json'))
-      const name = typeof pkg?.name === 'string' && pkg.name ? pkg.name : fullName.split('/')[1]
-      const dest = path.join(userDir, name)
-      rmSync(dest, { recursive: true, force: true })
-      copyDirTree(pkgDir, dest)
-      return { status: 'ok', message: `已安装 ${name}@${tag ?? 'default'}（重启 Harness 生效）`, name }
-    } finally {
-      rmSync(tmpZip, { force: true })
-      rmSync(tmpDir, { recursive: true, force: true })
-    }
-  } catch (e) {
-    return { status: 'error', message: e instanceof Error ? e.message : String(e) }
-  } finally {
-    clearTimeout(t)
-  }
+  // 参数规范化：owner/repo → github:owner/repo；否则视为 npm 包名
+  const spec = /^[^/]+\/[^/]+$/.test(target) && !target.startsWith('github:') ? `github:${target}` : target
+
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [dshBin, 'plugin', '--profile', profile, 'add', spec], {
+      env: { ...process.env, DSH_HOME: dshHome },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    let out = ''
+    let err = ''
+    child.stdout?.on('data', (c) => { out += String(c) })
+    child.stderr?.on('data', (c) => { err += String(c) })
+    const t = setTimeout(() => {
+      try { child.kill() } catch { /* ignore */ }
+      resolve({ status: 'error', message: '安装超时（30s）' })
+    }, 30_000)
+    child.on('error', (e) => {
+      clearTimeout(t)
+      resolve({ status: 'error', message: `无法执行 dsh: ${e.message}` })
+    })
+    child.on('exit', (code) => {
+      clearTimeout(t)
+      const detail = (out + err).trim().slice(-600)
+      if (code === 0) {
+        resolve({ status: 'ok', message: `已按官方命令安装 ${spec}（重启 Harness 生效）`, detail })
+      } else {
+        resolve({ status: 'error', message: `安装失败（exit ${String(code)}）: ${detail || '无输出'}` })
+      }
+    })
+  })
 }
 
 /** 递归查找包含 package.json 的插件包目录（优先找 name 形如 dsh-* 的）。 */
@@ -258,26 +283,42 @@ function copyDirTree(src, dest) {
   }
 }
 
-/** 卸载用户插件：删除 userPluginsDir 下的插件目录。 */
+/** 卸载用户插件：按官方命令 dsh plugin --profile <name> remove <pkg>。 */
 async function userUninstall(name, config) {
-  const userDir = config?.userPluginsDir
-  if (!userDir) return { status: 'error', message: 'userPluginsDir 未配置' }
   if (typeof name !== 'string' || !name) return { status: 'error', message: 'missing name' }
   if (name === 'dsh-desktop-bridge') return { status: 'error', message: 'bridge 为必需插件，不可删除' }
-  // 按包名或目录名匹配
-  const target = path.join(userDir, name)
-  if (!existsSync(target)) {
-    // 尝试目录名匹配（包名可能 ≠ 目录名）
-    const found = scanPlugins(userDir).find((p) => p.name === name)
-    if (!found) return { status: 'error', message: `未找到用户插件 ${name}` }
-    return userUninstall(found.dir, config)
-  }
-  try {
-    rmSync(target, { recursive: true, force: true })
-    return { status: 'ok', message: `已删除 ${name}` }
-  } catch (e) {
-    return { status: 'error', message: e instanceof Error ? e.message : String(e) }
-  }
+  const profile = config?.profileName ?? 'desktop'
+  const dshHome = config?.dshHome
+  const dshBin = config?.dshBin
+  if (!dshBin || !dshHome) return { status: 'error', message: 'dsh CLI 路径未注入（dshBin/dshHome）' }
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [dshBin, 'plugin', '--profile', profile, 'remove', name], {
+      env: { ...process.env, DSH_HOME: dshHome },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    let out = ''
+    let err = ''
+    child.stdout?.on('data', (c) => { out += String(c) })
+    child.stderr?.on('data', (c) => { err += String(c) })
+    const t = setTimeout(() => {
+      try { child.kill() } catch { /* ignore */ }
+      resolve({ status: 'error', message: '删除超时（30s）' })
+    }, 30_000)
+    child.on('error', (e) => {
+      clearTimeout(t)
+      resolve({ status: 'error', message: `无法执行 dsh: ${e.message}` })
+    })
+    child.on('exit', (code) => {
+      clearTimeout(t)
+      const detail = (out + err).trim().slice(-400)
+      if (code === 0) {
+        resolve({ status: 'ok', message: `已删除 ${name}（重启 Harness 生效）`, detail })
+      } else {
+        resolve({ status: 'error', message: `删除失败（exit ${String(code)}）: ${detail || '无输出'}` })
+      }
+    })
+  })
 }
 
 /** 从 payload 容错取参：{args:{...}} / {name:..} / 直接参数。 */
@@ -307,13 +348,34 @@ export function apply(ctx, config) {
             if (bundled.length === 0 && config?.bundledPluginsDir) {
               bundled = scanPlugins(config.bundledPluginsDir).map((p) => ({ ...p, source: 'bundled' }))
             }
+            const user = scanPlugins(config?.userPluginsDir).map((p) => decorate({ ...p, source: 'user' }))
+            // 已安装插件（bundled + user）从官方列表排除，避免重复展示
+            const installedNames = new Set([
+              ...bundled.map((p) => p.name),
+              ...user.map((p) => p.name),
+            ])
+            const official = listOfficialPlugins(ctx)
+              .filter((p) => !installedNames.has(p.moduleName ?? p.name))
+              .map((p) => ({ ...p, category: categorizeOfficial(p.moduleName ?? p.name) }))
+            // 官方插件按分类聚合
+            const officialByCategory = {}
+            for (const o of official) {
+              const cid = o.category?.id ?? 'core'
+              if (!officialByCategory[cid]) officialByCategory[cid] = []
+              officialByCategory[cid].push(o)
+            }
             return {
               ok: true,
               value: {
                 appVersion: config?.appVersion ?? null,
-                official: listOfficialPlugins(ctx),
+                officialCategories: OFFICIAL_CATEGORIES.map((c) => ({
+                  id: c.id,
+                  label: c.label,
+                  plugins: officialByCategory[c.id] ?? [],
+                })).filter((c) => c.plugins.length > 0),
+                official,
                 bundled: bundled.map((p) => decorate({ ...p, source: p.source ?? 'bundled' })),
-                user: scanPlugins(config?.userPluginsDir).map((p) => decorate({ ...p, source: 'user' })),
+                user,
               },
             }
           }

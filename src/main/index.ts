@@ -60,6 +60,8 @@ let runningJobs = 0
 let pendingDeepLinks: DeepLinkAction[] = []
 let overlayPath = ''
 let launchToken = ''
+/** dsh CLI 入口（runtime.bin），供插件管理器执行 dsh plugin 命令。 */
+let dshCliPath = ''
 
 /* ── 既有基础设施 ───────────────────────────────────────────────────── */
 
@@ -99,6 +101,9 @@ function regenerateOverlay(resourcesDir: string, token: string): string {
             userPluginsDir: usersDir,
             settingsFile: settingsFile,
             appVersion: app.getVersion(),
+            dshBin: dshCliPath,
+            dshHome: dshHome(),
+            profileName: 'desktop',
           },
         }
       : {}),
@@ -343,6 +348,7 @@ async function main(): Promise<void> {
   const runtime = await resolveRuntime(() => {
     win?.showLoading('首次运行：正在解压运行时…', resolveThemePreference(dshHome()))
   })
+  dshCliPath = runtime.bin
   overlayPath = regenerateOverlay(resourcesDir, token)
 
   harness = new HarnessManager(
