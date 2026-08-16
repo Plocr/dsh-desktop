@@ -1,0 +1,5 @@
+# ui-dashboard bundle layer — inserted by `dsh plugin --profile <name> add …`
+# (the `dsh.bundle.patch` file declared in package.json; see dsh-app-boot loadProfile).
+- insert:
+    - id: ui-dashboard
+      name: ui-dashboard

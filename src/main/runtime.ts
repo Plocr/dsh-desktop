@@ -207,15 +207,28 @@ function discoverPluginsIn(
 }
 
 export interface DesktopPlugin {
+  /** package.json 的 name（harness 按此解析加载） */
   name: string
+  /** 插件目录名（resources/plugins/<dir> 或 userData/plugins/<dir>） */
+  dir: string
   version: string | null
   source: 'bundled' | 'user'
 }
 
 /** 汇总全部桌面插件（打包内置 + 用户安装），含来源标记。 */
 export function listDesktopPlugins(bundledDir: string | undefined, userDir: string | undefined): DesktopPlugin[] {
-  const bundled = discoverPluginsIn(bundledDir).map((p) => ({ name: p.name, version: p.version, source: 'bundled' as const }))
-  const user = discoverPluginsIn(userDir).map((p) => ({ name: p.name, version: p.version, source: 'user' as const }))
+  const bundled = discoverPluginsIn(bundledDir).map((p) => ({
+    name: p.name,
+    dir: path.basename(p.dir),
+    version: p.version,
+    source: 'bundled' as const,
+  }))
+  const user = discoverPluginsIn(userDir).map((p) => ({
+    name: p.name,
+    dir: path.basename(p.dir),
+    version: p.version,
+    source: 'user' as const,
+  }))
   // 同名时用户目录优先（可覆盖/更新内置同名插件）
   const userNames = new Set(user.map((p) => p.name))
   return [...user, ...bundled.filter((p) => !userNames.has(p.name))]
@@ -246,7 +259,8 @@ export function ensureProfile(
     (p) => p.name === 'dsh-desktop-bridge' || !disabled.has(p.name),
   )
   for (const p of plugins) {
-    const src = p.source === 'user' ? path.join(userPluginsDir ?? '', p.name) : path.join(bundledPluginsDir ?? '', p.name)
+    // 注意：用目录名（dir）定位源，包名（name）作为 profile 内的安装名
+    const src = p.source === 'user' ? path.join(userPluginsDir ?? '', p.dir) : path.join(bundledPluginsDir ?? '', p.dir)
     if (!existsSync(src)) continue
     const target = path.join(profileDir, 'node_modules', p.name)
     const bundledVersion = readVersion(src)

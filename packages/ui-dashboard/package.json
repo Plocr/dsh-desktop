@@ -1,0 +1,54 @@
+{
+  "name": "ui-dashboard",
+  "version": "0.10.0",
+  "description": "DSH 右侧仪表盘 UI 插件：上下文占用（三色圆环）、Token 用量与人民币费用估算、会话统计、目标、待办、后台任务、工作区；支持右侧栏（details 槽位）与会话标签页（conversation.view）两种形态。",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "plugin",
+    "ui",
+    "dashboard"
+  ],
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./bundle.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "files": [
+    "lib",
+    "src",
+    "scripts",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node build-client.js",
+    "prepare": "node build-client.js",
+    "install:dsh": "node scripts/install.mjs"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
