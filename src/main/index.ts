@@ -77,11 +77,27 @@ function userPluginsDir(): string {
 
 /** 依据当前设置重新生成 overlay（启停插件后重启 Harness 生效）。 */
 function regenerateOverlay(resourcesDir: string, token: string): string {
-  const enabled = listDesktopPlugins(path.join(resourcesDir, 'plugins'), userPluginsDir()).filter(
+  const pluginsDir = path.join(resourcesDir, 'plugins')
+  const usersDir = userPluginsDir()
+  const enabled = listDesktopPlugins(pluginsDir, usersDir).filter(
     (p) => p.name === 'dsh-desktop-bridge' || !settings.disabledPlugins.includes(p.name),
   )
-  const p = writeOverlay(app.getPath('userData'), token, enabled)
-  log('info', `overlay regenerated: ${enabled.map((x) => x.name).join(', ') || '(none)'}`)
+  // desktop-plugin-manager 需要壳注入目录与设置路径（host 半边据此枚举/启停插件）
+  const rows = enabled.map((p) => ({
+    name: p.name,
+    ...(p.name === 'dsh-desktop-plugin-manager'
+      ? {
+          config: {
+            bundledPluginsDir: pluginsDir,
+            userPluginsDir: usersDir,
+            settingsFile: settingsFile,
+            appVersion: app.getVersion(),
+          },
+        }
+      : {}),
+  }))
+  const p = writeOverlay(app.getPath('userData'), token, rows)
+  log('info', `overlay regenerated: ${rows.map((x) => x.name).join(', ') || '(none)'}`)
   return p
 }
 

@@ -7,7 +7,7 @@
  * 若目标已存在且是真实目录（例如打包版首启的同步副本），直接替换为 junction，
  * 保证 dev 始终加载仓库里的最新源码。
  */
-import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -28,7 +28,18 @@ for (const name of readdirSync(packagesDir)) {
   }
   if (!isDir) continue
 
-  const link = path.join(profileNodeModules, name)
+  // 链接名用包名（package.json 的 name），不是目录名——overlay `name:` 按包名解析
+  let pkgName = name
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(target, 'package.json'), 'utf8'))
+    if (typeof pkg.name === 'string' && pkg.name) pkgName = pkg.name
+  } catch {
+    /* 无 package.json 的目录跳过链接 */
+    console.warn(`[dev-link] ${name}: 缺少 package.json，跳过`)
+    continue
+  }
+
+  const link = path.join(profileNodeModules, pkgName)
   if (existsSync(link)) {
     let isLink = false
     try {
@@ -37,7 +48,7 @@ for (const name of readdirSync(packagesDir)) {
       /* broken link */
     }
     if (isLink && path.resolve(readlinkSync(link)) === target) {
-      console.log(`[dev-link] ${name} 已链接: ${link}`)
+      console.log(`[dev-link] ${pkgName} 已链接: ${link}`)
       continue
     }
     console.warn(`[dev-link] ${link} 存在但不是指向本仓库的链接（可能是旧同步副本），替换为 junction`)

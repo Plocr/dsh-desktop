@@ -1,0 +1,38 @@
+{
+  "name": "dsh-desktop-plugin-manager",
+  "version": "0.1.0",
+  "description": "DSH Desktop 插件管理系统：官方/桌面/用户/市场 四类分区管理页（设置→插件区），支持启停桌面插件、GitHub dsh-plugin 市场搜索与安装。",
+  "keywords": ["dsh-plugin", "deepseek-harness", "desktop", "plugin-manager"],
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "files": ["lib", "src", "build-client.js", "README.md"],
+  "scripts": {
+    "build": "node build-client.js"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
