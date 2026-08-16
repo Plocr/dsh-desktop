@@ -3,12 +3,17 @@ name: build-release
 # 推送 v* 标签时构建 Windows + macOS 安装包并上传到对应 Release。
 # 每个平台 job 独立构建（运行时 tar.gz 是平台相关的，必须本平台生成），
 # 产物按平台前缀命名，互不覆盖。
+# 手动触发（workflow_dispatch）：必须指定 tag 名（如 v0.4.1），上传到该 Release。
 
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag 名（如 v0.4.1）'
+        required: true
 
 permissions:
   contents: write
@@ -33,9 +38,10 @@ jobs:
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
-          gh release upload "${{ github.ref_name }}" release/*.exe --clobber
+          gh release upload "$RELEASE_TAG" release/*.exe --clobber
 
   build-macos:
     runs-on: macos-latest
@@ -59,6 +65,7 @@ jobs:
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
-          gh release upload "${{ github.ref_name }}" release/*.dmg --clobber
+          gh release upload "$RELEASE_TAG" release/*.dmg --clobber
