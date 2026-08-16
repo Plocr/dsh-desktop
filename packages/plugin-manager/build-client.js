@@ -60,15 +60,25 @@ if (!body.endsWith(tailAnchor)) throw new Error('tail anchor not found')
 body = body.slice(0, body.length - tailAnchor.length) +
   "    )\n  },\n}\nexports.inject = plugin.inject\nexports.apply = plugin.apply\n"
 
-// ---- 4. 包装：ModuleLoader factory + React/host ----
+// ---- 4. 包装：ModuleLoader factory + React/styles/host ----
 const header = `window.__ModuleLoader__.load({
   id: 'dsh-desktop-plugin-manager',
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
-    // 持久安装版适配：动态版的 runner 闭包形参（React / host）在此提供。
+    // 持久安装版适配：动态版的 runner 闭包形参（React / styles / host）在此提供。
     var React = require('react');
+    var styles = {
+      insert: function (css) {
+        if (typeof document === 'undefined') return function () {};
+        var tag = document.createElement('style');
+        tag.dataset.plugin = 'dsh-desktop-plugin-manager';
+        tag.textContent = css;
+        document.head.append(tag);
+        return function () { tag.remove(); };
+      }
+    };
     var host = {
       call: function () {
         return Promise.reject(new Error('plugin-manager: host.call not wired (apply not run)'));
