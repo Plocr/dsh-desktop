@@ -13,6 +13,7 @@
 import { app } from 'electron'
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -267,6 +268,13 @@ export function ensureProfile(
     const currentVersion = readVersion(target)
     if (currentVersion !== bundledVersion) {
       mkdirSync(path.dirname(target), { recursive: true })
+      // 若目标是 junction/symlink（dev 链接），用 unlink 移除链接本身，
+      // 再复制真实副本——rmSync(recursive) 会穿透 junction 删除指向的真实目录
+      try {
+        if (lstatSync(target).isSymbolicLink()) rmSync(target, { force: true })
+      } catch {
+        /* 不存在或非链接，忽略 */
+      }
       copyDir(src, target)
       log('info', `plugin synced to profile: ${p.name} (${String(currentVersion)} -> ${String(bundledVersion)})`)
     }
@@ -279,6 +287,12 @@ export function ensureProfile(
       if (entry.startsWith('.') || entry === 'dsh-desktop-bridge' || activeNames.has(entry)) continue
       const target = path.join(nmDir, entry)
       try {
+        // junction/symlink：unlink 只删链接本身（rmSync recursive 会穿透删目标）
+        if (lstatSync(target).isSymbolicLink()) {
+          rmSync(target, { force: true })
+          log('info', `plugin link removed from profile: ${entry}`)
+          continue
+        }
         if (statSync(target).isDirectory()) {
           rmSync(target, { recursive: true, force: true })
           log('info', `plugin removed from profile: ${entry}`)
