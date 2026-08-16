@@ -61,12 +61,16 @@ portable:
 
 npmRebuild: false
 
-# 自动更新源（generic）。默认占位地址不可达（.invalid 保留域名），
-# 真实部署时覆盖：npx electron-builder --win nsis --config.publish.url=https://你的更新服务器/
-# 或设置 DSH_DESKTOP_UPDATE_URL 运行时覆盖。
+# 自动更新源（第 1 层·桌面端）：直接对接仓库的 GitHub Releases。
+# provider: github 时 electron-updater 查询该仓库的 latest release，比对系统版本，
+# 有新版即下载对应平台的安装包替换。GitHub 既是发布源也是更新源，无需额外服务器。
+#
+# 说明：官方 harness 更新走的是另一套检测（src/main/harnessCheck.ts，查 npm registry），
+# 与本字段无关——本字段只决定「DSH Desktop 外壳」自己怎么更新。
 publish:
-  provider: generic
-  url: https://updates.dsh-desktop.invalid/dsh-desktop
+  provider: github
+  owner: Plocr
+  repo: dsh-desktop
 
 # 本机复用 node_modules/electron/dist（避免重复下载）——仅用于本机打包 win 目标。
 # CI（GitHub Actions）不设置此值，让 electron-builder 自动下载对应平台 Electron。

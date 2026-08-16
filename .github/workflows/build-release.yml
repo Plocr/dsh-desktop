@@ -42,7 +42,8 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
-          gh release upload "$RELEASE_TAG" release/*.exe --clobber
+          # 上传安装包 + latest.yml（GitHub provider 的更新元数据，updater 依赖）
+          gh release upload "$RELEASE_TAG" release/*.exe release/latest.yml --clobber
 
   build-macos-arm64:
     runs-on: macos-latest
@@ -68,7 +69,8 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
-          gh release upload "$RELEASE_TAG" release/*arm64*.dmg --clobber
+          # 上传 DMG + blockmap（差分更新用；latest-mac.yml 由 merge-mac-manifest 合并上传）
+          gh release upload "$RELEASE_TAG" release/*arm64*.dmg release/*arm64*.dmg.blockmap --clobber
 
   build-macos-x64:
     runs-on: macos-14
@@ -94,4 +96,33 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
-          gh release upload "$RELEASE_TAG" release/*x64*.dmg --clobber
+          gh release upload "$RELEASE_TAG" release/*x64*.dmg release/*x64*.dmg.blockmap --clobber
+
+  # macOS 多架构更新的关键：把两个架构各自生成的 latest-mac.yml 合并为一份
+  # 含 arm64+x64 的 files[]，供 electron-updater 按 process.arch 挑选。
+  merge-mac-manifest:
+    needs: [build-macos-arm64, build-macos-x64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download dmg + blockmap assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+        shell: bash
+        run: |
+          mkdir -p dmg
+          gh release download "$RELEASE_TAG" --pattern '*.dmg' --pattern '*.dmg.blockmap' --dir dmg
+          ls -la dmg
+      - name: Merge latest-mac.yml
+        run: node scripts/merge-mac-manifest.mjs ./dmg ./dmg/latest-mac.yml
+      - name: Upload merged latest-mac.yml
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+        shell: bash
+        run: |
+          gh release upload "$RELEASE_TAG" ./dmg/latest-mac.yml --clobber

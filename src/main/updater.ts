@@ -1,10 +1,13 @@
 /**
- * 自动更新（electron-updater + generic feed）。
+ * 第 1 层·桌面端自动更新（electron-updater + GitHub provider）。
  *
- *  - 打包版：启动 15s 后自动检查；托盘「检查更新…」手动检查；
+ *  - 打包版：启动 15s 后自动检查；托盘「检查更新…」手动检查（仅桌面端一层，
+ *    官方 harness 层见 harnessCheck.ts）；
  *    发现更新 → 后台下载 → 就绪后通知，点击即退出并安装。
- *  - 更新源：打包时 electron-builder.yml 的 publish（generic url）写入
- *    app-update.yml；运行时可用 DSH_DESKTOP_UPDATE_URL 覆盖。
+ *  - 更新源：打包时 electron-builder.yml 的 publish（provider: github → 仓库
+ *    Plocr/dsh-desktop）写入 app-update.yml；electron-updater 据此查询该仓库
+ *    latest release 比对版本，下载当前平台的安装包（exe / dmg）。
+ *  - 测试/部署覆盖：环境变量 DSH_DESKTOP_UPDATE_URL 存在时切换为 generic 源。
  *  - 检查带 30s 超时保护（更新源不可达时不挂死）；自动检查失败只记日志，
  *    手动检查失败才弹通知。
  *  - 开发模式：跳过（无 app-update.yml）。

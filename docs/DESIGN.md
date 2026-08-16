@@ -159,6 +159,10 @@ E2E（`scripts/e2e-turn.mjs`，需 `DSH_DESKTOP_ELECTRON_ARGS=--remote-debugging
 - **macOS**：dmg 打包（arm64/x64）、`dsh://` 深链（Info.plist protocols + open-url 事件 + 冷启动队列）、运行时路径走 `~/Library/Application Support` 已配置；**未实机验证**（打包须在 macOS 上执行 `npm run dist:mac`，且运行时 tar.gz 需在 mac 上重建）。
 - **Linux**：代码兼容（运行时路径走 `$XDG_DATA_HOME`），未提供打包配置。
 - harness 版本锁定 0.1.0-rc.6；升级需重跑 setup-runtime.mjs 并同步 bridge 版本。
-- 自动更新源默认占位 URL（`.invalid` 保留域名）；正式部署需覆盖（构建时 `--config.publish.url=` 或运行时 `DSH_DESKTOP_UPDATE_URL`）并上传 `latest.yml` + 安装包。
+- **两层更新机制**：
+  - 第 1 层·桌面端（`src/main/updater.ts`）：electron-updater + GitHub provider，更新源 = 本仓库 `Plocr/dsh-desktop` 的 GitHub Releases（`publish` 已配 `provider: github`）。有新版即下载对应平台安装包并替换。
+  - 第 2 层·官方 harness（`src/main/harnessCheck.ts`）：查 npm registry 的 `@deepseek-ai/dsh` latest dist-tag，对比随包 `runtime.version` 里的 `dsh=` 版本；**只提示有新版，不自动替换**（官方发版机制未定，避免破坏运行时）。官方无 Release、靠 npx/源码分发，故以 npm 为准。
+  - 两层独立，互不冲突：桌面端不更新也能感知官方 harness 有新版本。
+- **macOS 多架构自动更新**：arm64 与 x64 运行时 tar.gz 各自平台生成，CI 分两个 job 各产一个 dmg（含各自 `.blockmap`）。electron-updater 的 GitHub provider 读取单一 `latest-mac.yml`，按其 `files[]` 中 url 是否含 `process.arch` 挑选 dmg——因此由独立的 `merge-mac-manifest` job（`scripts/merge-mac-manifest.mjs`）把两份 dmg 的 url/sha512/size 合并为一份 `latest-mac.yml` 上传，两个架构的用户都能应用内更新。
 - 更新安装依赖 NSIS 安装器（`quitAndInstall` 静默执行）；`oneClick: false` 下更新流程已验证到"就绪"事件，安装动作留待真实发布后人工确认。
 - 如需仪表盘/终端/主题等扩展，以 harness 插件（`dsh.client` 双面包，`/plugins/<id>/client.js` 协议）按需开发，经 profile overlay 加载——壳不内置。

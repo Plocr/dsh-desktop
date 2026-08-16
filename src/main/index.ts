@@ -27,6 +27,7 @@ import { registerIpc } from './ipc'
 import { parseDeepLink, extractDeepLinkFromArgv, type DeepLinkAction } from './deepLink'
 import { registerGlobalShortcut, currentShortcut, unregisterAllShortcuts } from './shortcut'
 import { initUpdater, checkNow } from './updater'
+import { initHarnessCheck, stopHarnessCheck, checkHarnessUpdate } from './harnessCheck'
 
 // dev 模式与已安装版隔离 userData（app 名解析为 productName → 默认同名目录，
 // 已安装版运行中时 dev 会因单实例锁冲突直接退出；隔离后两者可并行）
@@ -355,7 +356,11 @@ async function main(): Promise<void> {
       harness.restart()
     },
     openLogs: () => void shell.openPath(logDirPath()),
-    checkUpdate: () => void checkNow(true),
+    // 两层检测：桌面端 + 官方 harness
+    checkUpdate: () => {
+      void checkNow(true)
+      void checkHarnessUpdate().then((msg) => log('info', `harnessCheck: manual -> ${msg}`))
+    },
     setAutoStart: (v) => {
       settings.autoStart = v
       saveSettings(settingsFile, settings)
@@ -392,6 +397,8 @@ async function main(): Promise<void> {
     },
     { autoCheck: settings.autoUpdate },
   )
+  // 第 2 层：官方 harness 更新检测（只提示，不自动替换）
+  initHarnessCheck()
 
   app.on('second-instance', (_e, argv) => {
     consumeDeepLinkArgv(argv)
@@ -433,6 +440,7 @@ app.on('before-quit', (e) => {
   quitting = true
   log('info', 'quitting: stopping harness')
   unregisterAllShortcuts()
+  stopHarnessCheck()
   bridge?.stop()
   void harness
     ?.stop()
