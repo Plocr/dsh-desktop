@@ -38,7 +38,10 @@ mac:
         - x64
   icon: resources/icons/icon.icns
   category: public.app-category.developer-tools
-  artifactName: ${productName}-${version}-${arch}.${ext}
+  # 注意：artifactName 不能用 ${productName}（含空格）——electron-builder 在
+  # latest.yml 里把空格 sanitize 成连字符，而 gh release upload 把空格转成点号，
+  # 导致更新元数据文件名与实际资产名不一致、下载 404。固定用无空格的点号名。
+  artifactName: DSH.Desktop-${version}-${arch}.${ext}
   # macOS 深链：Info.plist 声明 dsh:// scheme（setAsDefaultProtocolClient 依赖）
   protocols:
     - name: DSH Desktop Link
@@ -46,7 +49,7 @@ mac:
         - dsh
 
 dmg:
-  artifactName: ${productName}-${version}-${arch}.${ext}
+  artifactName: DSH.Desktop-${version}-${arch}.${ext}
 
 nsis:
   oneClick: false
@@ -54,10 +57,10 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: DSH Desktop
-  artifactName: ${productName}-${version}-setup.${ext}
+  artifactName: DSH.Desktop-${version}-setup.${ext}
 
 portable:
-  artifactName: ${productName}-${version}-portable.${ext}
+  artifactName: DSH.Desktop-${version}-portable.${ext}
 
 npmRebuild: false
 
