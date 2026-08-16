@@ -16,7 +16,8 @@
  * 目录/设置路径由壳在 overlay config 注入（src/main/index.ts regenerateOverlay）。
  * RPC 参数容错：payload 可能是 { args } 或直接对象，两处都取。
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import path from 'node:path'
 
 export const name = 'dsh-desktop-plugin-manager'
@@ -96,11 +97,12 @@ function listOfficialPlugins(ctx) {
   return []
 }
 
-/** GitHub 仓库搜索：topic:dsh-plugin。 */
+/** GitHub 仓库搜索：topic:dsh-plugin。无关键词时返回默认 Top15（按 star 排序）。 */
 async function marketSearch(query) {
   const q = ['topic:dsh-plugin']
   if (typeof query === 'string' && query.trim()) q.push(query.trim())
-  const url = `${GITHUB_SEARCH}?q=${encodeURIComponent(q.join(' '))}&sort=stars&order=desc&per_page=30`
+  const perPage = typeof query === 'string' && query.trim() ? 30 : 15
+  const url = `${GITHUB_SEARCH}?q=${encodeURIComponent(q.join(' '))}&sort=stars&order=desc&per_page=${perPage}`
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), 10_000)
   try {
@@ -128,14 +130,29 @@ async function marketSearch(query) {
   }
 }
 
-/** 下载仓库 release zip 到用户插件目录（骨架：验证下载链路，解压为下一步）。 */
+/** 解压 zip 到临时目录（Windows 用 tar，macOS/Linux 用 unzip）。 */
+function extractZip(zipPath, destDir) {
+  return new Promise((resolve, reject) => {
+    const isWin = process.platform === 'win32'
+    const cmd = isWin ? 'tar' : 'unzip'
+    const args = isWin ? ['-xf', zipPath, '-C', destDir] : ['-q', '-o', zipPath, '-d', destDir]
+    const child = spawn(cmd, args, { stdio: 'ignore', windowsHide: true })
+    child.on('error', (e) => reject(e))
+    child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`${cmd} exit ${String(code)}`))))
+  })
+}
+
+/**
+ * 从市场安装插件：下载仓库 zip → 解压 → 找到含 package.json 的插件目录
+ * → 以包名安装到 userPluginsDir。
+ */
 async function marketInstall(repo, config) {
   const fullName = typeof repo === 'string' ? repo.trim() : ''
   if (!/^[^/]+\/[^/]+$/.test(fullName)) return { status: 'error', message: '仓库格式应为 owner/repo' }
   const userDir = config?.userPluginsDir
   if (!userDir) return { status: 'error', message: 'userPluginsDir 未配置' }
   const ctrl = new AbortController()
-  const t = setTimeout(() => ctrl.abort(), 30_000)
+  const t = setTimeout(() => ctrl.abort(), 60_000)
   try {
     const rel = await fetch(`https://api.github.com/repos/${fullName}/releases/latest`, {
       headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'dsh-desktop' },
@@ -160,21 +177,106 @@ async function marketInstall(repo, config) {
         : null
     }
     if (!zipUrl) return { status: 'error', message: '无法确定下载地址' }
+
     mkdirSync(userDir, { recursive: true })
-    const tmp = path.join(userDir, `.install-${Date.now()}.zip`)
-    const dl = await fetch(zipUrl, { signal: ctrl.signal })
-    if (!dl.ok) return { status: 'error', message: `下载失败: ${dl.status}` }
-    const buf = Buffer.from(await dl.arrayBuffer())
-    writeFileSync(tmp, buf)
-    return {
-      status: 'ok',
-      message: `已下载 ${fullName}@${tag ?? 'default'}（${(buf.length / 1024).toFixed(0)} KB），解压安装为下一步`,
-      tmpZip: tmp,
+    const tmpZip = path.join(userDir, `.install-${Date.now()}.zip`)
+    const tmpDir = path.join(userDir, `.install-${Date.now()}`)
+    mkdirSync(tmpDir, { recursive: true })
+    try {
+      const dl = await fetch(zipUrl, { signal: ctrl.signal })
+      if (!dl.ok) return { status: 'error', message: `下载失败: ${dl.status}` }
+      const buf = Buffer.from(await dl.arrayBuffer())
+      writeFileSync(tmpZip, buf)
+      await extractZip(tmpZip, tmpDir)
+      // 在解压结果里找含 package.json 的插件包目录（zip 通常包一层仓库根目录）
+      const pkgDir = findPluginPackageDir(tmpDir)
+      if (!pkgDir) return { status: 'error', message: '仓库未包含插件包（无 package.json）' }
+      const pkg = readJson(path.join(pkgDir, 'package.json'))
+      const name = typeof pkg?.name === 'string' && pkg.name ? pkg.name : fullName.split('/')[1]
+      const dest = path.join(userDir, name)
+      rmSync(dest, { recursive: true, force: true })
+      copyDirTree(pkgDir, dest)
+      return { status: 'ok', message: `已安装 ${name}@${tag ?? 'default'}（重启 Harness 生效）`, name }
+    } finally {
+      rmSync(tmpZip, { force: true })
+      rmSync(tmpDir, { recursive: true, force: true })
     }
   } catch (e) {
     return { status: 'error', message: e instanceof Error ? e.message : String(e) }
   } finally {
     clearTimeout(t)
+  }
+}
+
+/** 递归查找包含 package.json 的插件包目录（优先找 name 形如 dsh-* 的）。 */
+function findPluginPackageDir(root) {
+  const candidates = []
+  const walk = (dir) => {
+    let entries
+    try {
+      entries = readdirSync(dir)
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry)
+      let isDir = false
+      try {
+        isDir = statSync(full).isDirectory()
+      } catch {
+        continue
+      }
+      if (isDir) {
+        if (existsSync(path.join(full, 'package.json'))) candidates.push(full)
+        walk(full)
+      }
+    }
+  }
+  walk(root)
+  if (candidates.length === 0) return null
+  // 优先包名以 dsh- 开头的；否则取第一个
+  return candidates.find((c) => {
+    const pkg = readJson(path.join(c, 'package.json'))
+    return typeof pkg?.name === 'string' && pkg.name.startsWith('dsh-')
+  }) ?? candidates[0]
+}
+
+/** 递归复制目录（mkdir + 文件写入）。 */
+function copyDirTree(src, dest) {
+  mkdirSync(dest, { recursive: true })
+  for (const entry of readdirSync(src)) {
+    const s = path.join(src, entry)
+    const d = path.join(dest, entry)
+    let isDir = false
+    try {
+      isDir = statSync(s).isDirectory()
+    } catch {
+      continue
+    }
+    if (isDir) copyDirTree(s, d)
+    else writeFileSync(d, readFileSync(s))
+  }
+}
+
+/** 卸载用户插件：删除 userPluginsDir 下的插件目录。 */
+async function userUninstall(name, config) {
+  const userDir = config?.userPluginsDir
+  if (!userDir) return { status: 'error', message: 'userPluginsDir 未配置' }
+  if (typeof name !== 'string' || !name) return { status: 'error', message: 'missing name' }
+  if (name === 'dsh-desktop-bridge') return { status: 'error', message: 'bridge 为必需插件，不可删除' }
+  // 按包名或目录名匹配
+  const target = path.join(userDir, name)
+  if (!existsSync(target)) {
+    // 尝试目录名匹配（包名可能 ≠ 目录名）
+    const found = scanPlugins(userDir).find((p) => p.name === name)
+    if (!found) return { status: 'error', message: `未找到用户插件 ${name}` }
+    return userUninstall(found.dir, config)
+  }
+  try {
+    rmSync(target, { recursive: true, force: true })
+    return { status: 'ok', message: `已删除 ${name}` }
+  } catch (e) {
+    return { status: 'error', message: e instanceof Error ? e.message : String(e) }
   }
 }
 
@@ -238,6 +340,13 @@ export function apply(ctx, config) {
           if (endpoint === 'market.install') {
             const repo = argOf(payload, 'repo')
             const r = await marketInstall(repo, config)
+            return r.status === 'ok'
+              ? { ok: true, value: r }
+              : { ok: false, error: { code: 'internal', message: r.message } }
+          }
+          if (endpoint === 'user.uninstall') {
+            const name = argOf(payload, 'name')
+            const r = await userUninstall(name, config)
             return r.status === 'ok'
               ? { ok: true, value: r }
               : { ok: false, error: { code: 'internal', message: r.message } }

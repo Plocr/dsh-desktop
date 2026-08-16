@@ -17,8 +17,11 @@ const src = readFileSync(join(root, 'src', 'client.js'), 'utf8').replace(/\r\n/g
 
 // ---- 断言：转换锚点唯一 ----
 const returnAnchor = 'return {\n  inject: [\'slots\', \'layout\', \'locale\', \'connection\'],\n  apply(ctx) {'
-if ((src.match(/return \{/g) ?? []).length !== 1) throw new Error('expect exactly one `return {`')
 if (!src.includes(returnAnchor)) throw new Error('plugin-object anchor not found')
+// 注意：组件里可能还有 `return { ... }`（对象字面量），不能数 `return {` 次数
+if ((src.match(new RegExp(returnAnchor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) ?? []).length !== 1) {
+  throw new Error('plugin-object anchor must be unique')
+}
 
 // ---- 1. 插件对象：return -> var plugin，并在 apply 开头接好 host.call ----
 const hostWiring = `var plugin = {
