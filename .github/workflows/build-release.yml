@@ -2,6 +2,7 @@ name: build-release
 
 # 推送 v* 标签时构建 Windows + macOS 安装包并上传到对应 Release。
 # 每个平台 job 独立构建（运行时 tar.gz 是平台相关的，必须本平台生成），
+# macOS arm64/x64 分两个 runner（macos-latest=arm64，macos-13=x64），
 # 产物按平台前缀命名，互不覆盖。
 # 手动触发（workflow_dispatch）：必须指定 tag 名（如 v0.4.1），上传到该 Release。
 
@@ -43,10 +44,9 @@ jobs:
         run: |
           gh release upload "$RELEASE_TAG" release/*.exe --clobber
 
-  build-macos:
+  build-macos-arm64:
     runs-on: macos-latest
     env:
-      # CI 无签名证书：跳过 codesign/notarize（本地安装可正常使用，仅 macOS Gatekeeper 提示未知开发者）
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@v4
@@ -60,12 +60,38 @@ jobs:
           node scripts/build.mjs
           node scripts/make-icons.mjs
           node scripts/setup-runtime.mjs
-      - name: Package DMG (arm64 + x64)
-        run: npx electron-builder --mac dmg --publish never
+      - name: Package DMG (arm64)
+        run: npx electron-builder --mac dmg --arm64 --publish never
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
-          gh release upload "$RELEASE_TAG" release/*.dmg --clobber
+          gh release upload "$RELEASE_TAG" release/*arm64*.dmg --clobber
+
+  build-macos-x64:
+    runs-on: macos-13
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install deps
+        run: npm install
+      - name: Build app + runtime
+        run: |
+          node scripts/build.mjs
+          node scripts/make-icons.mjs
+          node scripts/setup-runtime.mjs
+      - name: Package DMG (x64)
+        run: npx electron-builder --mac dmg --x64 --publish never
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+        shell: bash
+        run: |
+          gh release upload "$RELEASE_TAG" release/*x64*.dmg --clobber
