@@ -88,8 +88,15 @@ function candidateGlobalRoots(): string[] {
   return [...new Set(list)]
 }
 
-/** 打包模式：按需把运行时 tar.gz 解压到用户本地目录，返回就绪的 RuntimeSpec（异步，避免阻塞 UI）。 */
-async function extractPackagedRuntime(tarPath: string, markerPath: string): Promise<RuntimeSpec | null> {
+/**
+ * 打包模式：按需把运行时 tar.gz 解压到用户本地目录，返回就绪的 RuntimeSpec（异步，避免阻塞 UI）。
+ * onExtract：解压即将开始时回调（用于在加载页提示"正在解压运行时"）。
+ */
+async function extractPackagedRuntime(
+  tarPath: string,
+  markerPath: string,
+  onExtract?: () => void,
+): Promise<RuntimeSpec | null> {
   if (!existsSync(tarPath) || !existsSync(markerPath)) {
     log('error', `packaged runtime archive missing: ${tarPath} / ${markerPath}`)
     return null
@@ -109,6 +116,7 @@ async function extractPackagedRuntime(tarPath: string, markerPath: string): Prom
   if (ready) return { node: nodeExe, bin }
 
   log('info', `extracting packaged runtime -> ${runtimeDir}`)
+  onExtract?.()
   const tmp = path.join(localRoot, `runtime.tmp-${Date.now()}`)
   mkdirSync(localRoot, { recursive: true })
   rmSync(tmp, { recursive: true, force: true })
@@ -129,12 +137,13 @@ async function extractPackagedRuntime(tarPath: string, markerPath: string): Prom
   return { node: nodeExe, bin }
 }
 
-export async function resolveRuntime(): Promise<RuntimeSpec> {
+export async function resolveRuntime(onExtract?: () => void): Promise<RuntimeSpec> {
   if (app.isPackaged) {
     const resources = process.resourcesPath
     const spec = await extractPackagedRuntime(
       path.join(resources, 'dsh-runtime.tar.gz'),
       path.join(resources, 'runtime.version'),
+      onExtract,
     )
     if (spec) return spec
   }

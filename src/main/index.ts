@@ -257,11 +257,9 @@ async function main(): Promise<void> {
   const token = randomBytes(16).toString('hex')
   const resourcesDir = appResourcesDir()
 
-  // 先定位运行时，再确保 profile（同步 bridge 插件）与生成 overlay
-  const profileDir = ensureProfile(dshHome(), path.join(resourcesDir, 'profile-template', 'desktop'), path.join(resourcesDir, 'plugins'))
-  const runtime = await resolveRuntime()
-  const overlayPath = writeOverlay(app.getPath('userData'), token)
-
+  // 先创建窗口并立即显示加载页，再准备运行时——
+  // 首启解压运行时 tar.gz（约 200MB）耗时较长，若先 await 再建窗口，
+  // 用户在任务管理器里只见进程、长时间看不到界面。
   win = createWindow(path.join(__dirname, '..', 'preload', 'index.cjs'), resourcesDir, {
     isAllowed: (url) => url.startsWith('http://127.0.0.1:') || url.startsWith('file://'),
     theme: resolveEffectiveTheme(dshHome()),
@@ -273,6 +271,15 @@ async function main(): Promise<void> {
       win?.win.hide()
     }
   })
+
+  // 确保 profile（同步 bridge 插件）与生成 overlay
+  const profileDir = ensureProfile(dshHome(), path.join(resourcesDir, 'profile-template', 'desktop'), path.join(resourcesDir, 'plugins'))
+  // 定位运行时（打包模式首启解压到本地目录；窗口与加载页已先行显示）。
+  // 解压开始前更新加载页副标题，避免用户误以为卡死。
+  const runtime = await resolveRuntime(() => {
+    win?.showLoading('首次运行：正在解压运行时…', resolveThemePreference(dshHome()))
+  })
+  const overlayPath = writeOverlay(app.getPath('userData'), token)
 
   harness = new HarnessManager(
     {
