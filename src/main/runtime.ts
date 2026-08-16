@@ -264,9 +264,13 @@ export function ensureProfile(
     const src = p.source === 'user' ? path.join(userPluginsDir ?? '', p.dir) : path.join(bundledPluginsDir ?? '', p.dir)
     if (!existsSync(src)) continue
     const target = path.join(profileDir, 'node_modules', p.name)
-    const bundledVersion = readVersion(src)
+    const srcVersion = readVersion(src)
     const currentVersion = readVersion(target)
-    if (currentVersion !== bundledVersion) {
+    // bundled（随包内置）是权威源：始终覆盖 profile 副本，保证代码更新随包生效
+    // （版本号相同时旧逻辑会跳过，导致插件迭代代码不同步）；
+    // user（用户安装）按版本比较，避免覆盖用户本地修改。
+    const needSync = p.source === 'bundled' || currentVersion !== srcVersion
+    if (needSync) {
       mkdirSync(path.dirname(target), { recursive: true })
       // 若目标是 junction/symlink（dev 链接），用 unlink 移除链接本身，
       // 再复制真实副本——rmSync(recursive) 会穿透 junction 删除指向的真实目录
@@ -276,7 +280,7 @@ export function ensureProfile(
         /* 不存在或非链接，忽略 */
       }
       copyDir(src, target)
-      log('info', `plugin synced to profile: ${p.name} (${String(currentVersion)} -> ${String(bundledVersion)})`)
+      log('info', `plugin synced to profile: ${p.name} (${String(currentVersion)} -> ${String(srcVersion)})`)
     }
   }
   // 清理已禁用/已移除插件在 profile 中的残留（bridge 除外）

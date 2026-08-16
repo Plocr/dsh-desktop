@@ -82,13 +82,20 @@ function regenerateOverlay(resourcesDir: string, token: string): string {
   const enabled = listDesktopPlugins(pluginsDir, usersDir).filter(
     (p) => p.name === 'dsh-desktop-bridge' || !settings.disabledPlugins.includes(p.name),
   )
-  // desktop-plugin-manager 需要壳注入目录与设置路径（host 半边据此枚举/启停插件）
+  // desktop-plugin-manager 需要壳注入目录/设置路径与 bundled 清单：
+  // bundledPluginsDir 在 asar 内，harness 子进程的 Node fs 读不到，
+  // 故由壳（Electron 可读 asar）枚举清单注入；userPluginsDir 是真实目录可直接读。
   const rows = enabled.map((p) => ({
     name: p.name,
     ...(p.name === 'dsh-desktop-plugin-manager'
       ? {
           config: {
-            bundledPluginsDir: pluginsDir,
+            bundledPlugins: listDesktopPlugins(pluginsDir, usersDir).map((bp) => ({
+              name: bp.name,
+              version: bp.version,
+              enabled: bp.name === 'dsh-desktop-bridge' || !settings.disabledPlugins.includes(bp.name),
+              locked: bp.name === 'dsh-desktop-bridge',
+            })),
             userPluginsDir: usersDir,
             settingsFile: settingsFile,
             appVersion: app.getVersion(),

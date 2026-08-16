@@ -199,12 +199,18 @@ export function apply(ctx, config) {
               enabled: p.name === 'dsh-desktop-bridge' || !disabled.has(p.name),
               locked: p.name === 'dsh-desktop-bridge',
             })
+            // bundled：优先用壳注入的清单（asar 内目录 harness 读不到，壳枚举后注入）；
+            // 兜底：直接扫描 bundledPluginsDir（dev 或非 asar 场景）
+            let bundled = Array.isArray(config?.bundledPlugins) ? config.bundledPlugins : []
+            if (bundled.length === 0 && config?.bundledPluginsDir) {
+              bundled = scanPlugins(config.bundledPluginsDir).map((p) => ({ ...p, source: 'bundled' }))
+            }
             return {
               ok: true,
               value: {
                 appVersion: config?.appVersion ?? null,
                 official: listOfficialPlugins(ctx),
-                bundled: scanPlugins(config?.bundledPluginsDir).map((p) => decorate({ ...p, source: 'bundled' })),
+                bundled: bundled.map((p) => decorate({ ...p, source: p.source ?? 'bundled' })),
                 user: scanPlugins(config?.userPluginsDir).map((p) => decorate({ ...p, source: 'user' })),
               },
             }
