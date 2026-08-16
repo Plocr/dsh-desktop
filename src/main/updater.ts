@@ -1,20 +1,23 @@
 /**
- * 第 1 层·桌面端自动更新（electron-updater + GitHub provider）。
+ * 第 1 层·桌面端自动更新检测（electron-updater + GitHub provider）。
  *
- *  - 打包版：启动 15s 后自动检查；托盘「检查更新…」手动检查（仅桌面端一层，
- *    官方 harness 层见 harnessCheck.ts）；
- *    发现更新 → 后台下载 → 就绪后通知，点击即退出并安装。
+ *  - 打包版：启动 15s 后自动检查（受托盘「自动检测更新」开关控制）；
+ *    托盘「检查更新…」手动检查（仅桌面端一层，官方 harness 层见 harnessCheck.ts）。
+ *  - 只检测不自动下载：发现新版本 → 弹通知，点击打开 GitHub 最新 Release 页
+ *    （https://github.com/Plocr/dsh-desktop/releases/latest），由用户自行下载安装。
  *  - 更新源：打包时 electron-builder.yml 的 publish（provider: github → 仓库
  *    Plocr/dsh-desktop）写入 app-update.yml；electron-updater 据此查询该仓库
- *    latest release 比对版本，下载当前平台的安装包（exe / dmg）。
+ *    latest release 比对版本。
  *  - 测试/部署覆盖：环境变量 DSH_DESKTOP_UPDATE_URL 存在时切换为 generic 源。
  *  - 检查带 30s 超时保护（更新源不可达时不挂死）；自动检查失败只记日志，
  *    手动检查失败才弹通知。
  *  - 开发模式：跳过（无 app-update.yml）。
  */
-import { app } from 'electron'
+import { app, shell } from 'electron'
 import { log } from './logger'
 import { notify } from './notify'
+
+const RELEASES_PAGE = 'https://github.com/Plocr/dsh-desktop/releases/latest'
 
 let autoUpdater: import('electron-updater').AppUpdater | null = null
 let initialized = false
@@ -51,33 +54,23 @@ export function initUpdater(initHooks: UpdaterHooks, opts: { autoCheck: boolean 
       log('info', `updater: feed overridden -> ${feed}`)
     }
 
-    au.autoDownload = true
-    au.autoInstallOnAppQuit = true
+    // 只检测、不自动下载安装：新版由通知点击跳转 GitHub 发布页
+    au.autoDownload = false
+    au.autoInstallOnAppQuit = false
     au.disableWebInstaller = true
 
     au.on('checking-for-update', () => log('info', 'updater: checking for update'))
     au.on('update-available', (info) => {
       log('info', `updater: update available ${info.version}`)
-      notify('发现新版本', `DSH Desktop ${info.version} 正在后台下载…`)
+      notify('发现新版本', `DSH Desktop ${info.version} 已发布，点击前往 GitHub 下载`, () => {
+        void shell.openExternal(RELEASES_PAGE).catch((err) => {
+          log('error', `updater: open releases page failed: ${err instanceof Error ? err.message : String(err)}`)
+        })
+      })
     })
     au.on('update-not-available', () => {
       log('info', 'updater: no update')
       if (lastCheckWasManual) hooks.onManualResult('已是最新版本')
-    })
-    au.on('download-progress', (p) => {
-      if (p && typeof p.percent === 'number' && Math.floor(p.percent) % 25 === 0 && p.percent > 0) {
-        log('info', `updater: download ${p.percent.toFixed(0)}%`)
-      }
-    })
-    au.on('update-downloaded', (info) => {
-      log('info', `updater: downloaded ${info.version}, ready to install`)
-      notify('更新已就绪', `DSH Desktop ${info.version} 已下载完成，点击重启并安装`, () => {
-        try {
-          au.quitAndInstall(false, true)
-        } catch (err) {
-          log('error', `updater: quitAndInstall failed: ${err instanceof Error ? err.message : String(err)}`)
-        }
-      })
     })
     au.on('error', (err) => {
       const msg = err instanceof Error ? err.message : String(err)

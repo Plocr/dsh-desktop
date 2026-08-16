@@ -1,28 +1,41 @@
 /**
  * 托盘：显示窗口 / 打开浏览器版 / 切换工作区 / 重启 Harness / 查看日志 /
- * 检查更新 / 开机自启 / 通知开关 / 全局快捷键信息 / 退出。状态变化时重建菜单。
+ * 清理日志 / 卸载 / 检查更新 / 开机自启 / 自动更新检测 / 通知开关 /
+ * 全局快捷键信息 / 退出。状态变化时重建菜单。
  * （0.4.0：仪表盘/终端开关已随面板移入 harness 插件，托盘不再控制。）
  */
 import { Menu, nativeImage, Tray } from 'electron'
 import type { AppSettings } from './settings'
+
+export interface DesktopPluginToggle {
+  name: string
+  enabled: boolean
+  locked: boolean
+}
 
 export interface TrayDeps {
   getUrl: () => string | null
   getState: () => {
     autoStart: boolean
     notifications: boolean
+    autoUpdate: boolean
     runningJobs: number
     harnessState: string
     globalShortcut: string
   }
+  getPlugins: () => DesktopPluginToggle[]
   showWindow: () => void
   openBrowser: () => void
   pickWorkspace: () => void
   restartHarness: () => void
   openLogs: () => void
   checkUpdate: () => void
+  cleanLogs: () => void
+  uninstall: () => void
+  togglePlugin: (name: string, enabled: boolean) => void
   setAutoStart: (v: boolean) => void
   setNotifications: (v: boolean) => void
+  setAutoUpdate: (v: boolean) => void
   quit: () => void
 }
 
@@ -50,8 +63,30 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
       },
       { label: '切换工作区…', click: () => deps.pickWorkspace() },
       { label: '重启 Harness', click: () => deps.restartHarness() },
+      {
+        label: '桌面插件',
+        submenu: deps.getPlugins().map((p) => ({
+          label: p.locked ? `${p.name}（必需）` : p.name,
+          type: 'checkbox' as const,
+          checked: p.enabled,
+          enabled: !p.locked,
+          click: (item) => deps.togglePlugin(p.name, item.checked),
+        })),
+      },
       { label: '查看日志', click: () => deps.openLogs() },
+      { label: '清理日志', click: () => deps.cleanLogs() },
+      {
+        label: '卸载 DSH Desktop…',
+        visible: process.platform === 'win32',
+        click: () => deps.uninstall(),
+      },
       { label: '检查更新…', click: () => deps.checkUpdate() },
+      {
+        label: '自动检测更新',
+        type: 'checkbox',
+        checked: s.autoUpdate,
+        click: (item) => deps.setAutoUpdate(item.checked),
+      },
       {
         label: s.globalShortcut ? `全局快捷键：${s.globalShortcut}` : '全局快捷键：未启用',
         enabled: false,

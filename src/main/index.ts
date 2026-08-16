@@ -15,7 +15,7 @@ import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { initLogger, log, logDirPath } from './logger'
 import { loadSettings, saveSettings, type AppSettings } from './settings'
-import { appResourcesDir, ensureProfile, resolveRuntime, writeOverlay } from './runtime'
+import { appResourcesDir, ensureProfile, resolveRuntime, writeOverlay, listDesktopPlugins } from './runtime'
 import { HarnessManager, type HarnessReady } from './harness'
 import { BridgeClient } from './bridge'
 import { createWindow, type WindowHandle } from './window'
@@ -28,6 +28,7 @@ import { parseDeepLink, extractDeepLinkFromArgv, type DeepLinkAction } from './d
 import { registerGlobalShortcut, currentShortcut, unregisterAllShortcuts } from './shortcut'
 import { initUpdater, checkNow } from './updater'
 import { initHarnessCheck, stopHarnessCheck, checkHarnessUpdate } from './harnessCheck'
+import { cleanLogs, uninstallApp } from './maintenance'
 
 // dev 模式与已安装版隔离 userData（app 名解析为 productName → 默认同名目录，
 // 已安装版运行中时 dev 会因单实例锁冲突直接退出；隔离后两者可并行）
@@ -57,6 +58,8 @@ let pendingRegisterWorkspace: string | null = null
 let lastUrl: string | null = null
 let runningJobs = 0
 let pendingDeepLinks: DeepLinkAction[] = []
+let overlayPath = ''
+let launchToken = ''
 
 /* ── 既有基础设施 ───────────────────────────────────────────────────── */
 
@@ -65,6 +68,37 @@ const openUrlQueue: DeepLinkAction[] = []
 
 function dshHome(): string {
   return settings.isolatedHome ? path.join(app.getPath('userData'), 'dsh-home') : path.join(os.homedir(), '.dsh')
+}
+
+/** 用户安装插件目录（运行时可装，无需重新打包）。 */
+function userPluginsDir(): string {
+  return path.join(app.getPath('userData'), 'plugins')
+}
+
+/** 依据当前设置重新生成 overlay（启停插件后重启 Harness 生效）。 */
+function regenerateOverlay(resourcesDir: string, token: string): string {
+  const enabled = listDesktopPlugins(path.join(resourcesDir, 'plugins'), userPluginsDir()).filter(
+    (p) => p.name === 'dsh-desktop-bridge' || !settings.disabledPlugins.includes(p.name),
+  )
+  const p = writeOverlay(app.getPath('userData'), token, enabled)
+  log('info', `overlay regenerated: ${enabled.map((x) => x.name).join(', ') || '(none)'}`)
+  return p
+}
+
+/** 重启 Harness：先按当前设置重新同步插件并生成 overlay，再重启。 */
+async function restartHarness(dir?: string): Promise<void> {
+  const resourcesDir = appResourcesDir()
+  // 同步 profile（插件启停后，profile node_modules 增删）+ 重生成 overlay
+  ensureProfile(
+    dshHome(),
+    path.join(resourcesDir, 'profile-template', 'desktop'),
+    path.join(resourcesDir, 'plugins'),
+    userPluginsDir(),
+    settings.disabledPlugins,
+  )
+  overlayPath = regenerateOverlay(resourcesDir, launchToken || randomBytes(16).toString('hex'))
+  lastUrl = null
+  harness.restart(dir)
 }
 
 function defaultWorkspace(): string {
@@ -114,7 +148,7 @@ async function pickWorkspace(): Promise<string | null> {
   saveSettings(settingsFile, settings)
   pendingRegisterWorkspace = dir
   log('info', `switch workspace -> ${dir}`)
-  harness.restart(dir)
+  void restartHarness(dir)
   refreshTray()
   return dir
 }
@@ -255,6 +289,7 @@ async function main(): Promise<void> {
   settings = loadSettings(settingsFile)
 
   const token = randomBytes(16).toString('hex')
+  launchToken = token
   const resourcesDir = appResourcesDir()
 
   // 先创建窗口并立即显示加载页，再准备运行时——
@@ -272,14 +307,20 @@ async function main(): Promise<void> {
     }
   })
 
-  // 确保 profile（同步 bridge 插件）与生成 overlay
-  const profileDir = ensureProfile(dshHome(), path.join(resourcesDir, 'profile-template', 'desktop'), path.join(resourcesDir, 'plugins'))
+  // 确保 profile（同步启用的插件）与生成 overlay
+  const profileDir = ensureProfile(
+    dshHome(),
+    path.join(resourcesDir, 'profile-template', 'desktop'),
+    path.join(resourcesDir, 'plugins'),
+    userPluginsDir(),
+    settings.disabledPlugins,
+  )
   // 定位运行时（打包模式首启解压到本地目录；窗口与加载页已先行显示）。
   // 解压开始前更新加载页副标题，避免用户误以为卡死。
   const runtime = await resolveRuntime(() => {
     win?.showLoading('首次运行：正在解压运行时…', resolveThemePreference(dshHome()))
   })
-  const overlayPath = writeOverlay(app.getPath('userData'), token)
+  overlayPath = regenerateOverlay(resourcesDir, token)
 
   harness = new HarnessManager(
     {
@@ -351,6 +392,7 @@ async function main(): Promise<void> {
     getState: () => ({
       autoStart: settings.autoStart,
       notifications: settings.notifications,
+      autoUpdate: settings.autoUpdate,
       runningJobs,
       harnessState: harness?.state === 'ready' ? '运行中' : harness?.state === 'starting' ? '启动中' : '已停止',
       globalShortcut: currentShortcut(),
@@ -358,11 +400,24 @@ async function main(): Promise<void> {
     showWindow,
     openBrowser,
     pickWorkspace: () => void pickWorkspace(),
-    restartHarness: () => {
-      lastUrl = null
-      harness.restart()
+    getPlugins: () =>
+      listDesktopPlugins(path.join(appResourcesDir(), 'plugins'), userPluginsDir()).map((p) => ({
+        name: p.name,
+        enabled: p.name === 'dsh-desktop-bridge' || !settings.disabledPlugins.includes(p.name),
+        locked: p.name === 'dsh-desktop-bridge',
+      })),
+    togglePlugin: (name, enabled) => {
+      if (name === 'dsh-desktop-bridge') return
+      if (enabled) settings.disabledPlugins = settings.disabledPlugins.filter((x) => x !== name)
+      else if (!settings.disabledPlugins.includes(name)) settings.disabledPlugins.push(name)
+      saveSettings(settingsFile, settings)
+      refreshTray()
+      void restartHarness()
     },
+    restartHarness: () => void restartHarness(),
     openLogs: () => void shell.openPath(logDirPath()),
+    cleanLogs: () => cleanLogs(),
+    uninstall: () => uninstallApp(),
     // 两层检测：桌面端 + 官方 harness
     checkUpdate: () => {
       void checkNow(true)
@@ -379,6 +434,11 @@ async function main(): Promise<void> {
       saveSettings(settingsFile, settings)
       refreshTray()
     },
+    setAutoUpdate: (v) => {
+      settings.autoUpdate = v
+      saveSettings(settingsFile, settings)
+      refreshTray()
+    },
     quit: () => app.quit(),
   })
 
@@ -387,10 +447,7 @@ async function main(): Promise<void> {
     harness,
     bridge,
     pickWorkspace,
-    restartHarness: () => {
-      lastUrl = null
-      harness.restart()
-    },
+    restartHarness: () => void restartHarness(),
     getInfo: currentInfo,
     openSession: (sessionId) => handleDeepLink({ kind: 'session', sessionId }),
   })

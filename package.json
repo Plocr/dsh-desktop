@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop",
   "productName": "DSH Desktop",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "private": true,
   "description": "DeepSeek Harness 桌面工作台：Electron 原生壳（仅桌面原生能力）+ bridge 桥接插件",
   "main": "dist/main/index.cjs",

@@ -20,6 +20,8 @@ export interface AppSettings {
   globalShortcut: string
   /** 启动后自动检查更新 */
   autoUpdate: boolean
+  /** 被禁用的桌面插件（package name 列表；bridge 永远启用，不在此列） */
+  disabledPlugins: string[]
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -30,6 +32,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   recentWorkspaces: [],
   globalShortcut: 'CommandOrControl+Shift+Space',
   autoUpdate: true,
+  disabledPlugins: [],
 }
 
 export function loadSettings(file: string): AppSettings {
@@ -46,6 +49,9 @@ export function loadSettings(file: string): AppSettings {
       }
       if (typeof raw.globalShortcut === 'string') out.globalShortcut = raw.globalShortcut
       if (typeof raw.autoUpdate === 'boolean') out.autoUpdate = raw.autoUpdate
+      if (Array.isArray(raw.disabledPlugins)) {
+        out.disabledPlugins = raw.disabledPlugins.filter((p): p is string => typeof p === 'string')
+      }
     }
   } catch {
     /* 损坏则回退默认 */

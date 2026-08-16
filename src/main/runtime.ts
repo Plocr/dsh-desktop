@@ -173,14 +173,65 @@ function copyDir(src: string, dest: string): void {
 }
 
 /**
- * 确保 desktop profile 存在；若打包内带了插件包（resources/plugins/<name>），
- * 则同步（版本不同或缺失时复制）到 profile 的 node_modules——
- * overlay 的 `name:` 行从 profile 目录解析，这是插件被找到的唯一位置。
- * 插件清单：bridge（shell 通道，唯一保留的插件）。
+ * 插件同步与 overlay 生成（桌面端自带 Cordis 插件）。
+ *
+ * 插件来源（两类目录，都必须是「目录含 package.json」的 Cordis 插件包）：
+ *  - 打包内置：resources/plugins/<name>/（随包分发，随桌面端发版）
+ *  - 用户安装：userData/plugins/<name>/（运行时可装，无需重新打包）
+ *
+ * 加载链路：ensureProfile 把「启用」的插件同步进 profile node_modules →
+ * writeOverlay 为每个启用插件生成 `- insert:` 行 → harness 以 --patch 加载。
+ * bridge（dsh-desktop-bridge）是壳↔harness 通信通道，永远启用、不可禁用。
  */
-const PLUGIN_NAMES = ['bridge']
 
-export function ensureProfile(dshHome: string, templateDir: string, bundledPluginsDir?: string): string {
+/** 发现某目录下的插件包（子目录且含 package.json）。 */
+function discoverPluginsIn(
+  dir: string | undefined,
+): { name: string; version: string | null; dir: string }[] {
+  if (!dir || !existsSync(dir)) return []
+  const out: { name: string; version: string | null; dir: string }[] = []
+  for (const entry of readdirSync(dir)) {
+    const pkgDir = path.join(dir, entry)
+    try {
+      if (!statSync(pkgDir).isDirectory()) continue
+      const pkgPath = path.join(pkgDir, 'package.json')
+      if (!existsSync(pkgPath)) continue
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: unknown; version?: unknown }
+      if (typeof pkg.name !== 'string' || !pkg.name) continue
+      out.push({ name: pkg.name, version: typeof pkg.version === 'string' ? pkg.version : null, dir: pkgDir })
+    } catch {
+      /* 跳过无法解析的目录 */
+    }
+  }
+  return out
+}
+
+export interface DesktopPlugin {
+  name: string
+  version: string | null
+  source: 'bundled' | 'user'
+}
+
+/** 汇总全部桌面插件（打包内置 + 用户安装），含来源标记。 */
+export function listDesktopPlugins(bundledDir: string | undefined, userDir: string | undefined): DesktopPlugin[] {
+  const bundled = discoverPluginsIn(bundledDir).map((p) => ({ name: p.name, version: p.version, source: 'bundled' as const }))
+  const user = discoverPluginsIn(userDir).map((p) => ({ name: p.name, version: p.version, source: 'user' as const }))
+  // 同名时用户目录优先（可覆盖/更新内置同名插件）
+  const userNames = new Set(user.map((p) => p.name))
+  return [...user, ...bundled.filter((p) => !userNames.has(p.name))]
+}
+
+/**
+ * 确保 desktop profile 存在；同步「启用」的插件到 profile node_modules。
+ * disabledPlugins：被禁用的插件 package name 列表（bridge 永远启用，忽略该列表）。
+ */
+export function ensureProfile(
+  dshHome: string,
+  templateDir: string,
+  bundledPluginsDir?: string,
+  userPluginsDir?: string,
+  disabledPlugins: string[] = [],
+): string {
   const profileDir = path.join(dshHome, 'profiles', 'desktop')
   if (!existsSync(profileDir)) {
     if (!existsSync(templateDir)) {
@@ -189,17 +240,37 @@ export function ensureProfile(dshHome: string, templateDir: string, bundledPlugi
     copyDir(templateDir, profileDir)
     log('info', `created desktop profile at ${profileDir}`)
   }
-  if (bundledPluginsDir && existsSync(bundledPluginsDir)) {
-    for (const name of PLUGIN_NAMES) {
-      const src = path.join(bundledPluginsDir, name)
-      if (!existsSync(src)) continue
-      const target = path.join(profileDir, 'node_modules', `dsh-desktop-${name}`)
-      const bundledVersion = readVersion(src)
-      const currentVersion = readVersion(target)
-      if (currentVersion !== bundledVersion) {
-        mkdirSync(path.dirname(target), { recursive: true })
-        copyDir(src, target)
-        log('info', `plugin synced to profile: ${name} (${String(currentVersion)} -> ${String(bundledVersion)})`)
+  // 收集启用插件：bridge 永远启用；其余按 disabledPlugins 过滤
+  const disabled = new Set(disabledPlugins)
+  const plugins = listDesktopPlugins(bundledPluginsDir, userPluginsDir).filter(
+    (p) => p.name === 'dsh-desktop-bridge' || !disabled.has(p.name),
+  )
+  for (const p of plugins) {
+    const src = p.source === 'user' ? path.join(userPluginsDir ?? '', p.name) : path.join(bundledPluginsDir ?? '', p.name)
+    if (!existsSync(src)) continue
+    const target = path.join(profileDir, 'node_modules', p.name)
+    const bundledVersion = readVersion(src)
+    const currentVersion = readVersion(target)
+    if (currentVersion !== bundledVersion) {
+      mkdirSync(path.dirname(target), { recursive: true })
+      copyDir(src, target)
+      log('info', `plugin synced to profile: ${p.name} (${String(currentVersion)} -> ${String(bundledVersion)})`)
+    }
+  }
+  // 清理已禁用/已移除插件在 profile 中的残留（bridge 除外）
+  const activeNames = new Set(plugins.map((p) => p.name))
+  const nmDir = path.join(profileDir, 'node_modules')
+  if (existsSync(nmDir)) {
+    for (const entry of readdirSync(nmDir)) {
+      if (entry.startsWith('.') || entry === 'dsh-desktop-bridge' || activeNames.has(entry)) continue
+      const target = path.join(nmDir, entry)
+      try {
+        if (statSync(target).isDirectory()) {
+          rmSync(target, { recursive: true, force: true })
+          log('info', `plugin removed from profile: ${entry}`)
+        }
+      } catch {
+        /* ignore */
       }
     }
   }
@@ -215,15 +286,23 @@ function readVersion(pkgDir: string): string | null {
   }
 }
 
-/** 生成并写入本次启动的 overlay patch（bridge 行 + token），返回文件路径。 */
-export function writeOverlay(userData: string, token: string): string {
+/** 生成并写入本次启动的 overlay patch（每个启用插件一行 insert），返回文件路径。 */
+export function writeOverlay(
+  userData: string,
+  token: string,
+  plugins: { name: string }[] = [],
+): string {
   const file = path.join(userData, 'overlay-desktop.yml')
+  // bridge 行永远在最前，带每次启动的 token；其余插件无 config（用默认值）。
+  const rows = [
+    `    - id: dsh-desktop-bridge\n      name: dsh-desktop-bridge\n      config:\n        token: ${token}`,
+    ...plugins
+      .filter((p) => p.name !== 'dsh-desktop-bridge')
+      .map((p) => `    - id: ${p.name}\n      name: ${p.name}`),
+  ]
   const content = `# generated by DSH Desktop shell; do not edit
 - insert:
-    - id: dsh-desktop-bridge
-      name: dsh-desktop-bridge
-      config:
-        token: ${token}
+${rows.join('\n')}
 `
   writeFileSync(file, content, 'utf8')
   return file

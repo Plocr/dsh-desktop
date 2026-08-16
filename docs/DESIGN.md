@@ -96,27 +96,37 @@ cordis.patch.yml  []（用户补丁层，壳不写它）
 
 | 模块 | 职责 |
 |---|---|
-| `index.ts` | 主流程：单实例 → 设置/日志 → 确保 profile（同步 bridge）→ 运行时定位 → overlay → 窗口/托盘 → spawn harness → 桥接（通知/徽标/深链）→ 全局快捷键/自动更新 |
+| `index.ts` | 主流程：单实例 → 设置/日志 → 确保 profile（同步插件）→ 运行时定位 → overlay → 窗口/托盘 → spawn harness → 桥接（通知/徽标/深链）→ 全局快捷键/自动更新/插件启停 |
 | `harness.ts` | spawn/监控/重启；解析 `dsh web:` / `dsh desktop:` 行；指数退避重启；优雅停机 |
 | `bridge.ts` | WS 客户端（token 握手、事件、RPC、断线重连） |
 | `window.ts` | BrowserWindow + loading/error 过渡页 + 导航锁 |
-| `tray.ts` | 显示窗口/浏览器版/切换工作区/重启 Harness/日志/更新/自启/通知/退出 |
+| `tray.ts` | 显示窗口/浏览器版/切换工作区/重启 Harness/桌面插件子菜单/日志/清理日志/卸载/更新/自启/自动检测更新/通知/退出 |
+| `maintenance.ts` | 清理日志；卸载（Windows NSIS 卸载器，保留用户数据） |
 | `notify.ts` | 系统通知 + `app.setBadgeCount` 徽标 |
 | `deepLink.ts` | dsh:// 深链解析（focus/new/session） |
 | `shortcut.ts` | 全局快捷键唤出（settings 可配，空串禁用） |
-| `updater.ts` | electron-updater + generic feed（启动自动检查、托盘手动） |
-| `runtime.ts` | 运行时定位、profile 确保（bridge 同步）、overlay 生成 |
+| `updater.ts` | electron-updater + GitHub provider（只检测不下载：通知点击跳 GitHub 发布页；自动检测开关） |
+| `harnessCheck.ts` | 官方 harness 更新检测（npm registry，只提示不替换） |
+| `runtime.ts` | 运行时定位、profile 确保（多插件同步）、overlay 生成（多插件行） |
 | `logger.ts` | 环形日志落盘（5MB 轮转） |
-| `settings.ts` | 壳偏好（trayOnClose/notifications/autoStart/isolatedHome/recentWorkspaces/globalShortcut/autoUpdate） |
+| `settings.ts` | 壳偏好（trayOnClose/notifications/autoStart/isolatedHome/recentWorkspaces/globalShortcut/autoUpdate/disabledPlugins） |
 | `ipc.ts` / `preload` | 壳页面白名单（pickWorkspace/revealInFolder/openExternal/restartHarness/openLogs/getInfo） |
 
-### 4.4 加载页：粒子鲸鱼动画（shell-pages/loading.html）
+### 4.4 桌面插件机制（桌面端自带 Cordis 插件）
+
+- **两类来源**：打包内置 `resources/plugins/<name>/`（随包分发，随桌面端发版）+ 用户安装 `userData/plugins/<name>/`（运行时可装，无需重新打包）。两者都必须是「目录含 package.json」的 Cordis 插件包。
+- **加载链路**：`ensureProfile` 把「启用」的插件同步进 profile `node_modules` → `writeOverlay` 为每个启用插件生成 `- insert:` 行 → harness 以 `--patch` 加载。`name:` 从 profile 目录解析（与 bridge 相同机制）。
+- **启停**：`settings.json` 的 `disabledPlugins` 列表；托盘「桌面插件」子菜单可勾选，改动后自动重启 Harness 生效（overlay 按当前设置重新生成）。
+- **bridge 保护**：`dsh-desktop-bridge` 是壳↔harness 通信通道，永远启用、不可禁用、不参与 disabledPlugins。
+- **开发者添加插件**：把插件包放进 `resources/plugins/<name>/` 重新打包即可随桌面端分发；用户侧安装走 `userData/plugins/`。
+
+### 4.5 加载页：粒子鲸鱼动画（shell-pages/loading.html）
 
 启动/重启/崩溃恢复时的过渡页（白底 + 粒子鲸鱼，自研实现）。**随壳分发**（harness 未启动时展示，无法是插件）。
 
-### 4.5 构建与分发
+### 4.6 构建与分发
 
-- `scripts/build.mjs`：main/preload（esbuild CJS）+ bridge 包复制到 `resources/plugins/bridge`（随 asar 分发）。
+- `scripts/build.mjs`：main/preload（esbuild CJS）+ 插件包复制到 `resources/plugins/`（随 asar 分发）。
 - `scripts/dev-link.mjs`：bridge junction 链接进 profile node_modules（dev 始终加载仓库源码）。
 - `scripts/setup-runtime.mjs`：便携 Node + `npm install @deepseek-ai/dsh` + bridge → `resources/dsh-runtime.tar.gz`。
 
