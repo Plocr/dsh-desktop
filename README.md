@@ -33,7 +33,7 @@ Electron 壳 ──spawn──▶ dsh --profile desktop --patch <overlay> --port
 
 ## 安装
 
-1. 从 Releases 下载最新安装包（`DSH Desktop-x.x.x-setup.exe`）
+1. 从 [Releases](https://github.com/Plocr/dsh-desktop/releases) 下载最新安装包（Windows：`DSH.Desktop-x.x.x-setup.exe`）
 2. 双击运行，按向导完成安装（可选择安装目录）
 3. 首次启动会自动解压内置运行时（约 40 秒，二次启动免解压），并创建桌面 profile
 
