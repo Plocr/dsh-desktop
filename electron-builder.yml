@@ -68,8 +68,6 @@ publish:
   provider: generic
   url: https://updates.dsh-desktop.invalid/dsh-desktop
 
-# 复用 node_modules/electron/dist，避免 electron-builder 重新下载。
-# 注意：electronDist 内的二进制是平台相关的——在本机（Windows）上打包 win 目标
-# 可复用；打包 mac 目标时 electron-builder 会自动下载 mac 版 Electron，
-# 此配置仅对当前平台生效，不会污染 mac 产物。
-electronDist: node_modules/electron/dist
+# 本机复用 node_modules/electron/dist（避免重复下载）——仅用于本机打包 win 目标。
+# CI（GitHub Actions）不设置此值，让 electron-builder 自动下载对应平台 Electron。
+# 说明：electronDist 内二进制是平台相关的，若在非 Windows 机器打包请删除此项。

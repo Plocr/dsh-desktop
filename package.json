@@ -13,8 +13,8 @@
     "link:dev": "node scripts/dev-link.mjs",
     "setup:runtime": "node scripts/setup-runtime.mjs",
     "make:icons": "node scripts/make-icons.mjs",
-    "dist:win": "node scripts/build.mjs && node scripts/make-icons.mjs && node scripts/setup-runtime.mjs && electron-builder --win nsis",
-    "dist:win:portable": "node scripts/build.mjs && node scripts/make-icons.mjs && node scripts/setup-runtime.mjs && electron-builder --win portable",
+    "dist:win": "node scripts/build.mjs && node scripts/make-icons.mjs && node scripts/setup-runtime.mjs && electron-builder --win nsis --config.electronDist=node_modules/electron/dist",
+    "dist:win:portable": "node scripts/build.mjs && node scripts/make-icons.mjs && node scripts/setup-runtime.mjs && electron-builder --win portable --config.electronDist=node_modules/electron/dist",
     "dist:mac": "node scripts/build.mjs && node scripts/make-icons.mjs && node scripts/setup-runtime.mjs && electron-builder --mac dmg"
   },
   "engines": {
