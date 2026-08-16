@@ -1,12 +1,10 @@
 # DSH Desktop
 
-以 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 为基底的**桌面工作台**：Electron 原生壳 + 内嵌 harness 运行时。
+以 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 为基底的**桌面工作台**：Electron 原生壳 + 内嵌 harness 运行时，离线、免安装 Node、免全局 dsh 即可使用。
 
-设计文档：[docs/DESIGN.md](docs/DESIGN.md)
+## 设计架构
 
-## 架构（0.4.1）
-
-**壳只保留桌面原生能力**（窗口、托盘、启动 harness、加载 Web UI、深链、全局快捷键、自动更新、系统通知/任务栏徽标），加载官方 Web UI（会话、工作区、插件、设置）。壳与 harness 之间仅通过一个桥接插件通信——不再注入任何 UI、不持有任何面板代码。
+**壳只保留桌面原生能力**（窗口、托盘、启动 harness、加载 Web UI、深链、全局快捷键、自动更新、系统通知/任务栏徽标），加载官方 Web UI（会话、工作区、插件、设置）。壳与 harness 之间仅通过一个桥接插件通信——不注入任何 UI、不持有任何面板代码。
 
 ```
 Electron 壳 ──spawn──▶ dsh --profile desktop --patch <overlay> --port 0
@@ -16,61 +14,44 @@ Electron 壳 ──spawn──▶ dsh --profile desktop --patch <overlay> --port
     └── bridge WS ───────────┘
 ```
 
-| 插件 | 职责 |
-|---|---|
-| `dsh-desktop-bridge` | 本地 WS（token）+ 事件推送（jobs/approval → 通知/徽标）+ RPC（session.resolve/workspace.register/runtime.info/ping） |
-
-## 能力一览
-
-- 🪟 原生窗口加载 harness Web UI（`--port 0`，无端口冲突）
-- 🐋 启动/重启加载页：粒子鲸鱼动画
+- 🪟 原生窗口加载官方 Web UI（`--port 0`，无端口冲突）
 - 🧩 专用 `desktop` profile（`$DSH_HOME/profiles/desktop`），会话与 Web/CLI 共享
 - 🔌 `dsh-desktop-bridge` 桥接插件：后台任务/审批事件 → 系统通知与任务栏徽标
-- ⌨️ 全局快捷键唤出（默认 `Ctrl+Shift+Space`，settings.json `globalShortcut` 可改）
+- ⌨️ 全局快捷键唤出（默认 `Ctrl+Shift+Space`）
 - 🔗 `dsh://` 深链：`dsh://`（聚焦）、`dsh://new`（新建会话）、`dsh://session/<id>`（打开会话）
-- ⬆️ 自动更新（electron-updater + generic feed；托盘「检查更新…」手动触发）
-- 🗂️ 托盘：显示窗口 / 打开浏览器版 / 切换工作区 / 重启 Harness / 查看日志 / 开机自启 / 通知开关
-- 🛡️ 崩溃自愈（指数退避重启）、优雅停机、单实例锁、导航锁与 sandbox
-- 📦 自包含打包：便携 Node + npm 安装的 dsh 树，离线免装 Node/全局 dsh
+- ⬆️ 自动更新、🗂️ 托盘常驻、🛡️ 崩溃自愈、📦 自包含打包
 
-## 开发
+## 功能截图
 
-```sh
-npm install                      # electron/esbuild/typescript/ws
-npm run dev                      # build + dev-link（bridge 链接）+ 启动 Electron
-```
+| 加载页面 | 主界面 |
+|---|---|
+| ![加载页面](docs/screenshots/加载页面.png) | ![主界面](docs/screenshots/主界面.png) |
 
-dev 模式依赖全局 `@deepseek-ai/dsh`（或设置 `DSH_DESKTOP_DSH_BIN` 指向 `lib/bin.js`）；`npm run dev` 会把 bridge 以 junction 链接进 `~/.dsh/profiles/desktop/node_modules`。
+| 托盘菜单 |
+|---|
+| ![托盘菜单](docs/screenshots/后台管理.png) |
 
-常用脚本：
+## 安装
 
-```sh
-npm test                 # 事件逻辑单测（node --test）
-npm run build            # esbuild 构建 + bridge → resources/plugins
-npm run make:icons       # 生成应用图标（纯 JS，含 ico/icns）
-npm run setup:runtime    # 构建自包含运行时 resources/dsh-runtime
-npm run dist:win         # Windows NSIS 安装包（release/）
-npm run dist:win:portable
-npm run dist:mac         # macOS dmg（arm64 + x64；需在 macOS 上执行）
-```
+1. 从 Releases 下载最新安装包（`DSH Desktop-x.x.x-setup.exe`）
+2. 双击运行，按向导完成安装（可选择安装目录）
+3. 首次启动会自动解压内置运行时（约 40 秒，二次启动免解压），并创建桌面 profile
 
-## 打包
+> 安装包自包含：内置便携 Node 与 dsh 运行时，**无需**预先安装 Node.js 或全局 dsh。
 
-1. `npm run build && npm run make:icons`
-2. `npm run setup:runtime`（下载便携 Node、`npm install @deepseek-ai/dsh@0.1.0-rc.6`、安装 bridge、打包 `resources/dsh-runtime.tar.gz`）
-3. `npm run dist:win`（electron-builder NSIS；`electronDist` 复用本地 Electron 二进制）
+## 使用
 
-安装后首次运行：自动创建 `~/.dsh/profiles/desktop` 并同步 bridge；运行时 tar.gz 解压到应用数据目录（Windows `%LOCALAPPDATA%/DSH Desktop/runtime`，macOS `~/Library/Application Support/DSH Desktop/runtime`；约 40s，二次启动免解压）；窗口内选择工作区即可开始会话。
+- **开始会话**：启动后在窗口内选择工作区，即可开始对话
+- **全局唤出**：任意界面按 `Ctrl+Shift+Space` 呼出/隐藏窗口
+- **深链**：浏览器或其他应用点击 `dsh://` 链接可唤起并打开对应会话
+- **托盘**：关闭窗口默认最小化到托盘；右键托盘图标可切换工作区、重启 Harness、查看日志、检查更新、开机自启、开关通知
+- **会话共享**：桌面版与 Web/CLI 共享同一 `~/.dsh` 数据，会话跨端可见
 
 ## 平台支持
 
-- **Windows**（主平台，实测）：NSIS 安装包、托盘、系统通知、任务栏徽标、开机自启、`dsh://` 深链（注册表）
-- **macOS**（配置就绪，未实机验证）：dmg（arm64/x64）、`dsh://` 深链（Info.plist protocols + open-url 事件）、运行时路径走 `~/Library/Application Support`；打包需在 macOS 上执行（`npm run dist:mac`）
-- **Linux**：代码兼容（运行时路径走 `$XDG_DATA_HOME`），未提供打包配置
-
-## 版本锁定
-
-harness 运行时锁定 `0.1.0-rc.6`（`DSH_RUNTIME_DSH_VERSION` 可改）；升级后请重跑 `setup-runtime.mjs` 并同步 bridge 版本。
+- **Windows**（主平台，实测）：NSIS 安装包、托盘、系统通知、任务栏徽标、开机自启、`dsh://` 深链
+- **macOS**（配置就绪）：dmg（arm64/x64）、`dsh://` 深链、运行时路径走 `~/Library/Application Support`
+- **Linux**：代码兼容，未提供安装包
 
 ## License
 
