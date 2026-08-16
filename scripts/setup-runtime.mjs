@@ -65,7 +65,17 @@ async function downloadNode() {
 
 const nodeBin = () =>
   process.platform === 'win32' ? path.join(runtimeDir, 'node', 'node.exe') : path.join(runtimeDir, 'node', 'bin', 'node')
-const npmCli = () => path.join(runtimeDir, 'node', 'node_modules', 'npm', 'bin', 'npm-cli.js')
+
+/** 便携 Node 内的 npm-cli.js：Windows 分发包在 node_modules/npm，macOS/Linux 在 lib/node_modules/npm。 */
+const npmCli = () => {
+  const candidates = [
+    path.join(runtimeDir, 'node', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.join(runtimeDir, 'node', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ]
+  const found = candidates.find((p) => existsSync(p))
+  if (!found) throw new Error(`npm-cli.js not found in portable node (tried: ${candidates.join(', ')})`)
+  return found
+}
 
 async function installDsh() {
   writeFileSync(

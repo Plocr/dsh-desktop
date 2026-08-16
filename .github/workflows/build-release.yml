@@ -39,6 +39,9 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
+    env:
+      # CI 无签名证书：跳过 codesign/notarize（本地安装可正常使用，仅 macOS Gatekeeper 提示未知开发者）
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
