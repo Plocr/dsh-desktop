@@ -71,7 +71,7 @@ jobs:
           gh release upload "$RELEASE_TAG" release/*arm64*.dmg --clobber
 
   build-macos-x64:
-    runs-on: macos-13
+    runs-on: macos-14
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
