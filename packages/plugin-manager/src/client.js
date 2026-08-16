@@ -295,10 +295,19 @@ return {
 
     // ---- 各 tab 页面 ----
 
-    /** 官方插件页（按分类分组展示）。 */
+    /** 官方插件页（按分类分组，默认折叠，点击展开）。 */
     function OfficialPage({ data, error, onRefresh }) {
       const cats = data ? data.officialCategories : null
       const total = cats ? cats.reduce((n, c) => n + c.plugins.length, 0) : 0
+      const [openCats, setOpenCats] = useState(() => new Set())
+      const toggleCat = (id) => {
+        setOpenCats((prev) => {
+          const next = new Set(prev)
+          if (next.has(id)) next.delete(id)
+          else next.add(id)
+          return next
+        })
+      }
       return e('div', { className: 'pm-root' },
         error ? e('div', { className: 'pm-err' }, error) : null,
         e('div', { className: 'pm-head' },
@@ -309,17 +318,34 @@ return {
           e('button', { type: 'button', className: 'pm-refresh', onClick: onRefresh }, t('refresh')),
         ),
         cats && cats.length > 0
-          ? cats.map((cat) =>
-              e('div', { key: cat.id, style: { display: 'flex', flexDirection: 'column', gap: 8 } },
-                e('div', { className: 'pm-catTitle' },
-                  e('span', { className: 'pm-catLabel' }, cat.label),
-                  e('span', { className: 'pm-catCount' }, String(cat.plugins.length)),
+          ? cats.map((cat) => {
+              const open = openCats.has(cat.id)
+              return e('div', { key: cat.id, className: 'pm-card' + (open ? ' pm-cardOpen' : ''), style: { display: 'flex', flexDirection: 'column', gap: 0 } },
+                e('button', {
+                  type: 'button',
+                  className: 'pm-header',
+                  'aria-expanded': open,
+                  'aria-label': `${open ? t('collapse') : t('expand')}: ${cat.label}`,
+                  onClick: () => toggleCat(cat.id),
+                },
+                  e('span', { className: 'pm-headText2' },
+                    e('span', { className: 'pm-name', style: { fontSize: 14 } },
+                      cat.label,
+                      e('span', { className: 'pm-catCount' }, String(cat.plugins.length)),
+                    ),
+                    e('span', { className: 'pm-desc' }, cat.plugins[0]?.moduleName ? cat.plugins.map((p) => p.moduleName ?? p.entryId).slice(0, 3).join('、') + (cat.plugins.length > 3 ? ' …' : '') : ''),
+                  ),
+                  e('span', { className: 'pm-chevron' + (open ? ' pm-chevronOpen' : '') }, e(ChevronIcon)),
                 ),
-                e('div', { className: 'pm-list' },
-                  cat.plugins.map((p) => e(OfficialCard, { key: p.entryId || p.moduleName || p.name, plugin: p })),
-                ),
-              ),
-            )
+                open
+                  ? e('div', { className: 'pm-body' },
+                      e('div', { className: 'pm-list', style: { gap: 8 } },
+                        cat.plugins.map((p) => e(OfficialCard, { key: p.entryId || p.moduleName || p.name, plugin: p })),
+                      ),
+                    )
+                  : null,
+              )
+            })
           : e('div', { className: 'pm-empty' }, t('empty')),
       )
     }
