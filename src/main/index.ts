@@ -115,18 +115,29 @@ function regenerateOverlay(resourcesDir: string, token: string): string {
 
 /** 重启 Harness：先按当前设置重新同步插件并生成 overlay，再重启。 */
 async function restartHarness(dir?: string): Promise<void> {
-  const resourcesDir = appResourcesDir()
-  // 同步 profile（插件启停后，profile node_modules 增删）+ 重生成 overlay
-  ensureProfile(
-    dshHome(),
-    path.join(resourcesDir, 'profile-template', 'desktop'),
-    path.join(resourcesDir, 'plugins'),
-    userPluginsDir(),
-    settings.disabledPlugins,
-  )
-  overlayPath = regenerateOverlay(resourcesDir, launchToken || randomBytes(16).toString('hex'))
-  lastUrl = null
-  harness.restart(dir)
+  try {
+    const resourcesDir = appResourcesDir()
+    // 同步 profile（插件启停后，profile node_modules 增删）+ 重生成 overlay
+    ensureProfile(
+      dshHome(),
+      path.join(resourcesDir, 'profile-template', 'desktop'),
+      path.join(resourcesDir, 'plugins'),
+      userPluginsDir(),
+      settings.disabledPlugins,
+    )
+    overlayPath = regenerateOverlay(resourcesDir, launchToken || randomBytes(16).toString('hex'))
+    lastUrl = null
+    harness.restart(dir)
+  } catch (err) {
+    // 同步/生成失败不应导致 unhandled rejection：记日志并照常重启（旧 overlay 仍可用）
+    log('error', `restartHarness prepare failed: ${err instanceof Error ? err.message : String(err)}`)
+    lastUrl = null
+    try {
+      harness.restart(dir)
+    } catch (err2) {
+      log('error', `restartHarness spawn failed: ${err2 instanceof Error ? err2.message : String(err2)}`)
+    }
+  }
 }
 
 function defaultWorkspace(): string {
@@ -223,7 +234,7 @@ async function clickSidebarRow(matcherJs: string): Promise<boolean> {
   const w = win?.win
   if (!w || w.isDestroyed() || !uiReady()) return false
   try {
-    const clicked = await w.webContents.executeJavaScript(`(() => {
+    const clicked = await execJsWithTimeout(w, `(() => {
       const rows = [...document.querySelectorAll('[role=treeitem]')];
       const target = rows.find((el) => ${matcherJs});
       if (!target) return false;
@@ -242,7 +253,7 @@ async function expandOverflowSessions(): Promise<void> {
   const w = win?.win
   if (!w || w.isDestroyed() || !uiReady()) return
   try {
-    await w.webContents.executeJavaScript(`(() => {
+    await execJsWithTimeout(w, `(() => {
       const btn = [...document.querySelectorAll('button')].find((b) => (b.textContent || '').includes('展开其余'));
       if (btn) { btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window })); return true; }
       return false;
@@ -250,6 +261,23 @@ async function expandOverflowSessions(): Promise<void> {
   } catch {
     /* ignore */
   }
+}
+
+/** executeJavaScript 带超时保护（页面卡死时不挂死）。 */
+function execJsWithTimeout(w: Electron.BrowserWindow, code: string, timeoutMs = 3000): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('executeJavaScript 超时')), timeoutMs)
+    w.webContents
+      .executeJavaScript(code)
+      .then((v) => {
+        clearTimeout(t)
+        resolve(v)
+      })
+      .catch((e) => {
+        clearTimeout(t)
+        reject(e)
+      })
+  })
 }
 
 function uiReady(): boolean {
@@ -324,7 +352,25 @@ async function main(): Promise<void> {
   // 首启解压运行时 tar.gz（约 200MB）耗时较长，若先 await 再建窗口，
   // 用户在任务管理器里只见进程、长时间看不到界面。
   win = createWindow(path.join(__dirname, '..', 'preload', 'index.cjs'), resourcesDir, {
-    isAllowed: (url) => url.startsWith('http://127.0.0.1:') || url.startsWith('file://'),
+    // 导航锁：file:// 壳页面 + 精确匹配已解析的 harness URL（host+port），
+    // 不放行任意 127.0.0.1:*（防本机恶意回环服务诱导导航）
+    isAllowed: (url) => {
+      if (url.startsWith('file://')) return true
+      try {
+        const u = new URL(url)
+        if (u.protocol !== 'http:' || u.hostname !== '127.0.0.1') return false
+        const known = [lastUrl, harness?.ready?.url].filter((x): x is string => !!x)
+        return known.some((k) => {
+          try {
+            return new URL(k).port === u.port
+          } catch {
+            return false
+          }
+        })
+      } catch {
+        return false
+      }
+    },
     theme: resolveEffectiveTheme(dshHome()),
   })
   win.showLoading(undefined, resolveThemePreference(dshHome()))

@@ -17,6 +17,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { log } from './logger'
 import { notify } from './notify'
+import { compareDots } from './version'
 
 const REGISTRY_URL = 'https://registry.npmjs.org/@deepseek-ai%2Fdsh/latest'
 const TIMEOUT_MS = 10_000
@@ -53,17 +54,6 @@ async function fetchLatestDshVersion(): Promise<string | null> {
   } finally {
     clearTimeout(t)
   }
-}
-
-function compareDots(a: string, b: string): number {
-  const pa = a.split(/[.+-]/).map(Number)
-  const pb = b.split(/[.+-]/).map(Number)
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const x = pa[i] ?? 0
-    const y = pb[i] ?? 0
-    if (x !== y) return x - y
-  }
-  return 0
 }
 
 /**

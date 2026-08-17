@@ -2,8 +2,11 @@
  * IPC：壳页面（loading/error）白名单。
  * harness Web UI 不调用这些 API（仪表盘/终端/主题均为 harness 插件，
  * 数据走插件自身 webServer 路由，不再经过壳 IPC）。
+ *
+ * 安全：每个 handler 校验 senderFrame.url 为 file:// 壳页面——
+ * harness Web UI（http://127.0.0.1:*）内的插件 client 代码拿不到这些能力。
  */
-import { dialog, ipcMain, shell, type BrowserWindow } from 'electron'
+import { dialog, ipcMain, shell, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import type { HarnessManager } from './harness'
 import type { BridgeClient } from './bridge'
 import { logDirPath } from './logger'
@@ -18,12 +21,20 @@ export interface IpcDeps {
   openSession: (sessionId: string) => Promise<void>
 }
 
+/** 仅放行壳页面（file:// 加载的 loading/error 页）；其他来源拒绝。 */
+function fromShellPage(e: IpcMainInvokeEvent): boolean {
+  const url = e.senderFrame?.url ?? ''
+  return url.startsWith('file://')
+}
+
 export function registerIpc(deps: IpcDeps): void {
-  ipcMain.handle('dsh:pick-workspace', async () => {
+  ipcMain.handle('dsh:pick-workspace', async (e) => {
+    if (!fromShellPage(e)) throw new Error('forbidden: shell page only')
     return deps.pickWorkspace()
   })
 
-  ipcMain.handle('dsh:reveal-in-folder', async (_e, p: unknown) => {
+  ipcMain.handle('dsh:reveal-in-folder', async (e, p: unknown) => {
+    if (!fromShellPage(e)) throw new Error('forbidden: shell page only')
     if (typeof p === 'string' && p) {
       shell.showItemInFolder(p)
       return true
@@ -31,7 +42,8 @@ export function registerIpc(deps: IpcDeps): void {
     return false
   })
 
-  ipcMain.handle('dsh:open-external', async (_e, u: unknown) => {
+  ipcMain.handle('dsh:open-external', async (e, u: unknown) => {
+    if (!fromShellPage(e)) throw new Error('forbidden: shell page only')
     if (typeof u === 'string' && /^https?:\/\//i.test(u)) {
       await shell.openExternal(u)
       return true
@@ -39,25 +51,32 @@ export function registerIpc(deps: IpcDeps): void {
     return false
   })
 
-  ipcMain.handle('dsh:restart-harness', () => {
+  ipcMain.handle('dsh:restart-harness', (e) => {
+    if (!fromShellPage(e)) throw new Error('forbidden: shell page only')
     deps.restartHarness()
     return true
   })
 
-  ipcMain.handle('dsh:open-logs', () => {
+  ipcMain.handle('dsh:open-logs', (e) => {
+    if (!fromShellPage(e)) throw new Error('forbidden: shell page only')
     void shell.openPath(logDirPath())
     return true
   })
 
-  ipcMain.handle('dsh:get-info', () => deps.getInfo())
+  ipcMain.handle('dsh:get-info', (e) => {
+    if (!fromShellPage(e)) throw new Error('forbidden: shell page only')
+    return deps.getInfo()
+  })
 
-  ipcMain.handle('dsh:open-dev-console', () => {
+  ipcMain.handle('dsh:open-dev-console', (e) => {
+    if (!fromShellPage(e)) throw new Error('forbidden: shell page only')
     const win = deps.getWindow()
     if (win) win.webContents.openDevTools({ mode: 'detach' })
     return true
   })
 
-  ipcMain.handle('dsh:open-session', (_e, sessionId: unknown) => {
+  ipcMain.handle('dsh:open-session', (e, sessionId: unknown) => {
+    if (!fromShellPage(e)) throw new Error('forbidden: shell page only')
     if (typeof sessionId === 'string' && sessionId) void deps.openSession(sessionId)
     return { ok: true }
   })

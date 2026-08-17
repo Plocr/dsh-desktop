@@ -13,7 +13,7 @@
  * 全部 npm 操作通过便携 Node 自带的 npm-cli.js 执行（不依赖 PATH 中的 npm/cmd）。
  */
 import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -116,6 +116,90 @@ function verifyDist() {
   console.log('[runtime] dist + bridge verified')
 }
 
+/**
+ * 裁剪运行时体积（保守）：删除各包的构建/文档残留——
+ * .d.ts/.d.ts.map、docs/、test/、tests/、locales/（仅保留运行时需要的）。
+ * 不删 lib/*.js、dist/、package.json、README 保留。
+ */
+function pruneRuntime() {
+  const nm = path.join(runtimeDir, 'node_modules')
+  if (!existsSync(nm)) return
+  let removedBytes = 0
+  const removeTree = (p) => {
+    try {
+      const st = statSync(p)
+      if (st.isDirectory()) {
+        for (const e of readdirSync(p)) removeTree(path.join(p, e))
+        rmSync(p, { recursive: true, force: true })
+      } else {
+        removedBytes += st.size
+        rmSync(p, { force: true })
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const walk = (dir) => {
+    let entries = []
+    try {
+      entries = readdirSync(dir)
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry)
+      let isDir = false
+      try {
+        isDir = statSync(full).isDirectory()
+      } catch {
+        continue
+      }
+      const base = entry.toLowerCase()
+      // 文件级：.d.ts / .map / .d.mts
+      if (!isDir && (base.endsWith('.d.ts') || base.endsWith('.d.ts.map') || base.endsWith('.d.mts'))) {
+        try {
+          removedBytes += statSync(full).size
+          rmSync(full, { force: true })
+        } catch {
+          /* ignore */
+        }
+        continue
+      }
+      if (isDir) {
+        // 目录级：docs/test/tests/coverage 等纯文档/测试目录
+        if (base === 'docs' || base === 'test' || base === 'tests' || base === 'coverage' || base === '__tests__') {
+          const before = treeSize(full)
+          removeTree(full)
+          removedBytes += before
+          continue
+        }
+        // 深入 node_modules（含 @deepseek-ai 作用域包）
+        if (entry !== '.bin') walk(full)
+      }
+    }
+  }
+  walk(nm)
+  console.log(`[runtime] pruned ${(removedBytes / 1024 / 1024).toFixed(1)} MB (types/docs/tests)`)
+}
+
+function treeSize(dir) {
+  let total = 0
+  try {
+    for (const e of readdirSync(dir)) {
+      const p = path.join(dir, e)
+      try {
+        if (statSync(p).isDirectory()) total += treeSize(p)
+        else total += statSync(p).size
+      } catch {
+        /* ignore */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return total
+}
+
 // 增量：运行时已就绪且 dsh 版本匹配时跳过下载/安装，只重建 zip
 const dshPkg = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
 let fresh = false
@@ -137,6 +221,8 @@ if (!fresh) {
   await installDsh()
   verifyDist()
 }
+// 裁剪（幂等）：全新安装与增量复用都会执行，删 .d.ts/docs/tests
+pruneRuntime()
 
 // electron-builder 会剔除 extraResources 中的 node_modules；
 // 因此把整个运行时打成 tar.gz 随包分发，由壳在首启解压到 %LOCALAPPDATA%/DSH Desktop/runtime。

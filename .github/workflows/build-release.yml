@@ -8,8 +8,11 @@ name: build-release
 
 on:
   push:
+    branches:
+      - master
     tags:
       - 'v*'
+  pull_request:
   workflow_dispatch:
     inputs:
       tag:
@@ -20,6 +23,21 @@ permissions:
   contents: write
 
 jobs:
+  # 质量门禁：类型检查 + 单元测试（push master / PR 必跑；tag 推送也跑）
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install deps
+        run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Test
+        run: npm test
+
   build-windows:
     runs-on: windows-latest
     steps:

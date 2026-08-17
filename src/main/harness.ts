@@ -7,6 +7,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { log } from './logger'
+import { parseHarnessLine } from './harnessParse'
 
 export interface HarnessReady {
   url: string
@@ -175,31 +176,10 @@ export class HarnessManager {
   }
 
   private parseLine(line: string): void {
-    const web = /^dsh web: (https?:\/\/[^\s]+)/.exec(line)
-    if (web) {
-      try {
-        const url = web[1]
-        const port = Number(new URL(url).port || 0)
-        this.ready = { ...(this.ready ?? { url: '', port: 0, bridgePort: null, token: null }), url, port }
-        this.maybeReady()
-      } catch {
-        log('error', `bad web url line: ${line}`)
-      }
-      return
-    }
-    const br = /^dsh desktop: (\{.*\})$/.exec(line)
-    if (br) {
-      try {
-        const info = JSON.parse(br[1]) as { port?: unknown; token?: unknown }
-        this.ready = {
-          ...(this.ready ?? { url: '', port: 0, bridgePort: null, token: null }),
-          bridgePort: Number(info.port) || null,
-          token: typeof info.token === 'string' ? info.token : null,
-        }
-        this.maybeReady()
-      } catch {
-        log('error', `bad bridge line: ${line}`)
-      }
+    const next = parseHarnessLine(line, this.ready)
+    if (next) {
+      this.ready = next
+      this.maybeReady()
     }
   }
 

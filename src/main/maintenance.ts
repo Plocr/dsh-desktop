@@ -1,7 +1,7 @@
 /**
  * 维护操作：清理日志、卸载应用（Windows NSIS 卸载器）。
  */
-import { app, dialog } from 'electron'
+import { app, dialog, BrowserWindow } from 'electron'
 import { execFile, spawn } from 'node:child_process'
 import { existsSync, readdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
@@ -95,4 +95,20 @@ export async function uninstallApp(): Promise<void> {
   } catch (err) {
     log('error', `maintenance: spawn uninstaller failed: ${err instanceof Error ? err.message : String(err)}`)
   }
+}
+
+/** 卸载前确认框（用户取消则不继续）。 */
+function confirmUninstall(): Promise<boolean> {
+  const win = BrowserWindow.getAllWindows()[0]
+  const opts = {
+    type: 'warning' as const,
+    buttons: ['卸载', '取消'],
+    defaultId: 1,
+    cancelId: 1,
+    title: '卸载 DSH Desktop',
+    message: '确定要卸载 DSH Desktop 吗？',
+    detail: '将启动系统卸载程序。用户数据（运行时缓存、日志、设置）会保留在本地，不会被删除。',
+  }
+  const p = win && !win.isDestroyed() ? dialog.showMessageBox(win, opts) : dialog.showMessageBox(opts)
+  return p.then((r) => r.response === 0).catch(() => false)
 }

@@ -38,9 +38,10 @@
   },
   "files": [
     "lib",
-    "src",
+    "src/client.js",
     "scripts",
-    "README.md"
+    "README.md",
+    "!src/host.js"
   ],
   "scripts": {
     "build": "node build-client.js",

@@ -11,6 +11,9 @@ import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'no
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 
+// 先生成 loading.html（模板 + whale path 合并），再构建
+execFileSync(process.execPath, [path.resolve('scripts', 'generate-loading.mjs')], { stdio: 'inherit' })
+
 const mainCommon = {
   bundle: true,
   platform: 'node',
