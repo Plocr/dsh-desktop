@@ -12,7 +12,8 @@ export interface AppSettings {
   notifications: boolean
   /** 开机自启 */
   autoStart: boolean
-  /** 使用独立 DSH_HOME（userData/dsh-home），默认复用系统 ~/.dsh */
+  /** 使用独立 DSH_HOME（userData/dsh-home）。默认开启：与 web 版/CLI 共享
+   *  ~/.dsh 会因并发读写 sessions/storages 冲突（输入失败、互相干扰）。 */
   isolatedHome: boolean
   /** 最近工作区（新→旧），首个存在的作为默认 cwd */
   recentWorkspaces: string[]
@@ -28,7 +29,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   trayOnClose: true,
   notifications: true,
   autoStart: false,
-  isolatedHome: false,
+  isolatedHome: true,
   recentWorkspaces: [],
   globalShortcut: 'CommandOrControl+Shift+Space',
   autoUpdate: true,

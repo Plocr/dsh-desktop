@@ -327,6 +327,134 @@ function argOf(payload, key) {
   return typeof v === 'string' ? v : undefined
 }
 
+/**
+ * 保存壁纸：base64 data URL -> userData/wallpapers/<name>。
+ * 支持图片（png/jpg/gif/webp）、视频（mp4/webm）与 HTML 壁纸。
+ * 路径由壳注入（config.wallpaperDir，index.ts regenerateOverlay 注入 userData/wallpapers）。
+ */
+async function saveWallpaper(name, dataUrl, config) {
+  const dir = config?.wallpaperDir
+  if (!dir) return { status: 'error', message: 'wallpaperDir 未配置' }
+  const safe = String(name || '').replace(/[^\w.-]/g, '_')
+  if (!safe) return { status: 'error', message: 'missing name' }
+  const m = /^data:([^;]+);base64,(.+)$/s.exec(String(dataUrl || ''))
+  if (!m) return { status: 'error', message: 'invalid data url' }
+  try {
+    mkdirSync(dir, { recursive: true })
+    const ext = (m[1].split('/')[1] || 'bin').replace('jpeg', 'jpg').split('+')[0]
+    // 文件名里可能已带同类后缀（如 clip.mp4），追加新后缀前先剥离，避免 clip.mp4.mp4
+    const base = safe.replace(/\.(png|jpe?g|gif|webp|svg|mp4|webm|mov|m4v|html?)$/i, '')
+    const file = path.join(dir, `${base}.${ext}`)
+    writeFileSync(file, Buffer.from(m[2], 'base64'))
+    return { status: 'ok', message: `壁纸已保存 ${file}`, file }
+  } catch (e) {
+    return { status: 'error', message: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/** 列出已保存壁纸。 */
+async function listWallpapers(config) {
+  const dir = config?.wallpaperDir
+  if (!dir || !existsSync(dir)) return { status: 'ok', items: [] }
+  try {
+    const items = []
+    for (const entry of readdirSync(dir)) {
+      const full = path.join(dir, entry)
+      let isDir = false
+      try {
+        isDir = statSync(full).isDirectory()
+      } catch {
+        continue
+      }
+      if (isDir) continue
+      items.push({ name: entry, size: statSync(full).size, file: full })
+    }
+    return { status: 'ok', items }
+  } catch (e) {
+    return { status: 'error', message: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/** 删除壁纸。 */
+async function removeWallpaper(name, config) {
+  const dir = config?.wallpaperDir
+  if (!dir) return { status: 'error', message: 'wallpaperDir 未配置' }
+  const safe = String(name || '').replace(/[^\w.-]/g, '_')
+  if (!safe) return { status: 'error', message: 'missing name' }
+  try {
+    rmSync(path.join(dir, safe), { force: true })
+    return { status: 'ok', message: `已删除 ${safe}` }
+  } catch (e) {
+    return { status: 'error', message: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/** 个性化设置的默认值。 */
+const DEFAULT_PERSONALIZATION = {
+  skin: 'default',
+  accent: null,
+  wallpaper: null,
+  blur: 16,
+  glass: false,
+}
+
+/** 读 settings.json 的 personalization 字段（缺省合并默认值）。 */
+function readPersonalization(config) {
+  const s = readJson(config?.settingsFile ?? '')
+  const p = s?.personalization
+  if (typeof p !== 'object' || p === null || Array.isArray(p)) return { ...DEFAULT_PERSONALIZATION }
+  return { ...DEFAULT_PERSONALIZATION, ...p }
+}
+
+/** 写 settings.json 的 personalization 字段（保留其余字段）。 */
+function writePersonalization(config, next) {
+  const file = config?.settingsFile
+  if (!file) return false
+  const s = readJson(file) ?? {}
+  const merged = { ...readPersonalization(config), ...(typeof next === 'object' && next !== null ? next : {}) }
+  s.personalization = merged
+  try {
+    writeFileSync(file, JSON.stringify(s, null, 2), 'utf8')
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 读取壁纸文件内容并编码为 data URL（图片/视频/HTML 均可，客户端直接用于预览/应用）。 */
+function readWallpaperData(name, config) {
+  const dir = config?.wallpaperDir
+  if (!dir) return { status: 'error', message: 'wallpaperDir 未配置' }
+  const safe = String(name || '').replace(/[^\w.-]/g, '_')
+  if (!safe) return { status: 'error', message: 'missing name' }
+  const file = path.join(dir, safe)
+  if (!existsSync(file)) return { status: 'error', message: 'wallpaper not found' }
+  const ext = path.extname(safe).toLowerCase().replace(/^\./, '')
+  const mime = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+    mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime',
+    html: 'text/html', htm: 'text/html',
+  }[ext] ?? 'application/octet-stream'
+  try {
+    const buf = statSync(file).size > 0 ? readFileSync(file) : Buffer.alloc(0)
+    const dataUrl = `data:${mime};base64,${buf.toString('base64')}`
+    return { status: 'ok', dataUrl, mime, size: buf.length }
+  } catch (e) {
+    return { status: 'error', message: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/** 导出供冒烟测试/复用：个性化持久化与壁纸 CRUD（与应用无关的纯函数）。 */
+export {
+  DEFAULT_PERSONALIZATION,
+  readPersonalization,
+  writePersonalization,
+  saveWallpaper,
+  listWallpapers,
+  removeWallpaper,
+  readWallpaperData,
+}
+
 export function apply(ctx, config) {
   ctx.effect(
     () =>
@@ -409,6 +537,46 @@ export function apply(ctx, config) {
           if (endpoint === 'user.uninstall') {
             const name = argOf(payload, 'name')
             const r = await userUninstall(name, config)
+            return r.status === 'ok'
+              ? { ok: true, value: r }
+              : { ok: false, error: { code: 'internal', message: r.message } }
+          }
+          if (endpoint === 'personalization.saveWallpaper') {
+            const name = argOf(payload, 'name')
+            const dataUrl = argOf(payload, 'dataUrl')
+            const r = await saveWallpaper(name, dataUrl, config)
+            return r.status === 'ok'
+              ? { ok: true, value: r }
+              : { ok: false, error: { code: 'internal', message: r.message } }
+          }
+          if (endpoint === 'personalization.listWallpapers') {
+            const r = await listWallpapers(config)
+            return r.status === 'ok'
+              ? { ok: true, value: r }
+              : { ok: false, error: { code: 'internal', message: r.message } }
+          }
+          if (endpoint === 'personalization.removeWallpaper') {
+            const name = argOf(payload, 'name')
+            const r = await removeWallpaper(name, config)
+            return r.status === 'ok'
+              ? { ok: true, value: r }
+              : { ok: false, error: { code: 'internal', message: r.message } }
+          }
+          if (endpoint === 'personalization.get') {
+            return { ok: true, value: readPersonalization(config) }
+          }
+          if (endpoint === 'personalization.set') {
+            const next = payload?.args?.value ?? payload?.value
+            if (typeof next !== 'object' || next === null || Array.isArray(next)) {
+              return { ok: false, error: { code: 'invalid', message: 'personalization.set expects { value: {...} }' } }
+            }
+            const wrote = writePersonalization(config, next)
+            if (!wrote) return { ok: false, error: { code: 'internal', message: 'settings.json 写入失败' } }
+            return { ok: true, value: readPersonalization(config) }
+          }
+          if (endpoint === 'personalization.getWallpaperData') {
+            const name = argOf(payload, 'name')
+            const r = readWallpaperData(name, config)
             return r.status === 'ok'
               ? { ok: true, value: r }
               : { ok: false, error: { code: 'internal', message: r.message } }

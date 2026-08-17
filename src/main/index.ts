@@ -9,7 +9,7 @@
  * 插件通信（通知/徽标/深链/工作区注册），壳不注入任何 UI。
  */
 import { app, dialog, shell } from 'electron'
-import { existsSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
@@ -72,6 +72,63 @@ function dshHome(): string {
   return settings.isolatedHome ? path.join(app.getPath('userData'), 'dsh-home') : path.join(os.homedir(), '.dsh')
 }
 
+/** 递归复制目录（跳过 .git/node_modules/.bin 等）。 */
+function copyDirRecursive(src: string, dest: string): void {
+  mkdirSync(dest, { recursive: true })
+  for (const entry of readdirSync(src)) {
+    if (entry === '.git' || entry === 'node_modules' || entry === '.bin') continue
+    const s = path.join(src, entry)
+    const d = path.join(dest, entry)
+    let isDir = false
+    try {
+      isDir = statSync(s).isDirectory()
+    } catch {
+      continue
+    }
+    if (isDir) copyDirRecursive(s, d)
+    else if (!existsSync(d)) copyFileSync(s, d)
+  }
+}
+
+/**
+ * 确保使用独立 DSH_HOME（与 web 版/CLI 共享 ~/.dsh 会并发冲突）。
+ * - 若 settings 仍为共享模式（老版本默认 false），自动切换为隔离并迁移数据
+ * - 首次切换到隔离 home 时，把旧 ~/.dsh 的桌面端数据迁移过去：
+ *   profiles/desktop（含插件同步、会话历史）、sessions、storages、
+ *   .credentials.yaml、settings.yaml。已存在则不覆盖（幂等）。
+ */
+function migrateToIsolatedHome(): void {
+  const isolated = path.join(app.getPath('userData'), 'dsh-home')
+  const legacy = path.join(os.homedir(), '.dsh')
+  const legacyExists = existsSync(legacy)
+  // 老版本默认共享模式：若检测到 ~/.dsh 存在（说明在与其他实例共用），
+  // 自动切换隔离并迁移，解决共存冲突
+  if (!settings.isolatedHome) {
+    if (!legacyExists) {
+      settings.isolatedHome = true
+      saveSettings(settingsFile, settings)
+      log('info', 'isolatedHome enabled (no legacy ~/.dsh)')
+      return
+    }
+    settings.isolatedHome = true
+    saveSettings(settingsFile, settings)
+    log('info', 'switched to isolated DSH_HOME (legacy ~/.dsh detected)')
+  }
+  // 新 home 已初始化（有 profiles）则跳过
+  if (existsSync(path.join(isolated, 'profiles'))) return
+  if (!legacyExists) {
+    mkdirSync(isolated, { recursive: true })
+    return
+  }
+  log('info', `migrating legacy ~/.dsh -> ${isolated}`)
+  try {
+    copyDirRecursive(legacy, isolated)
+    log('info', 'isolated DSH_HOME migration done')
+  } catch (err) {
+    log('error', `isolated DSH_HOME migration failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
 /** 用户安装插件目录（运行时可装，无需重新打包）。 */
 function userPluginsDir(): string {
   return path.join(app.getPath('userData'), 'plugins')
@@ -104,6 +161,7 @@ function regenerateOverlay(resourcesDir: string, token: string): string {
             dshBin: dshCliPath,
             dshHome: dshHome(),
             profileName: 'desktop',
+            wallpaperDir: path.join(app.getPath('userData'), 'wallpapers'),
           },
         }
       : {}),
@@ -343,6 +401,8 @@ async function main(): Promise<void> {
   initLogger(path.join(app.getPath('userData'), 'logs'))
   settingsFile = path.join(app.getPath('userData'), 'settings.json')
   settings = loadSettings(settingsFile)
+  // 默认独立 DSH_HOME：首次切换时迁移旧 ~/.dsh 数据（与 web 版/CLI 共存不冲突）
+  migrateToIsolatedHome()
 
   const token = randomBytes(16).toString('hex')
   launchToken = token

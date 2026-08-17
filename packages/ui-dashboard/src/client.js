@@ -640,18 +640,8 @@ return {
       DashboardPanel
     ))
 
-    // ---- 注册：会话标签页「仪表盘」（加法席位，与内置「对话」/「轨迹」并列） ----
-    ctx.slots.inject('conversation.view', () => ctx.slots.register(
-      {
-        name: 'conversation.view',
-        id: 'dashboard',
-        order: 20,
-        locale: NS,
-        label: () => t('view.dashboard'),
-        inject: (sessionId) => ({ sessionId, tab: true, closeDetails: () => ctx.layout.closeDetails() })
-      },
-      DashboardPanel
-    ))
+    // 注：不再注册 conversation.view 会话标签页——仪表盘只出现在右侧栏
+    // （用户要求：对话/轨迹标签保持官方原样）
 
     // ---- 注册：会话头部入口（加法席位，不遮蔽任何现有 UI） ----
     ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register(
