@@ -1,5 +1,5 @@
 /**
- * dsh-desktop-plugin-manager · Client 半边
+ * dsh-desktop-better-setting · Client 半边
  *
  * 在官方设置页的「插件」区注册 4 个独立 tab（order 20-23，排在官方
  * 「插件配置」(0) / 「插件列表」(15) 之后）：
@@ -16,7 +16,7 @@
 return {
   inject: ['slots', 'layout', 'locale', 'connection'],
   apply(ctx) {
-    const NS = 'pluginManager'
+    const NS = 'betterSetting'
     const t = ctx.locale.bind(NS)
 
     const zh = {
@@ -94,7 +94,7 @@ return {
       'collapse': 'Collapse',
     }
 
-    ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'plugin-manager: dictionaries')
+    ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'better-setting: dictionaries')
 
     const RPC = (endpoint, args) => {
       const conn = ctx.get('connection')
@@ -164,7 +164,7 @@ return {
 .pm-catTitle{display:flex;align-items:center;gap:8px;margin-top:4px}
 .pm-catLabel{font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary)}
 .pm-catCount{font-size:11px;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-module-platform);border-radius:999px;padding:0 8px;line-height:18px}
-`), 'plugin-manager: styles')
+`), 'better-setting: styles')
 
     // ---- 通用小组件 ----
 

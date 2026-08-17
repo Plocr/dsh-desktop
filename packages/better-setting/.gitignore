@@ -1,0 +1,4 @@
+﻿node_modules/
+lib/client.js
+*.log
+.DS_Store

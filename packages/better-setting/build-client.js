@@ -1,13 +1,10 @@
 /**
- * build-client.js — 把 dsh-desktop-plugin-manager 的动态插件 Client 半边
- * （src/client.js）转换为持久插件的浏览器 bundle（lib/client.js）。
- *
- * 转换内容（照 ui-dashboard 的 build-client.js 模式）：
- *  1. 包一层 `window.__ModuleLoader__.load({ id, factory })`（官方 bundle 形态）；
- *  2. `React` 从模块表 require（动态版是 runner 闭包形参）；
- *  3. `host` 替身（apply 时接到 `ctx.connection.rpc.call('/rpc', …)`）；
- *  4. `return { inject, apply }` → `var plugin = { … }` + exports 导出。
- */
+ * build-client.js 鈥?鎶?dsh-desktop-better-setting 鐨勫姩鎬佹彃浠?Client 鍗婅竟
+ * 锛坰rc/client.js锛夎浆鎹负鎸佷箙鎻掍欢鐨勬祻瑙堝櫒 bundle锛坙ib/client.js锛夈€? *
+ * 杞崲鍐呭锛堢収 ui-dashboard 鐨?build-client.js 妯″紡锛夛細
+ *  1. 鍖呬竴灞?`window.__ModuleLoader__.load({ id, factory })`锛堝畼鏂?bundle 褰㈡€侊級锛? *  2. `React` 浠庢ā鍧楄〃 require锛堝姩鎬佺増鏄?runner 闂寘褰㈠弬锛夛紱
+ *  3. `host` 鏇胯韩锛坅pply 鏃舵帴鍒?`ctx.connection.rpc.call('/rpc', 鈥?`锛夛紱
+ *  4. `return { inject, apply }` 鈫?`var plugin = { 鈥?}` + exports 瀵煎嚭銆? */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,19 +12,19 @@ import { fileURLToPath } from 'node:url'
 const root = dirname(fileURLToPath(import.meta.url))
 const src = readFileSync(join(root, 'src', 'client.js'), 'utf8').replace(/\r\n/g, '\n')
 
-// ---- 断言：转换锚点唯一 ----
+// ---- 鏂█锛氳浆鎹㈤敋鐐瑰敮涓€ ----
 const returnAnchor = 'return {\n  inject: [\'slots\', \'layout\', \'locale\', \'connection\'],\n  apply(ctx) {'
 if (!src.includes(returnAnchor)) throw new Error('plugin-object anchor not found')
-// 注意：组件里可能还有 `return { ... }`（对象字面量），不能数 `return {` 次数
+// 娉ㄦ剰锛氱粍浠堕噷鍙兘杩樻湁 `return { ... }`锛堝璞″瓧闈㈤噺锛夛紝涓嶈兘鏁?`return {` 娆℃暟
 if ((src.match(new RegExp(returnAnchor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) ?? []).length !== 1) {
   throw new Error('plugin-object anchor must be unique')
 }
 
-// ---- 1. 插件对象：return -> var plugin，并在 apply 开头接好 host.call ----
+// ---- 1. 鎻掍欢瀵硅薄锛歳eturn -> var plugin锛屽苟鍦?apply 寮€澶存帴濂?host.call ----
 const hostWiring = `var plugin = {
   inject: ['slots', 'layout', 'locale', 'connection'],
   apply(ctx) {
-    // ---- 持久安装版：把 host.call 接到 connection 的 /pm-rpc 通道 ----
+    // ---- 鎸佷箙瀹夎鐗堬細鎶?host.call 鎺ュ埌 connection 鐨?/pm-rpc 閫氶亾 ----
     host.call = function (endpoint, args) {
       var conn = ctx.get('connection')
       if (conn === void 0 || conn.rpc === void 0) return Promise.reject(new Error('plugin-manager: connection service unavailable'))
@@ -39,8 +36,8 @@ const hostWiring = `var plugin = {
 `
 let body = src.replace(returnAnchor, hostWiring)
 
-// ---- 2. RPC 调用改走 host.call（持久版替身） ----
-// client.js 里直接定义了 RPC 闭包用 ctx.connection.rpc.call；这里把函数体替换为 host.call
+// ---- 2. RPC 璋冪敤鏀硅蛋 host.call锛堟寔涔呯増鏇胯韩锛?----
+// client.js 閲岀洿鎺ュ畾涔変簡 RPC 闂寘鐢?ctx.connection.rpc.call锛涜繖閲屾妸鍑芥暟浣撴浛鎹负 host.call
 const rpcAnchor = `    const RPC = (endpoint, args) => {
       const conn = ctx.get('connection')
       if (!conn || !conn.rpc) return Promise.reject(new Error('connection service unavailable'))
@@ -54,26 +51,25 @@ const rpcReplacement = `    const RPC = (endpoint, args) => host.call(endpoint, 
 if (!body.includes(rpcAnchor)) throw new Error('rpc anchor not found')
 body = body.replace(rpcAnchor, rpcReplacement)
 
-// ---- 3. 尾部：闭合 plugin 对象后导出 ----
+// ---- 3. 灏鹃儴锛氶棴鍚?plugin 瀵硅薄鍚庡鍑?----
 const tailAnchor = "    )\n  },\n}\n"
 if (!body.endsWith(tailAnchor)) throw new Error('tail anchor not found')
 body = body.slice(0, body.length - tailAnchor.length) +
   "    )\n  },\n}\nexports.inject = plugin.inject\nexports.apply = plugin.apply\n"
 
-// ---- 4. 包装：ModuleLoader factory + React/styles/host ----
+// ---- 4. 鍖呰锛歁oduleLoader factory + React/styles/host ----
 const header = `window.__ModuleLoader__.load({
-  id: 'dsh-desktop-plugin-manager',
+  id: 'dsh-desktop-better-setting',
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
-    // 持久安装版适配：动态版的 runner 闭包形参（React / styles / host）在此提供。
-    var React = require('react');
+    // 鎸佷箙瀹夎鐗堥€傞厤锛氬姩鎬佺増鐨?runner 闂寘褰㈠弬锛圧eact / styles / host锛夊湪姝ゆ彁渚涖€?    var React = require('react');
     var styles = {
       insert: function (css) {
         if (typeof document === 'undefined') return function () {};
         var tag = document.createElement('style');
-        tag.dataset.plugin = 'dsh-desktop-plugin-manager';
+        tag.dataset.plugin = 'dsh-desktop-better-setting';
         tag.textContent = css;
         document.head.append(tag);
         return function () { tag.remove(); };

@@ -1,5 +1,5 @@
 /**
- * dsh-desktop-plugin-manager · Host 半边
+ * dsh-desktop-better-setting · Host 半边
  *
  * 桌面端插件管理系统（四类分区：官方 / 桌面 / 用户 / 市场）。
  *
@@ -20,7 +20,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, rmSync
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 
-export const name = 'dsh-desktop-plugin-manager'
+export const name = 'dsh-desktop-better-setting'
 
 /** 需要 connection 服务以挂载 RPC 通道。 */
 export const inject = ['connection']
@@ -413,10 +413,10 @@ export function apply(ctx, config) {
               ? { ok: true, value: r }
               : { ok: false, error: { code: 'internal', message: r.message } }
           }
-          return { ok: false, error: { code: 'internal', message: `plugin-manager: unknown rpc "${String(endpoint)}"` } }
+          return { ok: false, error: { code: 'internal', message: `better-setting: unknown rpc "${String(endpoint)}"` } }
         },
         { authority: 'loopback' },
       ),
-    'dsh-desktop-plugin-manager: rpc',
+    'dsh-desktop-better-setting: rpc',
   )
 }
