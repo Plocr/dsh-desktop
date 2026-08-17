@@ -27,10 +27,10 @@ const hostWiring = `var plugin = {
     // ---- 鎸佷箙瀹夎鐗堬細鎶?host.call 鎺ュ埌 connection 鐨?/pm-rpc 閫氶亾 ----
     host.call = function (endpoint, args) {
       var conn = ctx.get('connection')
-      if (conn === void 0 || conn.rpc === void 0) return Promise.reject(new Error('plugin-manager: connection service unavailable'))
+      if (conn === void 0 || conn.rpc === void 0) return Promise.reject(new Error('better-setting: connection service unavailable'))
       return conn.rpc.call('/pm-rpc', endpoint, args === void 0 ? null : { args }).then(function (r) {
         if (r.ok) return r.value
-        throw new Error('plugin-manager rpc "' + String(endpoint) + '" failed: ' + ((r.error && r.error.message) || 'unknown'))
+        throw new Error('better-setting rpc "' + String(endpoint) + '" failed: ' + ((r.error && r.error.message) || 'unknown'))
       })
     }
 `
@@ -64,7 +64,7 @@ const header = `window.__ModuleLoader__.load({
     var module = { exports: {} };
     var exports = module.exports;
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
-    // 鎸佷箙瀹夎鐗堥€傞厤锛氬姩鎬佺増鐨?runner 闂寘褰㈠弬锛圧eact / styles / host锛夊湪姝ゆ彁渚涖€?    var React = require('react');
+    var React = require('react');
     var styles = {
       insert: function (css) {
         if (typeof document === 'undefined') return function () {};
@@ -77,7 +77,7 @@ const header = `window.__ModuleLoader__.load({
     };
     var host = {
       call: function () {
-        return Promise.reject(new Error('plugin-manager: host.call not wired (apply not run)'));
+        return Promise.reject(new Error('better-setting: host.call not wired (apply not run)'));
       }
     };
 `
