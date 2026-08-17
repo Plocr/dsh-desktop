@@ -5,7 +5,13 @@
  * 1. 「插件」区 4 个独立 tab（order 20-23，排在官方「插件配置」(0) /
  *    「插件列表」(15) 之后）：官方插件 / Desktop 插件 / 用户插件 / 插件市场。
  * 2. 通用设置 → 外观 下方的「个性化」二级菜单（order 11）：
- *    皮肤预设（互斥）/ 主题强调色 / 壁纸（图片·视频·HTML）/ 毛玻璃模糊 / 液态玻璃。
+ *    皮肤预设（互斥）/ 主题强调色 / 壁纸（自上传图片·视频·HTML +
+ *    Wallpaper Engine 视频/网页壁纸）/ 壁纸模糊·暗化·边框·玻璃 四个旋钮。
+ *    壁纸与液态玻璃参考 dsh-wallpaper-engine 的实现方式：
+ *    - 宿主经 webServer 注册同源路由（/dsh-desktop-wallpapers/inventory +
+ *      media/<token>，Range 流式），浏览器直接 fetch/播放，不走 base64；
+ *    - 客户端在 body 后挂固定定位壁纸层 + 遮罩层，body[data-dsh-wallpaper]
+ *      驱动的 token 透明化 + [data-composer-card]/_bubble 的 iOS 液态玻璃配方。
  *    应用逻辑常驻（shell.overlay 全局应用器渲染 null），改动即时生效并持久化
  *    到壳 settings.json 的 personalization 字段（经宿主 /pm-rpc）。
  *
@@ -64,19 +70,32 @@ return {
       'personalization.accent.custom': '自定义',
       'personalization.accent.reset': '默认',
       'personalization.wallpaper': '壁纸',
-      'personalization.wallpaper.hint': '支持图片 / 视频 / HTML，保存后将作为应用背景（仅本机）',
+      'personalization.wallpaper.hint': '支持图片 / 视频 / HTML 与 Wallpaper Engine（WE 仅视频/网页壁纸）',
       'personalization.wallpaper.upload': '上传壁纸',
       'personalization.wallpaper.apply': '应用',
       'personalization.wallpaper.remove': '删除',
       'personalization.wallpaper.none': '无壁纸',
       'personalization.wallpaper.active': '使用中',
       'personalization.wallpaper.invalid': '不支持的壁纸类型',
-      'personalization.blur': '模糊',
-      'personalization.blur.hint': '面板背后的毛玻璃模糊强度（0-40px）',
+      'personalization.wallpaper.custom': '本地壁纸',
+      'personalization.wallpaper.we': 'Wallpaper Engine',
+      'personalization.wallpaper.we.empty': '未检测到 Wallpaper Engine（需 Steam 安装）',
+      'personalization.wallpaper.we.placeholder': '选择 WE 壁纸…',
+      'personalization.wallpaper.scanning': '扫描壁纸…',
+      'personalization.wallpaper.retry': '重试',
+      'personalization.wallpaper.play': '播放',
+      'personalization.wallpaper.pause': '暂停',
+      'personalization.blur': '玻璃',
+      'personalization.blur.hint': '面板（输入栏/气泡）毛玻璃模糊半径，0 关闭',
+      'personalization.wallpaperBlur': '壁纸模糊',
+      'personalization.scrim': '暗化',
+      'personalization.scrim.hint': '壁纸与文字之间的暗色遮罩强度',
+      'personalization.border': '边框',
+      'personalization.border.hint': '边框 / 分割线对比度（浅色模式看不清时调高）',
       'personalization.skin': '皮肤',
       'personalization.skin.hint': '整体色调预设，互斥选择',
       'personalization.glass': '液态玻璃',
-      'personalization.glass.hint': '更通透的面板 + 背景模糊 + 高光质感',
+      'personalization.glass.hint': '壁纸激活时自动启用：半透明面板 + 背景模糊 + 高光质感（iOS 风格）',
       'personalization.saved': '已保存',
       'personalization.failed': '保存失败：{message}',
       'personalization.age': '{size} KB',
@@ -126,19 +145,32 @@ return {
       'personalization.accent.custom': 'Custom',
       'personalization.accent.reset': 'Default',
       'personalization.wallpaper': 'Wallpaper',
-      'personalization.wallpaper.hint': 'Image / video / HTML supported; becomes the app background (local only)',
+      'personalization.wallpaper.hint': 'Image / video / HTML and Wallpaper Engine (WE: video & web only)',
       'personalization.wallpaper.upload': 'Upload wallpaper',
       'personalization.wallpaper.apply': 'Apply',
       'personalization.wallpaper.remove': 'Remove',
       'personalization.wallpaper.none': 'No wallpaper',
       'personalization.wallpaper.active': 'Active',
       'personalization.wallpaper.invalid': 'Unsupported wallpaper type',
-      'personalization.blur': 'Blur',
-      'personalization.blur.hint': 'Frosted-glass blur strength behind panels (0-40px)',
+      'personalization.wallpaper.custom': 'Local wallpapers',
+      'personalization.wallpaper.we': 'Wallpaper Engine',
+      'personalization.wallpaper.we.empty': 'Wallpaper Engine not detected (Steam install required)',
+      'personalization.wallpaper.we.placeholder': 'Pick a WE wallpaper…',
+      'personalization.wallpaper.scanning': 'Scanning wallpapers…',
+      'personalization.wallpaper.retry': 'Retry',
+      'personalization.wallpaper.play': 'Play',
+      'personalization.wallpaper.pause': 'Pause',
+      'personalization.blur': 'Glass',
+      'personalization.blur.hint': 'Frosted-glass blur radius on panels (composer/bubbles), 0 disables',
+      'personalization.wallpaperBlur': 'Wallpaper blur',
+      'personalization.scrim': 'Scrim',
+      'personalization.scrim.hint': 'Dark overlay strength between wallpaper and text',
+      'personalization.border': 'Border',
+      'personalization.border.hint': 'Border/divider contrast (raise it if light-mode text is hard to read)',
       'personalization.skin': 'Skin',
       'personalization.skin.hint': 'Overall tone presets, mutually exclusive',
       'personalization.glass': 'Liquid glass',
-      'personalization.glass.hint': 'More translucent panels + background blur + specular sheen',
+      'personalization.glass.hint': 'Auto-enabled with a wallpaper: translucent panels + background blur + sheen (iOS-style)',
       'personalization.saved': 'Saved',
       'personalization.failed': 'Save failed: {message}',
       'personalization.age': '{size} KB',
@@ -214,6 +246,8 @@ return {
 .pm-catTitle{display:flex;align-items:center;gap:8px;margin-top:4px}
 .pm-catLabel{font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary)}
 .pm-catCount{font-size:11px;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-module-platform);border-radius:999px;padding:0 8px;line-height:18px}
+.pm-slider{flex:1;min-width:80px;accent-color:var(--dsw-alias-brand-primary,#3964fe);cursor:pointer}
+.pm-select{max-width:100%;accent-color:var(--dsw-alias-brand-primary,#3964fe)}
 `), 'better-setting: styles')
 
     // ---- 通用小组件 ----
@@ -615,7 +649,7 @@ return {
     const ACCENT_PRESETS = ['#3964fe', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#14b8a6']
 
     /** 默认个性化设置（与宿主 DEFAULT_PERSONALIZATION 保持一致）。 */
-    const DEFAULT_PERSONALIZATION = { skin: 'default', accent: null, wallpaper: null, blur: 16, glass: false }
+    const DEFAULT_PERSONALIZATION = { skin: 'default', accent: null, wallpaper: null, blur: 24, wallpaperBlur: 0, scrim: 0.25, border: 0.35, playing: true }
 
     /** 模块级共享状态：Applier 与设置行共用同一份个性化设置。 */
     const pStore = { state: null, listeners: [] }
@@ -650,36 +684,12 @@ return {
       }
     }
 
-    /** 颜色工具：hex/rgb -> rgba 字符串。 */
-    function toRgba(color, alpha) {
-      const c = String(color || '').trim()
-      let r = 128, g = 128, b = 128
-      const mHex = /^#?([0-9a-f]{6})$/i.exec(c)
-      if (mHex) {
-        const n = parseInt(mHex[1], 16)
-        r = (n >> 16) & 255; g = (n >> 8) & 255; b = n & 255
-      } else {
-        const mRgb = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(c)
-        if (mRgb) {
-          r = Number(mRgb[1]); g = Number(mRgb[2]); b = Number(mRgb[3])
-        }
-      }
-      return `rgba(${r}, ${g}, ${b}, ${alpha})`
-    }
-
-    /** 读取当前生效的 CSS 变量值（用于「无皮肤」时按当前主题取基础色）。 */
-    function resolveToken(name) {
-      try {
-        if (typeof document === 'undefined') return null
-        return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || null
-      } catch { return null }
-    }
+    // （toRgba/resolveToken 已随旧「token 半透明化」方案移除；现在由 body[data-dsh-wallpaper] CSS 层处理）
 
     /**
      * 由设置计算主题 token 覆盖层（theme.overrideTokens 契约：name -> { light, dark }）。
-     * - 皮肤：整体色调（默认皮肤不覆盖）；
-     * - 强调色：仅覆盖 brand-primary；
-     * - 壁纸/液态玻璃：把背景系 token 换成半透明（毛玻璃透出壁纸）。
+     * 仅覆盖皮肤整体色调与强调色；壁纸/玻璃的透明化走 body[data-dsh-wallpaper]
+     * 的 CSS 层（参考 dsh-wallpaper-engine），不干扰主题注册表。
      */
     function buildTokenLayers(state) {
       const s = state || DEFAULT_PERSONALIZATION
@@ -687,139 +697,241 @@ return {
       const tokens = {}
       for (const [name, pair] of Object.entries(skin.tokens || {})) tokens[name] = { light: pair.light, dark: pair.dark }
       if (s.accent) tokens['--dsw-alias-brand-primary'] = { light: s.accent, dark: s.accent }
-      const translucent = !!s.wallpaper || !!s.glass
-      if (translucent) {
-        const glass = !!s.glass
-        const alpha = { base: glass ? 0.30 : 0.72, layer1: glass ? 0.40 : 0.82, layer2: glass ? 0.52 : 0.90, overlay: glass ? 0.68 : 0.94, sidebar: glass ? 0.34 : 0.80 }
-        const pick = (name, fallback) => {
-          const pair = skin.tokens && skin.tokens[name]
-          const base = pair ? pair.light : (resolveToken(name) || fallback)
-          return base
-        }
-        const a = alpha
-        tokens['--dsw-alias-bg-base'] = { light: toRgba(pick('--dsw-alias-bg-base', '#f5f6f8'), a.base), dark: toRgba(pick('--dsw-alias-bg-base', '#0b0d12'), a.base) }
-        tokens['--dsw-alias-bg-layer-1'] = { light: toRgba(pick('--dsw-alias-bg-layer-1', '#ffffff'), a.layer1), dark: toRgba(pick('--dsw-alias-bg-layer-1', '#16181d'), a.layer1) }
-        tokens['--dsw-alias-bg-layer-2'] = { light: toRgba(pick('--dsw-alias-bg-layer-2', '#ffffff'), a.layer2), dark: toRgba(pick('--dsw-alias-bg-layer-2', '#1d2026'), a.layer2) }
-        tokens['--dsw-alias-bg-overlay'] = { light: toRgba(pick('--dsw-alias-bg-overlay', '#ffffff'), a.overlay), dark: toRgba(pick('--dsw-alias-bg-overlay', '#232630'), a.overlay) }
-        tokens['--dsw-specific-sidebar-fill'] = { light: toRgba(pick('--dsw-specific-sidebar-fill', '#eef0f4'), a.sidebar), dark: toRgba(pick('--dsw-specific-sidebar-fill', '#0f1115'), a.sidebar) }
-      }
       return tokens
     }
 
-    /** 壁纸 DOM 层：图片背景 / 视频 / HTML iframe，挂在 body 最底层。 */
-    function ensureWallpaperLayer() {
-      if (typeof document === 'undefined') return null
-      let el = document.getElementById('dsh-desktop-wallpaper-layer')
-      if (!el) {
-        el = document.createElement('div')
-        el.id = 'dsh-desktop-wallpaper-layer'
-        document.body.appendChild(el)
-      }
-      return el
+    // ── 壁纸媒体层（参考 dsh-wallpaper-engine）：同源 HTTP 流式 URL + 固定定位层 ──
+
+    /** 媒体 inventory 请求地址（宿主 webServer 注册，见 lib/index.js）。 */
+    const WP_INVENTORY_URL = '/dsh-desktop-wallpapers/inventory'
+    const LAYER_ID = 'dsh-desktop-wallpaper-layer'
+    const SCRIM_ID = 'dsh-desktop-scrim'
+    const ACTIVE_ATTR = 'data-dsh-wallpaper'
+
+    async function fetchWallpaperInventory() {
+      const res = await fetch(WP_INVENTORY_URL, { cache: 'no-store' })
+      if (!res.ok) throw new Error('inventory HTTP ' + res.status)
+      return res.json()
     }
-    function clearWallpaperLayer() {
-      const el = ensureWallpaperLayer()
-      if (!el) return
-      el.style.backgroundImage = ''
-      el.textContent = ''
+
+    /** 按 id（custom:xxx / we:xxx）在 inventory 中查找壁纸条目。 */
+    function findWallpaper(inv, id) {
+      if (!inv || !id) return null
+      return [...(inv.custom || []), ...(inv.we || [])].find((w) => w.id === id) || null
     }
-    function applyWallpaperLayer(wpData) {
-      const el = ensureWallpaperLayer()
-      if (!el || !wpData) { clearWallpaperLayer(); return }
-      el.textContent = ''
-      el.style.backgroundImage = ''
-      const mime = String(wpData.mime || '').toLowerCase()
-      if (mime.startsWith('image/')) {
-        el.style.backgroundImage = `url("${wpData.dataUrl}")`
-      } else if (mime.startsWith('video/')) {
+
+    /** 夹取 0..1（scrim/border 用）。 */
+    function clamp01(v) {
+      return Math.max(0, Math.min(1, Number(v) || 0))
+    }
+
+    /** 滑块行（onInput 即时生效，onChange 兜底提交）。 */
+    function SliderRow(label, min, max, step, value, suffix, onInput) {
+      return e('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+        e('span', { className: 'pm-hint', style: { minWidth: 52, flex: 'none' } }, label),
+        e('input', {
+          type: 'range',
+          min: String(min), max: String(max), step: String(step),
+          value: String(value),
+          className: 'pm-slider',
+          'aria-label': label,
+          onInput: (ev) => onInput(Number(ev.target.value)),
+          onChange: (ev) => onInput(Number(ev.target.value)),
+        }),
+        e('span', { className: 'pm-stars', style: { minWidth: 44, textAlign: 'right', flex: 'none' } }, suffix),
+      )
+    }
+
+    /** 构建壁纸媒体元素：video / iframe / 图片背景。 */
+    function buildMediaElement(item) {
+      if (item.type === 'video') {
         const v = document.createElement('video')
-        v.src = wpData.dataUrl
+        v.src = item.media
         v.autoplay = true
         v.muted = true
         v.loop = true
-        v.playsInline = true
-        v.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover'
-        el.appendChild(v)
-        const play = () => v.play().catch(() => {})
-        v.addEventListener('loadeddata', play)
-        if (v.readyState >= 1) play()
-      } else if (mime === 'text/html') {
-        const f = document.createElement('iframe')
-        f.sandbox = 'allow-scripts'
-        f.src = wpData.dataUrl
-        f.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:0'
-        el.appendChild(f)
+        v.setAttribute('playsinline', '')
+        return v
       }
+      if (item.type === 'web') {
+        const f = document.createElement('iframe')
+        f.src = item.media
+        f.setAttribute('frameborder', '0')
+        f.setAttribute('scrolling', 'no')
+        f.allow = 'autoplay'
+        return f
+      }
+      return null // image → 由图层 background-image 渲染
     }
 
-    /** 个性化主 CSS（随状态刷新）。 */
+    /** 同步壁纸层 + 遮罩层（常驻 DOM，非 slot）。 */
+    function syncWallpaperLayers(active, playing) {
+      const dump = (el) => { if (el) el.remove() }
+      const layer = document.getElementById(LAYER_ID)
+      if (!active) {
+        dump(layer)
+        dump(document.getElementById(SCRIM_ID))
+        document.body.removeAttribute(ACTIVE_ATTR)
+        return
+      }
+      const wantKey = active.id + '\u0000' + active.type + '\u0000' + active.media
+      const gotKey = layer && layer.dataset.weKey
+      if (layer && gotKey !== wantKey) { layer.remove(); }
+      let node = document.getElementById(LAYER_ID)
+      if (!node) {
+        node = document.createElement('div')
+        node.id = LAYER_ID
+        node.dataset.weKey = wantKey
+        document.body.appendChild(node)
+      }
+      node.textContent = ''
+      node.style.backgroundImage = ''
+      node.style.backgroundSize = 'cover'
+      node.style.backgroundPosition = 'center'
+      if (active.type === 'image') {
+        node.style.backgroundImage = `url("${active.media}")`
+      } else {
+        const media = buildMediaElement(active)
+        if (media) node.appendChild(media)
+      }
+      if (active.type === 'video') {
+        const video = node.querySelector('video')
+        if (video) {
+          if (playing) { try { video.play().catch(() => {}) } catch { /* ignore */ } }
+          else video.pause()
+        }
+      }
+      // 遮罩
+      let scrim = document.getElementById(SCRIM_ID)
+      if (!scrim) {
+        scrim = document.createElement('div')
+        scrim.id = SCRIM_ID
+        document.body.appendChild(scrim)
+      }
+      document.body.setAttribute(ACTIVE_ATTR, 'on')
+    }
+
+    /** 把旋钮写入 CSS 变量 + 遮罩内联色（即时生效，强制重排防止合成器滞后）。 */
+    function applyGlassKnobs(state) {
+      const s = document.body.style
+      s.setProperty('--dsh-scrim-color', `rgba(0,0,0,${state.scrim})`)
+      s.setProperty('--dsh-border-alpha', String(state.border))
+      s.setProperty('--dsh-blur', (state.blur || 0) + 'px')
+      s.setProperty('--dsh-wallpaper-blur', (state.wallpaperBlur || 0) + 'px')
+      const scale = (1 + (state.wallpaperBlur || 0) * 0.006).toFixed(4)
+      s.setProperty('--dsh-wallpaper-scale', scale)
+      const scrim = document.getElementById(SCRIM_ID)
+      if (scrim) scrim.style.background = `rgba(0,0,0,${state.scrim})`
+      if (document.body && document.body.offsetHeight !== undefined) void document.body.offsetHeight
+    }
+
+    /** 个性化主 CSS：壁纸层/遮罩 + 框架透明化 + iOS 液态玻璃配方（参考实现）。 */
     function personalizationCss() {
       return `
-#dsh-desktop-wallpaper-layer{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden;background-size:cover;background-position:center;background-repeat:no-repeat}
-html[data-dsh-wallpaper="on"] #root,html[data-dsh-glass="on"] #root{backdrop-filter:blur(var(--dsh-glass-blur,16px));-webkit-backdrop-filter:blur(var(--dsh-glass-blur,16px))}
-html[data-dsh-wallpaper="on"] body,html[data-dsh-glass="on"] body{background:transparent}
-html[data-dsh-glass="on"] #root::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;background:linear-gradient(135deg,rgba(255,255,255,.10),rgba(255,255,255,0) 45%);mix-blend-mode:overlay}
+/* 壁纸层：body 的子节点，沉到应用框架之下（模糊/放大走 CSS 变量，统一来源） */
+#dsh-desktop-wallpaper-layer{position:fixed;inset:0;z-index:-2;overflow:hidden;pointer-events:none;background-size:cover;background-position:center;background-repeat:no-repeat;filter:blur(var(--dsh-wallpaper-blur,0px));transform:scale(var(--dsh-wallpaper-scale,1));transform-origin:center}
+#dsh-desktop-wallpaper-layer video,#dsh-desktop-wallpaper-layer iframe{width:100%;height:100%;object-fit:cover;display:block;background:transparent;border:0}
+/* 遮罩：在壁纸上（-1 > -2）、在 UI 下，不依赖 DOM 插入顺序 */
+#dsh-desktop-scrim{position:fixed;inset:0;z-index:-1;pointer-events:none;background:var(--dsh-scrim-color,rgba(0,0,0,.25))}
+/* 壁纸激活时：框架与侧栏背景透明，边框提升对比度 */
+body[data-dsh-wallpaper]{
+  --dsw-alias-bg-base:transparent;
+  --dsw-specific-sidebar-fill:transparent;
+  --dsw-alias-border-l1:rgba(180,180,180,var(--dsh-border-alpha,.35));
+  --dsw-alias-border-l2:rgba(180,180,180,var(--dsh-border-alpha,.35));
+  --dsw-alias-border-l2-darkmode-thin:rgba(180,180,180,var(--dsh-border-alpha,.35));
+}
+/* 浅色模式文字对比度增强（深色模式白字本就清晰） */
+body[data-dsh-wallpaper]:not([data-ds-dark-theme]){
+  --dsw-alias-label-primary:rgb(0,0,0);
+  --dsw-alias-label-primary-dimmed:rgb(10,10,12);
+  --dsw-alias-label-secondary:rgb(40,42,46);
+  --dsw-alias-label-tertiary:rgb(70,73,79);
+  --dsw-alias-label-caption:rgb(110,114,120);
+  --dsw-alias-label-dimmed:rgb(50,52,56);
+}
+/* 面板（输入栏/气泡）半透明化：token 驱动，无需感知 CSS module 哈希类名 */
+body[data-dsh-wallpaper]{
+  --dsw-specific-input-major:rgba(255,255,255,.18);
+  --dsw-specific-bubble:rgba(255,255,255,.14);
+}
+body[data-ds-dark-theme][data-dsh-wallpaper]{
+  --dsw-specific-input-major:rgba(255,255,255,.07);
+  --dsw-specific-bubble:rgba(255,255,255,.06);
+}
+/* iOS 液态玻璃：大半径模糊 + 高饱和 + 亮度增强 + 顶部高光 + 软阴影 */
+body[data-dsh-wallpaper] [data-composer-card],
+body[data-dsh-wallpaper] [class*="_bubble"]{
+  -webkit-backdrop-filter:blur(var(--dsh-blur,24px)) saturate(1.8) brightness(1.08);
+  backdrop-filter:blur(var(--dsh-blur,24px)) saturate(1.8) brightness(1.08);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.3),inset 0 -1px 0 rgba(255,255,255,.05),0 8px 32px rgba(0,0,0,.14);
+}
 `
     }
 
     /**
-     * 全局应用器：常驻（注册在 shell.overlay，渲染 null），
-     * 负责把个性化设置落地：theme token 覆盖 + 壁纸层 + html 属性/CSS。
+     * 全局应用器：常驻（注册在 shell.overlay，渲染 null）。
+     * 拉取壁纸 inventory，把选择/旋钮落地：theme token 覆盖 + 壁纸层 + 遮罩 +
+     * CSS 变量 + body 属性（改动即时生效，卸载时整体还原）。
      */
     function PersonalizationApplier() {
       const state = usePState()
-      const activeName = state && state.wallpaper ? state.wallpaper : null
-      const [wpData, setWpData] = useState(null)
+      const [inventory, setInventory] = useState(null)
+      const disposerRef = useRef(null)
 
-      // 首次挂载读取持久化设置
-      useEffect(() => { loadPState() }, [])
-
-      // 读取当前壁纸内容（data URL）
+      // 首次挂载：读持久化设置 + 拉取 inventory + 注入静态 CSS
       useEffect(() => {
-        if (!activeName) { setWpData(null); return }
-        let cancelled = false
-        RPC('personalization.getWallpaperData', { name: activeName })
-          .then((r) => { if (!cancelled) setWpData(r) })
-          .catch(() => { if (!cancelled) setWpData(null) })
-        return () => { cancelled = true }
-      }, [activeName])
+        loadPState()
+        fetchWallpaperInventory().then(setInventory).catch(() => {})
+        const styleEl = document.createElement('style')
+        styleEl.id = 'dsh-desktop-personalization-style'
+        styleEl.dataset.plugin = 'dsh-desktop-better-setting'
+        styleEl.textContent = personalizationCss()
+        document.head.appendChild(styleEl)
+        // 卸载时整体还原（层/遮罩/属性/CSS 变量/token 覆盖）
+        return () => {
+          if (disposerRef.current) { try { disposerRef.current() } catch { /* ignore */ } }
+          const layer = document.getElementById(LAYER_ID)
+          if (layer) layer.remove()
+          const scrim = document.getElementById(SCRIM_ID)
+          if (scrim) scrim.remove()
+          document.body.removeAttribute(ACTIVE_ATTR)
+          const st = document.body.style
+          st.removeProperty('--dsh-scrim-color')
+          st.removeProperty('--dsh-border-alpha')
+          st.removeProperty('--dsh-blur')
+          st.removeProperty('--dsh-wallpaper-blur')
+          st.removeProperty('--dsh-wallpaper-scale')
+          const s2 = document.getElementById('dsh-desktop-personalization-style')
+          if (s2) s2.remove()
+        }
+      }, [])
 
-      // 落地：token 覆盖 + 壁纸层 + 属性/CSS（改动即时生效，卸载时还原）
+      // 状态同步：token 覆盖 + 壁纸层 + 遮罩 + 旋钮 CSS 变量（幂等，不拆层，视频不中断）
       useEffect(() => {
         if (!state) return
+        if (disposerRef.current) {
+          try { disposerRef.current() } catch { /* ignore */ }
+          disposerRef.current = null
+        }
         const tokens = buildTokenLayers(state)
         const themeSvc = ctx.get('theme')
-        const disposers = []
         if (themeSvc && typeof themeSvc.overrideTokens === 'function') {
           try {
-            disposers.push(themeSvc.overrideTokens('dsh-desktop-personalization', tokens))
+            disposerRef.current = themeSvc.overrideTokens('dsh-desktop-personalization', tokens)
           } catch { /* 覆盖层校验失败时忽略 */ }
         }
-        // 壁纸层
-        if (activeName && wpData) applyWallpaperLayer(wpData)
-        else clearWallpaperLayer()
-        // html 属性 + CSS 变量
+        // 旧版兼容：wallpaper 曾是裸文件名（custom 来源），迁移到 custom: 前缀
+        let activeId = state.wallpaper || null
+        if (activeId && !/^(custom|we):/.test(activeId) && findWallpaper(inventory, 'custom:' + activeId)) {
+          activeId = 'custom:' + activeId
+        }
+        const active = findWallpaper(inventory, activeId)
+        syncWallpaperLayers(active, state.playing !== false)
+        applyGlassKnobs(state)
         const root = typeof document !== 'undefined' ? document.documentElement : null
-        if (root) {
-          root.setAttribute('data-dsh-wallpaper', activeName ? 'on' : 'off')
-          root.setAttribute('data-dsh-glass', state.glass ? 'on' : 'off')
-          root.setAttribute('data-dsh-skin', state.skin || 'default')
-          const alignedBlur = Math.max(0, Math.min(40, Number(state.blur) || 0))
-          root.style.setProperty('--dsh-glass-blur', alignedBlur + 'px')
-        }
-        let styleEl = typeof document !== 'undefined' ? document.getElementById('dsh-desktop-personalization-style') : null
-        if (styleEl) styleEl.textContent = personalizationCss()
-        else if (typeof document !== 'undefined') {
-          styleEl = document.createElement('style')
-          styleEl.id = 'dsh-desktop-personalization-style'
-          styleEl.dataset.plugin = 'dsh-desktop-better-setting'
-          styleEl.textContent = personalizationCss()
-          document.head.appendChild(styleEl)
-        }
-        return () => {
-          for (const d of disposers) { try { d() } catch { /* ignore */ } }
-        }
-      }, [state, activeName, wpData])
+        if (root) root.setAttribute('data-dsh-skin', state.skin || 'default')
+      }, [state, inventory])
 
       return null
     }
@@ -828,22 +940,22 @@ html[data-dsh-glass="on"] #root::after{content:"";position:fixed;inset:0;pointer
     function PersonalizationRow() {
       const state = usePState()
       const [open, setOpen] = useState(false)
-      const [wallpapers, setWallpapers] = useState(null)
+      const [inventory, setInventory] = useState(null)
+      const [invError, setInvError] = useState(null)
       const [busy, setBusy] = useState(false)
       const [notice, setNotice] = useState(null)
       const fileRef = useRef(null)
 
-      const refreshWallpapers = useCallback(() => {
-        RPC('personalization.listWallpapers')
-          .then((r) => setWallpapers(r.items || []))
-          .catch(() => setWallpapers([]))
+      const refreshInventory = useCallback(() => {
+        setInvError(null)
+        fetchWallpaperInventory().then(setInventory).catch((err) => setInvError(err.message))
       }, [])
 
       useEffect(() => {
         if (!open) return
         loadPState()
-        refreshWallpapers()
-      }, [open, refreshWallpapers])
+        refreshInventory()
+      }, [open, refreshInventory])
 
       const update = async (patch) => {
         setNotice(null)
@@ -869,8 +981,9 @@ html[data-dsh-glass="on"] #root::after{content:"";position:fixed;inset:0;pointer
           const dataUrl = String(reader.result || '')
           RPC('personalization.saveWallpaper', { name: file.name, dataUrl })
             .then(async (r) => {
-              refreshWallpapers()
-              await update({ wallpaper: r.file ? r.file.split(/(\\|\/)/).pop() : file.name })
+              refreshInventory()
+              const fileName = r.file ? r.file.split(/(\\|\/)/).pop() : file.name
+              await update({ wallpaper: 'custom:' + fileName, playing: true })
               setBusy(false)
             })
             .catch((err) => {
@@ -881,19 +994,35 @@ html[data-dsh-glass="on"] #root::after{content:"";position:fixed;inset:0;pointer
         reader.onerror = () => { setBusy(false); setNotice(t('personalization.wallpaper.invalid')) }
         reader.readAsDataURL(file)
       }
-      const onApplyWallpaper = (name) => { update({ wallpaper: name }) }
+      const onApplyWallpaper = (id) => { update({ wallpaper: id, playing: true }) }
       const onRemoveWallpaper = (name) => {
         RPC('personalization.removeWallpaper', { name })
           .then(async () => {
-            refreshWallpapers()
-            if (state && state.wallpaper === name) await update({ wallpaper: null })
+            refreshInventory()
+            if (state && state.wallpaper === 'custom:' + name) await update({ wallpaper: null })
           })
           .catch((err) => setNotice(t('personalization.failed', { message: err.message })))
+      }
+      const onWeSelect = (ev) => {
+        const v = ev.target.value
+        update(v ? { wallpaper: v, playing: true } : { wallpaper: null })
+      }
+      const onTogglePlay = () => { update({ playing: !(state && state.playing !== false) }) }
+
+      // 旋钮即时生效（参考实现：onInput + 同步写 CSS 变量）
+      const onScrim = (pct) => { const v = pct / 100; savePState({ scrim: clamp01(v) }); applyGlassKnobs({ ...(state || DEFAULT_PERSONALIZATION), scrim: clamp01(v) }) }
+      const onBorder = (pct) => { const v = pct / 100; savePState({ border: clamp01(v) }); applyGlassKnobs({ ...(state || DEFAULT_PERSONALIZATION), border: clamp01(v) }) }
+      const onBlur = (px) => { savePState({ blur: px }); applyGlassKnobs({ ...(state || DEFAULT_PERSONALIZATION), blur: px }) }
+      const onWallpaperBlur = (px) => {
+        savePState({ wallpaperBlur: px })
+        applyGlassKnobs({ ...(state || DEFAULT_PERSONALIZATION), wallpaperBlur: px })
       }
 
       const skin = SKINS.find((k) => k.id === (state ? state.skin : 'default')) || SKINS[0]
       const activeWallpaper = state ? state.wallpaper : null
-      const wallpaperItems = Array.isArray(wallpapers) ? wallpapers : []
+      const customItems = inventory && Array.isArray(inventory.custom) ? inventory.custom : []
+      const weItems = inventory && Array.isArray(inventory.we) ? inventory.we : []
+      const weAvailable = inventory ? inventory.weInstallDir : null
 
       return e('div', { className: 'pm-card' },
         e('button', {
@@ -972,50 +1101,56 @@ html[data-dsh-glass="on"] #root::after{content:"";position:fixed;inset:0;pointer
                   }, t('personalization.wallpaper.none')),
                   e('input', { ref: fileRef, type: 'file', accept: 'image/*,video/mp4,video/webm,video/quicktime,text/html,.html,.htm', style: { display: 'none' }, onChange: onFile, 'aria-hidden': true, tabIndex: -1 }),
                 ),
-                wallpaperItems.length > 0
-                  ? e('div', { className: 'pm-list', style: { gap: 6, marginTop: 8 } },
-                      wallpaperItems.map((w) => e('div', {
-                        key: w.name,
+                // 本地壁纸（自上传）
+                e('div', { className: 'pm-catLabel', style: { marginTop: 6 } }, t('personalization.wallpaper.custom')),
+                customItems.length > 0
+                  ? e('div', { className: 'pm-list', style: { gap: 6, marginTop: 4 } },
+                      customItems.map((w) => e('div', {
+                        key: w.id,
                         className: 'pm-card',
                         style: { padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
                       },
-                        e('span', { style: { flex: 1, minWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dsw-alias-label-secondary)', fontSize: 13 } }, w.name),
-                        w.size != null ? e('span', { className: 'pm-stars' }, t('personalization.age', { size: Math.max(1, Math.round(w.size / 1024)) })) : null,
-                        activeWallpaper === w.name ? e('span', { className: 'pm-installed' }, t('personalization.wallpaper.active')) : null,
-                        e('button', { type: 'button', className: 'pm-btn pm-btn-outline', onClick: () => onApplyWallpaper(w.name) }, t('personalization.wallpaper.apply')),
-                        e('button', { type: 'button', className: 'pm-btn pm-btn-danger', onClick: () => onRemoveWallpaper(w.name) }, t('personalization.wallpaper.remove')),
+                        e('span', { style: { flex: 1, minWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dsw-alias-label-secondary)', fontSize: 13 } }, w.title),
+                        activeWallpaper === w.id ? e('span', { className: 'pm-installed' }, t('personalization.wallpaper.active')) : null,
+                        e('button', { type: 'button', className: 'pm-btn pm-btn-outline', onClick: () => onApplyWallpaper(w.id) }, t('personalization.wallpaper.apply')),
+                        e('button', { type: 'button', className: 'pm-btn pm-btn-danger', onClick: () => onRemoveWallpaper(w.title) }, t('personalization.wallpaper.remove')),
                       )),
                     )
-                  : e('div', { className: 'pm-empty', style: { padding: '8px 0' } }, t('personalization.wallpaper.none')),
+                  : e('div', { className: 'pm-empty', style: { padding: '6px 0' } }, t('personalization.wallpaper.none')),
+                // Wallpaper Engine
+                e('div', { className: 'pm-catLabel', style: { marginTop: 6 } }, t('personalization.wallpaper.we')),
+                weAvailable
+                  ? e('select', {
+                      className: 'pm-input',
+                      style: { maxWidth: '100%' },
+                      value: activeWallpaper || '',
+                      onChange: onWeSelect,
+                      'aria-label': t('personalization.wallpaper.we'),
+                    },
+                      e('option', { value: '' }, t('personalization.wallpaper.we.placeholder')),
+                      weItems.map((w) => e('option', { key: w.id, value: w.id }, w.title)),
+                    )
+                  : e('div', { className: 'pm-err' }, t('personalization.wallpaper.we.empty')),
+                // 壁纸旋钮（激活时显示：壁纸模糊 / 暗化 / 边框 / 玻璃）
+                activeWallpaper
+                  ? e('div', { className: 'pm-list', style: { gap: 6, marginTop: 8 } },
+                      e('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+                        e('button', { type: 'button', className: 'pm-btn pm-btn-outline', onClick: onTogglePlay }, state && state.playing !== false ? t('personalization.wallpaper.pause') : t('personalization.wallpaper.play')),
+                        invError ? e('span', { className: 'pm-err' }, invError) : null,
+                        e('button', { type: 'button', className: 'pm-btn pm-btn-outline', onClick: refreshInventory }, t('refresh')),
+                      ),
+                      SliderRow(t('personalization.wallpaperBlur'), 0, 60, 1, (state ? state.wallpaperBlur : 0) || 0, ((state ? state.wallpaperBlur : 0) || 0) + 'px', onWallpaperBlur),
+                      SliderRow(t('personalization.scrim'), 0, 90, 5, Math.round(((state ? state.scrim : 0.25) || 0) * 100), Math.round(((state ? state.scrim : 0.25) || 0) * 100) + '%', onScrim),
+                      SliderRow(t('personalization.border'), 0, 90, 5, Math.round(((state ? state.border : 0.35) || 0) * 100), Math.round(((state ? state.border : 0.35) || 0) * 100) + '%', onBorder),
+                      SliderRow(t('personalization.blur'), 0, 40, 1, (state ? state.blur : 24) || 0, ((state ? state.blur : 24) || 0) + 'px', onBlur),
+                    )
+                  : null,
               ),
 
-              // 模糊
-              e('div', null,
-                e('div', { className: 'pm-catLabel' }, t('personalization.blur') + ' · ' + ((state ? state.blur : 16) || 0) + 'px'),
-                e('div', { className: 'pm-hint', style: { marginBottom: 8 } }, t('personalization.blur.hint')),
-                e('input', {
-                  type: 'range',
-                  min: 0,
-                  max: 40,
-                  step: 1,
-                  value: (state ? state.blur : 16) || 0,
-                  style: { width: '100%', accentColor: 'var(--dsw-alias-brand-primary,#3964fe)' },
-                  onChange: (ev) => update({ blur: Number(ev.target.value) }),
-                  'aria-label': t('personalization.blur'),
-                }),
-              ),
-
-              // 液态玻璃
+              // 液态玻璃说明（壁纸激活时自动生效的 iOS 风格毛玻璃）
               e('div', null,
                 e('div', { className: 'pm-catLabel' }, t('personalization.glass')),
-                e('div', { className: 'pm-hint', style: { marginBottom: 8 } }, t('personalization.glass.hint')),
-                e('button', {
-                  type: 'button',
-                  className: 'pm-btn ' + (state && state.glass ? 'pm-btn-on' : 'pm-btn-off'),
-                  'aria-pressed': !!(state && state.glass),
-                  onClick: () => update({ glass: !(state && state.glass) }),
-                  style: { minWidth: 120 },
-                }, state && state.glass ? t('enabled') : t('disabled')),
+                e('div', { className: 'pm-hint' }, t('personalization.glass.hint')),
               ),
             )
           : null,

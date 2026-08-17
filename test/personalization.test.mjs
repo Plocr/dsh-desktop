@@ -10,6 +10,7 @@ import {
   listWallpapers,
   removeWallpaper,
   readWallpaperData,
+  buildWallpaperInventory,
 } from '../packages/better-setting/lib/index.js'
 
 const PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
@@ -29,22 +30,55 @@ test('personalization: 默认值与读写合并', () => {
     assert.equal(d0.skin, 'default')
     assert.equal(d0.accent, null)
     assert.equal(d0.wallpaper, null)
-    assert.equal(d0.blur, 16)
-    assert.equal(d0.glass, false)
+    assert.equal(d0.blur, 24)
+    assert.equal(d0.wallpaperBlur, 0)
+    assert.equal(d0.scrim, 0.25)
+    assert.equal(d0.border, 0.35)
+    assert.equal(d0.playing, true)
 
-    writePersonalization(config, { skin: 'midnight', accent: '#ff8800', blur: 24, glass: true })
+    writePersonalization(config, { skin: 'midnight', accent: '#ff8800', blur: 28, scrim: 0.6 })
     const d1 = readPersonalization(config)
     assert.equal(d1.skin, 'midnight')
     assert.equal(d1.accent, '#ff8800')
-    assert.equal(d1.blur, 24)
-    assert.equal(d1.glass, true)
+    assert.equal(d1.blur, 28)
+    assert.equal(d1.scrim, 0.6)
+    assert.equal(d1.border, 0.35, '未改字段保留默认')
 
     // 部分更新保留其余字段
-    writePersonalization(config, { wallpaper: 'a.png' })
+    writePersonalization(config, { wallpaper: 'custom:a.png' })
     const d2 = readPersonalization(config)
     assert.equal(d2.skin, 'midnight')
-    assert.equal(d2.wallpaper, 'a.png')
-    assert.equal(d2.blur, 24)
+    assert.equal(d2.wallpaper, 'custom:a.png')
+    assert.equal(d2.blur, 28)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('wallpaper inventory: 自上传壁纸进入 inventory 且带同源 media URL', async () => {
+  const { dir, config } = makeConfig()
+  const mediaMap = new Map()
+  try {
+    await saveWallpaper('test img.png', `data:image/png;base64,${PNG_BASE64}`, config)
+    await saveWallpaper('clip.mp4', 'data:video/mp4;base64,AAAA', config)
+    await saveWallpaper('page.html', `data:text/html;base64,${Buffer.from('<html></html>').toString('base64')}`, config)
+    const v = buildWallpaperInventory(config, mediaMap)
+    const custom = v.custom || []
+    assert.ok(custom.length >= 3, '3 个自上传壁纸应全部进入 inventory')
+    const clip = custom.find((w) => w.title === 'clip.mp4')
+    assert.ok(clip, 'clip.mp4 应被枚举')
+    assert.equal(clip.type, 'video')
+    assert.equal(clip.playable, true)
+    assert.ok(/^\/dsh-desktop-wallpapers\/media\//.test(clip.media), 'media 应为同源路由 URL')
+    // token 已在 mediaMap 中登记
+    const token = clip.media.split('/media/')[1]
+    assert.ok(mediaMap.has(token), 'mediaMap 应登记 token -> 绝对路径')
+    assert.ok(mediaMap.get(token).endsWith('clip.mp4'), 'mediaMap 路径指向真实文件')
+    // WE 条目存在性为环境相关：仅断言字段形状
+    assert.ok(Array.isArray(v.we), 'we 列表应为数组')
+    assert.ok('weInstallDir' in v, '应暴露 weInstallDir 字段')
+    const imgs = custom.filter((w) => w.type === 'image')
+    assert.ok(imgs.some((w) => /^\/dsh-desktop-wallpapers\/media\//.test(w.media)), '图片壁纸也应走同源媒体路由')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
