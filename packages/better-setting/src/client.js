@@ -907,6 +907,17 @@ body[data-dsh-wallpaper] [class*="_bubble"]{
         }
       }, [])
 
+      // 选择项在当前 inventory 中缺失时（如刚上传/刚安装）重取一次，避免快照过期
+      const lastTryRef = useRef(null)
+      useEffect(() => {
+        const activeId = state && state.wallpaper ? state.wallpaper : null
+        if (!activeId || !inventory) return
+        if (findWallpaper(inventory, activeId)) { lastTryRef.current = null; return }
+        if (lastTryRef.current === activeId) return
+        lastTryRef.current = activeId
+        fetchWallpaperInventory().then(setInventory).catch(() => {})
+      }, [state, inventory])
+
       // 状态同步：token 覆盖 + 壁纸层 + 遮罩 + 旋钮 CSS 变量（幂等，不拆层，视频不中断）
       useEffect(() => {
         if (!state) return
