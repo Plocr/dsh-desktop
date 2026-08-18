@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const runtimeDir = path.join(root, 'resources', 'dsh-runtime')
 const NODE_VERSION = process.env.DSH_RUNTIME_NODE_VERSION ?? 'v24.15.0'
-const DSH_VERSION = process.env.DSH_RUNTIME_DSH_VERSION ?? '0.1.0-rc.6'
+const DSH_VERSION = process.env.DSH_RUNTIME_DSH_VERSION ?? '0.1.0-rc.7'
 const TAR = process.env.DSH_RUNTIME_TAR ?? 'tar'
 
 function run(cmd, args) {

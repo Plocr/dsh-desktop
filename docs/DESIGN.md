@@ -168,7 +168,7 @@ E2E（`scripts/e2e-turn.mjs`，需 `DSH_DESKTOP_ELECTRON_ARGS=--remote-debugging
 - 通知/徽标仅在任务事件到达时更新；harness 不在前台时任务列表为启动时快照（服务端持久化，重启后恢复）。
 - **macOS**：dmg 打包（arm64/x64）、`dsh://` 深链（Info.plist protocols + open-url 事件 + 冷启动队列）、运行时路径走 `~/Library/Application Support` 已配置；**未实机验证**（打包须在 macOS 上执行 `npm run dist:mac`，且运行时 tar.gz 需在 mac 上重建）。
 - **Linux**：代码兼容（运行时路径走 `$XDG_DATA_HOME`），未提供打包配置。
-- harness 版本锁定 0.1.0-rc.6；升级需重跑 setup-runtime.mjs 并同步 bridge 版本。
+- harness 版本锁定 0.1.0-rc.7；升级需重跑 setup-runtime.mjs（`DSH_RUNTIME_DSH_VERSION` 可覆盖）并同步 bridge 版本。
 - **两层更新机制**：
   - 第 1 层·桌面端（`src/main/updater.ts`）：electron-updater + GitHub provider，更新源 = 本仓库 `Plocr/dsh-desktop` 的 GitHub Releases（`publish` 已配 `provider: github`）。有新版即下载对应平台安装包并替换。
   - 第 2 层·官方 harness（`src/main/harnessCheck.ts`）：查 npm registry 的 `@deepseek-ai/dsh` latest dist-tag，对比随包 `runtime.version` 里的 `dsh=` 版本；**只提示有新版，不自动替换**（官方发版机制未定，避免破坏运行时）。官方无 Release、靠 npx/源码分发，故以 npm 为准。

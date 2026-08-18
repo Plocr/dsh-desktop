@@ -9,7 +9,7 @@
  * 可能破坏已装用户。检测结果仅用于在桌面端提示「官方 harness 有新版」。
  *
  * 版本来源：
- *  - 本地当前版本：resources/runtime.version 里的 dsh=0.1.0-rc.6（随包分发）
+ *  - 本地当前版本：resources/runtime.version 里的 dsh=…（随包分发，升级运行时后由 setup-runtime.mjs 重写）
  *  - 官方最新版本：registry.npmjs.org/@deepseek-ai%2Fdsh/latest -> { version }
  */
 import { app } from 'electron'
