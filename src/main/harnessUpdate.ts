@@ -1,8 +1,12 @@
 /**
- * 框架（官方 harness @deepseek-ai/dsh）本地更新 —— 「直接下载最新版替换本地版本」。
+ * 官方 Harness（DeepSeek Harness @deepseek-ai/dsh）本地更新 —— 「直接下载最新版替换本地版本」。
+ *
+ * 术语对齐（与用户一致）：
+ *  - 「框架」= DSH Desktop（外壳，版本如 0.6.0）
+ *  - 「官方 Harness」= deepseek-ai/deepseek-harness 发行到 npm 的 @deepseek-ai/dsh（本体）
  *
  * 流程：
- *  1. 检测：npm registry（官方失败回退 npmmirror 镜像）取 latest；
+ *  1. 检测：npm registry（官方失败回退 npmmirror 镜像）取最大已发布版本；
  *  2. 下载：npm tgz（优先 npmmirror 镜像加速），带进度回调 —— 进度条 + 下载地址展示；
  *  3. 解压并用 atomic 替换 runtime/node_modules/@deepseek-ai/dsh（含回滚）；
  *  4. 写入用户自更新 marker（tar=user-*），extractPackagedRuntime 因此不会被重复解压覆盖；
@@ -23,10 +27,10 @@ import { appDataRoot } from './runtime'
 
 const OFFICIAL_TGZ = (v: string) => `https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-${v}.tgz`
 const MIRROR_TGZ = (v: string) => `https://registry.npmmirror.com/@deepseek-ai/dsh/-/dsh-${v}.tgz`
-/** 单源下载超时（秒）。 */
+/** 单源下载超时（毫秒）。 */
 const DOWNLOAD_TIMEOUT_MS = 8 * 60_000
 
-export interface FrameworkProgress {
+export interface HarnessProgress {
   /** 0-100；null 表示不确定（未知总大小）。 */
   pct: number | null
   detail: string
@@ -34,8 +38,8 @@ export interface FrameworkProgress {
   url: string | null
 }
 
-export interface FrameworkUpdateHooks {
-  onProgress: (p: FrameworkProgress) => void
+export interface HarnessUpdateHooks {
+  onProgress: (p: HarnessProgress) => void
 }
 
 let updating = false
@@ -71,7 +75,7 @@ function spawnOk(cmd: string, args: string[], timeoutMs: number, cwd?: string): 
 }
 
 /** 下载 url → dest，流式报告进度。 */
-async function downloadFile(url: string, dest: string, onProgress: (p: FrameworkProgress) => void): Promise<void> {
+async function downloadFile(url: string, dest: string, onProgress: (p: HarnessProgress) => void): Promise<void> {
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), DOWNLOAD_TIMEOUT_MS)
   let received = 0
@@ -133,23 +137,18 @@ function installedVersionFromDir(runtimeDir: string): string | null {
   }
 }
 
-/**
- * 下载并替换框架到版本 version，返回安装结果。
- */
-async function installFramework(version: string, hooks: FrameworkUpdateHooks): Promise<{ ok: boolean; message: string }> {
+/** 下载并替换官方 Harness 到版本 version，返回安装结果。 */
+async function installHarness(version: string, hooks: HarnessUpdateHooks): Promise<{ ok: boolean; message: string }> {
   const { localRoot, runtimeDir } = runtimePaths()
   if (!existsSync(runtimeDir)) {
     return { ok: false, message: '运行时目录不存在（尚未解压）' }
   }
-  const work = path.join(runtimeDir, `.framework-update-${Date.now()}`)
+  const work = path.join(runtimeDir, `.harness-update-${Date.now()}`)
   mkdirSync(work, { recursive: true })
   const tarball = path.join(work, 'dsh.tgz')
   const extractDir = path.join(work, 'x')
 
-  const candidates = [
-    MIRROR_TGZ(version),
-    OFFICIAL_TGZ(version),
-  ]
+  const candidates = [MIRROR_TGZ(version), OFFICIAL_TGZ(version)]
   const tried = new Set<string>()
 
   try {
@@ -160,24 +159,24 @@ async function installFramework(version: string, hooks: FrameworkUpdateHooks): P
       if (tried.has(url)) continue
       tried.add(url)
       try {
-        hooks.onProgress({ pct: 0, detail: `开始下载框架 v${version}（${candidates.indexOf(url) === 0 ? '镜像' : '官方'}源）…`, url })
+        hooks.onProgress({ pct: 0, detail: `开始下载官方 Harness v${version}（${candidates.indexOf(url) === 0 ? '镜像' : '官方'}源）…`, url })
         await downloadFile(url, tarball, hooks.onProgress)
         downloadedUrl = url
         break
       } catch (err) {
         lastErr = err instanceof Error ? err : new Error(String(err))
-        log('info', `frameworkUpdate: download ${url} failed: ${lastErr.message}`)
+        log('info', `harnessUpdate: download ${url} failed: ${lastErr.message}`)
       }
     }
     if (!downloadedUrl) {
       return {
         ok: false,
-        message: `框架下载失败：${lastErr ? lastErr.message : '未知错误'}。可手动下载 ${candidates[0]}`,
+        message: `官方 Harness 下载失败：${lastErr ? lastErr.message : '未知错误'}。可手动下载 ${candidates[0]}`,
       }
     }
 
     // 解压 npm tgz（内含 package/ 目录）
-    hooks.onProgress({ pct: null, detail: '正在解压框架包…', url: downloadedUrl })
+    hooks.onProgress({ pct: null, detail: '正在解压 Harness 包…', url: downloadedUrl })
     mkdirSync(extractDir, { recursive: true })
     await spawnOk('tar', ['-xzf', tarball, '-C', extractDir], 120_000)
     let pkgDir = path.join(extractDir, 'package')
@@ -209,22 +208,18 @@ async function installFramework(version: string, hooks: FrameworkUpdateHooks): P
     rmSync(backup, { recursive: true, force: true })
 
     // 写用户自更新 marker（防止 extractPackagedRuntime 用随包覆盖）
-    writeFileSync(
-      path.join(localRoot, 'runtime.version'),
-      buildUserMarker(version, contentHash(target)),
-      'utf8',
-    )
-    log('info', `frameworkUpdate: harness ${version} installed at ${target}`)
-    return { ok: true, message: `框架已更新到 v${version}，重启后生效` }
+    writeFileSync(path.join(localRoot, 'runtime.version'), buildUserMarker(version, contentHash(target)), 'utf8')
+    log('info', `harnessUpdate: official harness ${version} installed at ${target}`)
+    return { ok: true, message: `官方 Harness 已更新到 v${version}，重启后生效` }
   } catch (err) {
-    log('error', `frameworkUpdate: ${err instanceof Error ? err.stack ?? err.message : String(err)}`)
-    return { ok: false, message: `框架更新失败：${err instanceof Error ? err.message : String(err)}` }
+    log('error', `harnessUpdate: ${err instanceof Error ? err.stack ?? err.message : String(err)}`)
+    return { ok: false, message: `官方 Harness 更新失败：${err instanceof Error ? err.message : String(err)}` }
   } finally {
     rmSync(work, { recursive: true, force: true })
   }
 }
 
-export interface FrameworkUpdateResult {
+export interface HarnessUpdateResult {
   ok: boolean
   /** 是否真的执行并完成了「下载+替换」。false 时 message 是查询失败/已最新/未开始。 */
   updated: boolean
@@ -232,39 +227,39 @@ export interface FrameworkUpdateResult {
 }
 
 /**
- * 执行一次框架检查/更新（检测 + 按需下载替换）。
+ * 执行一次官方 Harness 检查/更新（检测 + 按需下载替换）。
  * - 有新版 → 直接本地下载替换（hooks 驱动进度条），return { ok, updated: true }。
  * - 已最新 → { ok, updated: false }。
  * - 失败   → { ok: false, updated: false }。
  * 开发模式直接返回（不做）。
  */
-export async function runFrameworkUpdate(
+export async function runHarnessUpdate(
   manual: boolean,
-  hooks: FrameworkUpdateHooks,
-): Promise<FrameworkUpdateResult> {
+  hooks: HarnessUpdateHooks,
+): Promise<HarnessUpdateResult> {
   if (!app.isPackaged) {
-    log('info', 'frameworkUpdate: dev mode, skipped')
-    return { ok: false, updated: false, message: '开发模式不执行框架更新' }
+    log('info', 'harnessUpdate: dev mode, skipped')
+    return { ok: false, updated: false, message: '开发模式不执行 Harness 更新' }
   }
   if (updating) {
-    return { ok: false, updated: false, message: '框架更新已在运行' }
+    return { ok: false, updated: false, message: '官方 Harness 更新已在运行' }
   }
   updating = true
   try {
     const res = await checkHarnessUpdateResult()
     const local = res.local ?? (await readLocalDshVersion())
     if (!res.ok || !res.latest) {
-      const msg = '框架版本查询失败（网络/registry 不可达）'
-      log('info', `frameworkUpdate: query failed -> ${msg}`)
+      const msg = '官方 Harness 版本查询失败（网络/registry 不可达）'
+      log('info', `harnessUpdate: query failed -> ${msg}`)
       return { ok: false, updated: false, message: msg }
     }
     const { runtimeDir } = runtimePaths()
     const installed = installedVersionFromDir(runtimeDir) ?? local
     if (!res.available) {
-      return { ok: true, updated: false, message: `框架已是最新：v${installed}` }
+      return { ok: true, updated: false, message: `官方 Harness 已是最新：v${installed}` }
     }
-    hooks.onProgress({ pct: 0, detail: `发现官方框架新版：本地 v${installed} → v${res.latest}，开始本地更新…`, url: null })
-    const r = await installFramework(res.latest, hooks)
+    hooks.onProgress({ pct: 0, detail: `发现官方 Harness 新版：本地 v${installed} → v${res.latest}，开始本地更新…`, url: null })
+    const r = await installHarness(res.latest, hooks)
     return { ok: r.ok, updated: r.ok, message: r.message }
   } finally {
     updating = false

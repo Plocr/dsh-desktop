@@ -49,24 +49,24 @@ Electron 壳 ──spawn──▶ dsh --profile desktop --patch <overlay> --port
 
 ## 更新机制
 
-两条独立链路，互不干扰：
+两条独立链路，互不干扰。（术语：**框架** = DSH Desktop 本体；**官方 Harness** = DeepSeek Harness @deepseek-ai/dsh）
 
-1. **壳（DSH Desktop 自身）** —— `src/main/updater.ts`
+1. **框架（DSH Desktop 自身）** —— `src/main/updater.ts`
    - 源：GitHub Releases（[Plocr/dsh-desktop](https://github.com/Plocr/dsh-desktop/releases)）
    - **本地下载不跳浏览器**：electron-updater `autoDownload`，下载进度走任务栏进度条，退出时自动安装
-   - 通知内附两个下载地址：官方 GitHub 地址 + **GitHub 免费加速代理地址**（默认 `ghfast.top`，可用环境变量 `DSH_DESKTOP_GH_PROXY` 覆盖）
+   - 通知内附两个下载地址：GitHub 官方地址 + **免费加速代理地址**（默认 `ghfast.top`，可用环境变量 `DSH_DESKTOP_GH_PROXY` 覆盖）
 
-2. **框架（官方 harness `@deepseek-ai/dsh`）** —— `src/main/harnessCheck.ts` + `frameworkUpdate.ts`
-   - 源：npm registry（官方失败回退 **npmmirror 镜像**；框架包很小，仅几十 KB）
+2. **官方 Harness（DeepSeek Harness 本体）** —— `src/main/harnessCheck.ts` + `harnessUpdate.ts`
+   - 源：npm registry（官方失败回退 **npmmirror 镜像**；包很小，仅几十 KB）
    - **检测不再依赖 `latest` dist-tag**（官方可能忘打 tag：rc.8 已发而 latest 指 rc.7）——枚举全部已发布版本取最大 semver
-   - 发现新版 → 显示更新覆盖层（**进度条 + 下载地址**）→ 下载 tgz → 原子替换 `%LOCALAPPDATA%/DSH Desktop/runtime` 里的 dsh 包（含回滚）→ 写用户自更新标记 → 重启 harness 生效
+   - 发现新版 → 右上角小卡片（**进度条 + 下载地址**，可关闭、不挡操作）→ 下载 tgz → 原子替换 `%LOCALAPPDATA%/DSH Desktop/runtime` 里的 dsh 包（含回滚）→ 写用户自更新标记 → 重启 harness 生效
    - 用户自更新后的运行时不会被安装包重复覆盖，除非安装包内嵌的 dsh 版本更新
 
 **入口只有两个（托盘 → 设置）：**
-- `自动更新`（开关，默认开）：冷启动自动检查一次（外壳 15s 下载 + 框架 30s 本地替换）；关闭则仅手动
-- `检查并更新…`（动作）：同时查外壳 + 框架，有新版自动本地下载/替换（不跳浏览器）
+- `自动更新（框架 v… · 官方 Harness v…）`（开关，默认开）：冷启动自动检查一次（框架 15s 下载 + 官方 Harness 30s 本地替换）；关闭则仅手动
+- `检查并更新…`（动作）：同时查框架 + 官方 Harness，有新版自动本地下载/替换（不跳浏览器）
 
-> Why npm not GitHub tags：deepseek-harness 通过 npm 分发（GitHub 只有源码 tags，无构建产物），所以框架「最新」为 npm 已发布版本的最大 semver。
+> Why npm not GitHub tags：deepseek-harness 通过 npm 分发（GitHub 只有源码 tags，无构建产物），所以「官方 Harness 最新」为 npm 已发布版本的最大 semver。
 
 
 ## 平台支持

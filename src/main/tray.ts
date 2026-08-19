@@ -23,7 +23,7 @@ export interface TrayDeps {
     harnessState: string
     globalShortcut: string
     appVersion: string
-    frameworkVersion: string | null
+    harnessVersion: string | null
   }
   getPlugins: () => DesktopPluginToggle[]
   showWindow: () => void
@@ -79,9 +79,9 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
         label: '设置',
         submenu: [
           {
-            // 总开关：开 = 冷启动自动检查（外壳下载 + 框架本地替换）；关 = 仅手动
-            // 同时常显两个当前版本：官方（外壳） + 框架（官方 harness）
-            label: `自动更新（官方 v${s.appVersion} · 框架 v${s.frameworkVersion ?? '—'}）`,
+            // 总开关：开 = 冷启动自动检查（框架下载 + 官方 Harness 本地替换）；关 = 仅手动
+            // 常显两个当前版本：框架（DSH Desktop） + 官方 Harness（DeepSeek Harness 本体）
+            label: `自动更新（框架 v${s.appVersion} · 官方 Harness v${s.harnessVersion ?? '—'}）`,
             type: 'checkbox' as const,
             checked: s.autoUpdate,
             click: (item) => deps.setAutoUpdate(item.checked),
