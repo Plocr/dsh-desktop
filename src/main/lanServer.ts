@@ -108,11 +108,20 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
       s.on('close', () => sockets.delete(s))
     })
 
-    /** 计算转发请求头：`/api/host.*` 用回环权威（官方 loopback 钉死原生能力）。 */
+    /**
+     * 计算转发请求头。
+     * 普通请求：Host/Origin 原样（配合 --trusted-host <局域网IP> 通过 trusted-host 围栏）。
+     * `/api/host.*`：官方 loopback 钉死——`isTrustedApiRequest` 要求 Host 是回环，且
+     * （若带 Origin）`new URL(origin).host === hostUrl.host`。故 Host/Origin/Referer
+     * 一并改写成回环权威 `127.0.0.1:<harness端口>`，让手机也能触发本机原生能力。
+     */
     const forwardHeaders = (req: { url?: string; headers: import('node:http').IncomingHttpHeaders }): Record<string, unknown> => {
       const headers: Record<string, unknown> = { ...req.headers }
       if (typeof req.url === 'string' && req.url.startsWith('/api/host.')) {
-        headers.host = `127.0.0.1:${opts.targetPort}`
+        const loopAuthority = `127.0.0.1:${opts.targetPort}`
+        headers.host = loopAuthority
+        headers.origin = `http://${loopAuthority}`
+        headers.referer = `http://${loopAuthority}/`
       }
       return headers
     }

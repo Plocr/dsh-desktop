@@ -161,15 +161,18 @@ test('lanProxy: 固定端口（占用则回退随机）', async () => {
   }
 })
 
-test('lanProxy: /api/host.* 转发 Host 改回环（解锁原生能力）', async () => {
+test('lanProxy: /api/host.* 转发 Host+Origin 改回环（解锁原生能力）', async () => {
   let seenHost = ''
+  let seenOrigin = ''
   const harness = await startFakeHarness((req, res) => {
     if (req.url.startsWith('/api/host.')) {
       seenHost = String(req.headers.host ?? '')
+      seenOrigin = String(req.headers.origin ?? '')
       res.setHeader('content-type', 'application/json')
       res.end(JSON.stringify({ ok: true, value: { path: null } }))
     } else {
       seenHost = String(req.headers.host ?? '')
+      seenOrigin = String(req.headers.origin ?? '')
       res.setHeader('content-type', 'application/json')
       res.end(JSON.stringify({ ok: true }))
     }
@@ -181,13 +184,20 @@ test('lanProxy: /api/host.* 转发 Host 改回环（解锁原生能力）', asyn
     requestApproval: APPROVE,
   })
   try {
-    // 手机侧以局域网 Host 访问
+    // 手机侧以局域网 Host/Origin 访问
     await fetch(`http://127.0.0.1:${proxy.port}/api/host.pickDirectory`, {
       method: 'POST',
-      headers: { host: `192.168.30.41:${proxy.port}`, 'content-type': 'application/json', connection: 'close' },
+      headers: {
+        host: `192.168.30.41:${proxy.port}`,
+        origin: `http://192.168.30.41:${proxy.port}`,
+        'sec-fetch-site': 'same-origin',
+        'content-type': 'application/json',
+        connection: 'close',
+      },
       body: '{}',
     })
-    assert.equal(seenHost, `127.0.0.1:${harness.port}`, 'host.* 应把 Host 改成回环')
+    assert.equal(seenHost, `127.0.0.1:${harness.port}`, 'host.* 的 Host 应改回环')
+    assert.equal(seenOrigin, `http://127.0.0.1:${harness.port}`, 'host.* 的 Origin 应改回环')
   } finally {
     await proxy.stop()
     await new Promise((r) => harness.server.close(r))
