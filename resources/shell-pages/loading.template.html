@@ -73,6 +73,41 @@
     0%, 100% { opacity: 0.25; transform: translateY(0); }
     50% { opacity: 1; transform: translateY(-2px); }
   }
+
+  /* 本地更新面板（mode=update 时显示）：进度条 + 详情行 + 下载地址 */
+  .updatePanel {
+    display: none;
+    position: fixed; inset: 0;
+    flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; padding: 0 40px;
+    background: var(--bg);
+  }
+  .updatePanel.on { display: flex; }
+  .updateTitle { font-size: 14px; font-weight: 600; color: var(--ink); }
+  .updateDetail { font-size: 12px; color: var(--sub); text-align: center; line-height: 1.6; }
+  .updateUrl {
+    display: none;
+    max-width: 560px; font-size: 11px; color: var(--sub);
+    word-break: break-all; text-align: center; line-height: 1.6;
+    border: 1px solid rgba(127,127,127,.25); border-radius: 8px; padding: 6px 10px;
+    background: rgba(127,127,127,.08);
+  }
+  .track {
+    width: min(420px, 80vw); height: 6px; border-radius: 999px;
+    background: rgba(127,127,127,.20); overflow: hidden;
+  }
+  .bar {
+    height: 100%; width: 0%; border-radius: 999px;
+    background: var(--ink); transition: width .2s ease;
+  }
+  .bar.indeterminate {
+    width: 30%; background: var(--ink);
+    animation: slide 1.2s ease-in-out infinite;
+  }
+  @keyframes slide {
+    0% { margin-left: -30%; }
+    100% { margin-left: 100%; }
+  }
 </style>
 </head>
 <body>
@@ -85,6 +120,12 @@
       <div class="sub" id="sub">启动桌面工作台</div>
     </div>
     <div class="dots"><span></span><span></span><span></span></div>
+  </div>
+  <div class="updatePanel" id="updatePanel">
+    <div class="updateTitle">正在更新框架…</div>
+    <div class="track"><div class="bar" id="updateBar"></div></div>
+    <div class="updateDetail" id="updateDetail">准备中</div>
+    <div class="updateUrl" id="updateUrl"></div>
   </div>
 <script>
 /* 壳传入 ?theme=light|dark 时强制主题（跟随 harness 设置）；缺省跟随系统 */
@@ -101,7 +142,39 @@ window.__fadeOut = () =>
     setTimeout(resolve, 380)
   })
 
-if (location.search) {
+/* 本地更新模式（mode=update）：切到更新面板，支持 __setUpdate 逐帧刷新 */
+const PANEL_MODE = new URLSearchParams(location.search).get('mode') === 'update'
+if (PANEL_MODE) {
+  const stage = document.getElementById('stage')
+  const panel = document.getElementById('updatePanel')
+  stage.style.display = 'none'
+  panel.classList.add('on')
+  const q = new URLSearchParams(location.search)
+  const initDetail = q.get('detail')
+  const initUrl = q.get('url')
+  if (initDetail) document.getElementById('updateDetail').textContent = decodeURIComponent(initDetail)
+  if (initUrl) {
+    const el = document.getElementById('updateUrl')
+    el.textContent = '下载地址：' + decodeURIComponent(initUrl)
+    el.style.display = 'block'
+  }
+  window.__setUpdate = (pct, detail, url) => {
+    if (typeof detail === 'string' && detail) document.getElementById('updateDetail').textContent = detail
+    if (typeof url === 'string' && url) {
+      const el = document.getElementById('updateUrl')
+      el.textContent = '下载地址：' + url
+      el.style.display = 'block'
+    }
+    const bar = document.getElementById('updateBar')
+    const numeric = typeof pct === 'number' && Number.isFinite(pct)
+    bar.classList.toggle('indeterminate', !numeric)
+    if (numeric) bar.style.width = Math.max(0, Math.min(100, pct)) + '%'
+  }
+} else {
+  window.__setUpdate = () => {}
+}
+
+if (location.search && !PANEL_MODE) {
   const q = new URLSearchParams(location.search)
   const state = q.get('state')
   if (state) document.getElementById('sub').textContent = decodeURIComponent(state)

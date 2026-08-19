@@ -18,16 +18,33 @@ import path from 'node:path'
 import { log } from './logger'
 import { notify } from './notify'
 import { compareDots } from './version'
+import { appDataRoot } from './runtime'
 
-const REGISTRY_URL = 'https://registry.npmjs.org/@deepseek-ai%2Fdsh/latest'
+export const REGISTRY_URL = 'https://registry.npmjs.org/@deepseek-ai%2Fdsh/latest'
+/** npmmirror 镜像（downloads 提速；检测用官方即可，失败再回退镜像）。 */
+export const REGISTRY_MIRROR_URL = 'https://registry.npmmirror.com/@deepseek-ai/dsh/latest'
 const TIMEOUT_MS = 10_000
-const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000 // 每天一次
+/** 仅冷启动检查一次：启动后延迟此时长再查（等 harness 就绪、避免瞬时网络抖动）。 */
+const FIRST_CHECK_DELAY_MS = 30_000
 
 let timer: NodeJS.Timeout | null = null
 let stopped = false
 
-/** 读取随包分发的 runtime.version，解析出本地 harness 版本（dsh=...）。 */
-async function readLocalDshVersion(): Promise<string | null> {
+/** 读取已解压运行时的版本（%LOCALAPPDATA%/DSH Desktop/runtime .../dsh/package.json）。 */
+async function installedRuntimeVersion(): Promise<string | null> {
+  const pkg = path.join(appDataRoot(), 'DSH Desktop', 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
+  try {
+    const j = JSON.parse(await fs.readFile(pkg, 'utf8')) as { version?: unknown }
+    return typeof j.version === 'string' ? j.version : null
+  } catch {
+    return null
+  }
+}
+
+/** 读取当前 harness 版本：优先「已安装运行时」，回退随包 marker（dsh=...）。 */
+export async function readLocalDshVersion(): Promise<string | null> {
+  const installed = await installedRuntimeVersion()
+  if (installed) return installed
   try {
     const resource = process.resourcesPath
     const bytes = await fs.readFile(path.join(resource, 'runtime.version'), 'utf8')
@@ -39,20 +56,50 @@ async function readLocalDshVersion(): Promise<string | null> {
   }
 }
 
-/** 从 npm registry 拉取官方 dsh 最新 dist-tag 版本。 */
-async function fetchLatestDshVersion(): Promise<string | null> {
+/** 从 npm registry 拉取官方 dsh 最新 dist-tag 版本（官方失败回退 npmmirror 镜像）。 */
+export async function fetchLatestDshVersion(): Promise<string | null> {
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS)
-  try {
-    const res = await fetch(REGISTRY_URL, { signal: ctrl.signal })
+  const get = async (url: string): Promise<string | null> => {
+    const res = await fetch(url, { signal: ctrl.signal })
     if (!res.ok) throw new Error(`npm registry ${res.status}`)
     const data = (await res.json()) as { version?: string }
     return data.version ?? null
+  }
+  try {
+    try {
+      return await get(REGISTRY_URL)
+    } catch (err) {
+      log('info', `harnessCheck: official registry failed, fallback to mirror: ${err instanceof Error ? err.message : String(err)}`)
+      return await get(REGISTRY_MIRROR_URL)
+    }
   } catch (err) {
     log('error', `harnessCheck: fetch latest failed: ${err instanceof Error ? err.message : String(err)}`)
     return null
   } finally {
     clearTimeout(t)
+  }
+}
+
+/**
+ * 结构化检测：区分「有新版 / 已最新 / 查询失败」，供自动替换流程判断。
+ */
+export async function checkHarnessUpdateResult(): Promise<{
+  ok: boolean
+  local: string | null
+  latest: string | null
+  available: boolean
+}> {
+  const local = await readLocalDshVersion()
+  const latest = await fetchLatestDshVersion()
+  if (!local || !latest) {
+    return { ok: false, local, latest, available: false }
+  }
+  return {
+    ok: true,
+    local,
+    latest,
+    available: compareDots(latest, local) > 0,
   }
 }
 
@@ -78,7 +125,8 @@ export async function checkHarnessUpdate(): Promise<string> {
 }
 
 /**
- * 初始化第 2 层：打包版每 24h 自动查一次；开发模式跳过。
+ * 初始化第 2 层：打包版启动后 30s 自动查「一次」（仅冷启动，不做周期轮询）；
+ * 开发模式跳过。
  */
 export function initHarnessCheck(): void {
   if (!app.isPackaged) {
@@ -86,23 +134,18 @@ export function initHarnessCheck(): void {
     return
   }
   stopped = false
-  const run = () => void checkHarnessUpdate()
-  // 启动 30s 后首查，之后每 24h 一次
-  setTimeout(() => {
-    if (!stopped) run()
-  }, 30_000)
-  timer = setInterval(() => {
-    if (!stopped) run()
-  }, CHECK_INTERVAL_MS)
-  timer.unref?.()
-  log('info', 'harnessCheck: initialized (daily official-harness check)')
+  timer = setTimeout(() => {
+    timer = null
+    if (!stopped) void checkHarnessUpdate()
+  }, FIRST_CHECK_DELAY_MS)
+  log('info', `harnessCheck: initialized (one-shot at ${FIRST_CHECK_DELAY_MS}ms after launch)`)
 }
 
-/** 关停计时器（应用退出前调用，避免泄漏）。 */
+/** 关停一次性定时器（应用退出前调用，避免泄漏/退出后仍触发）。 */
 export function stopHarnessCheck(): void {
   stopped = true
   if (timer) {
-    clearInterval(timer)
+    clearTimeout(timer)
     timer = null
   }
 }

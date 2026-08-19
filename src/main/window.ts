@@ -11,6 +11,9 @@ export interface WindowHandle {
   loadApp: (url: string) => void
   showLoading: (state?: string, theme?: 'light' | 'dark' | 'system') => void
   showError: (msg: string, theme?: 'light' | 'dark' | 'system') => void
+  /** 本地更新覆盖层：加载更新面板并返回实时进度 setter；调用方负责 setProgressBar 之外的任务栏进度。 */
+  showUpdateOverlay: (init: { pct?: number | null; detail: string; url?: string | null }, themeArg?: 'light' | 'dark' | 'system') => (p: { pct: number | null; detail: string; url?: string | null }) => void
+  updateTaskbarProgress: (fraction: number | null) => void
 }
 
 export function createWindow(
@@ -157,5 +160,51 @@ export function createWindow(
     void win.loadFile(errorPage, { query })
   }
 
-  return { win, loadApp, showLoading, showError }
+  /**
+   * 本地更新覆盖层：用 loading.html 的 mode=update 面板显示进度条 + 下载地址。
+   * 返回一个 setter 供调用方逐帧推送 { pct, detail, url }；调用时同步更新任务栏进度。
+   */
+  const showUpdateOverlay = (
+    init: { pct?: number | null; detail: string; url?: string | null },
+    themeArg?: 'light' | 'dark' | 'system',
+  ): ((p: { pct: number | null; detail: string; url?: string | null }) => void) => {
+    if (win.isDestroyed()) return () => undefined
+    const query: Record<string, string> = { mode: 'update', detail: encodeURIComponent(init.detail) }
+    if (init.url) query.url = encodeURIComponent(init.url)
+    if (themeArg === 'light' || themeArg === 'dark') query.theme = themeArg
+    const setTaskbar = (pct: number | null): void => {
+      if (win.isDestroyed()) return
+      try {
+        if (typeof pct === 'number' && Number.isFinite(pct)) {
+          win.setProgressBar(Math.max(0, Math.min(1, pct / 100)))
+        } else {
+          win.setProgressBar(-1) // 不确定进度
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    setTaskbar(typeof init.pct === 'number' ? init.pct : null)
+    void win.loadFile(loadingPage, { query })
+    const setter = (p: { pct: number | null; detail: string; url?: string | null }): void => {
+      if (win.isDestroyed()) return
+      setTaskbar(p.pct)
+      const args = JSON.stringify([p.pct, p.detail, p.url ?? null])
+      void win.webContents.executeJavaScript(`window.__setUpdate ? window.__setUpdate(...${args}) : void 0`).catch(() => {})
+    }
+    return setter
+  }
+
+  /** 任务栏叠加进度（Windows/macOS 通用）；null 清除。 */
+  const updateTaskbarProgress = (fraction: number | null): void => {
+    if (win.isDestroyed()) return
+    try {
+      if (fraction === null || !Number.isFinite(fraction)) win.setProgressBar(-1)
+      else win.setProgressBar(Math.max(0, Math.min(1, fraction)))
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return { win, loadApp, showLoading, showError, showUpdateOverlay, updateTaskbarProgress }
 }

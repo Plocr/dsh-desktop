@@ -26,6 +26,8 @@ import { spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { log } from './logger'
+import { parseMarker, shouldExtractBundled } from './runtimeMarker'
+import { compareDots } from './version'
 
 /** 以继承 stdio 的方式运行命令并等待退出（不捕获输出，兼容受限环境）。 */
 function runInherit(cmd: string, args: string[], timeoutMs: number): Promise<void> {
@@ -57,7 +59,7 @@ function runInherit(cmd: string, args: string[], timeoutMs: number): Promise<voi
  *  - macOS：~/Library/Application Support
  *  - Linux：$XDG_DATA_HOME 或 ~/.local/share
  */
-function appDataRoot(): string {
+export function appDataRoot(): string {
   if (process.platform === 'darwin') return path.join(os.homedir(), 'Library', 'Application Support')
   if (process.platform === 'linux') {
     const xdg = process.env.XDG_DATA_HOME
@@ -72,6 +74,8 @@ function appDataRoot(): string {
 export interface RuntimeSpec {
   node: string
   bin: string
+  /** 当前 harness 版本（随包 marker 或用户自更新后的版本；未知时为 undefined）。 */
+  dshVersion?: string
 }
 
 export function appResourcesDir(): string {
@@ -109,12 +113,27 @@ async function extractPackagedRuntime(
   const nodeExe = path.join(runtimeDir, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node')
   const bin = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 
-  const ready =
-    existsSync(localMarker) &&
-    readFileSync(localMarker, 'utf8').trim() === marker &&
-    existsSync(nodeExe) &&
-    existsSync(bin)
-  if (ready) return { node: nodeExe, bin }
+  const localText = (() => {
+    try {
+      return readFileSync(localMarker, 'utf8')
+    } catch {
+      return null
+    }
+  })()
+
+  // 就绪判断：node/bin 均存在，且按 marker 决策不需要解压覆盖
+  // （用户自更新的运行时不再被误覆盖，除非随包内嵌 dsh 更新）
+  const needsExtract = shouldExtractBundled(marker, localText, compareDots)
+  const binVersion = (() => {
+    try {
+      return parseMarker(marker).dsh
+    } catch {
+      return null
+    }
+  })()
+  if (existsSync(nodeExe) && existsSync(bin) && !needsExtract) {
+    return { node: nodeExe, bin, dshVersion: binVersion ?? undefined }
+  }
 
   log('info', `extracting packaged runtime -> ${runtimeDir}`)
   onExtract?.()
@@ -135,7 +154,7 @@ async function extractPackagedRuntime(
     throw new Error(`运行时解压后不完整：${runtimeDir}`)
   }
   log('info', `runtime extracted: ${runtimeDir}`)
-  return { node: nodeExe, bin }
+  return { node: nodeExe, bin, dshVersion: binVersion ?? undefined }
 }
 
 export async function resolveRuntime(onExtract?: () => void): Promise<RuntimeSpec> {
