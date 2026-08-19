@@ -224,41 +224,48 @@ async function installFramework(version: string, hooks: FrameworkUpdateHooks): P
   }
 }
 
+export interface FrameworkUpdateResult {
+  ok: boolean
+  /** 是否真的执行并完成了「下载+替换」。false 时 message 是查询失败/已最新/未开始。 */
+  updated: boolean
+  message: string
+}
+
 /**
- * 执行一次框架更新（检测 + 下载 + 替换）。
- * - manual=false：冷启动自动检查；有新版直接下载替换（hooks 驱动进度条）。
- * - manual=true：托盘「更新框架」手动触发；无新版会提示。
+ * 执行一次框架检查/更新（检测 + 按需下载替换）。
+ * - 有新版 → 直接本地下载替换（hooks 驱动进度条），return { ok, updated: true }。
+ * - 已最新 → { ok, updated: false }。
+ * - 失败   → { ok: false, updated: false }。
  * 开发模式直接返回（不做）。
  */
 export async function runFrameworkUpdate(
   manual: boolean,
   hooks: FrameworkUpdateHooks,
-): Promise<{ ok: boolean; message: string }> {
+): Promise<FrameworkUpdateResult> {
   if (!app.isPackaged) {
     log('info', 'frameworkUpdate: dev mode, skipped')
-    return { ok: false, message: '开发模式不执行框架更新' }
+    return { ok: false, updated: false, message: '开发模式不执行框架更新' }
   }
   if (updating) {
-    return { ok: false, message: '框架更新已在运行' }
+    return { ok: false, updated: false, message: '框架更新已在运行' }
   }
   updating = true
   try {
     const res = await checkHarnessUpdateResult()
     const local = res.local ?? (await readLocalDshVersion())
     if (!res.ok || !res.latest) {
-      const msg = manual
-        ? '框架版本查询失败（网络/registry 不可达）'
-        : '框架版本查询失败（网络/registry 不可达）'
+      const msg = '框架版本查询失败（网络/registry 不可达）'
       log('info', `frameworkUpdate: query failed -> ${msg}`)
-      return { ok: false, message: msg }
+      return { ok: false, updated: false, message: msg }
     }
     const { runtimeDir } = runtimePaths()
     const installed = installedVersionFromDir(runtimeDir) ?? local
     if (!res.available) {
-      return { ok: true, message: manual ? `框架已是最新（${installed}）` : `框架已是最新（${installed}）` }
+      return { ok: true, updated: false, message: `框架已是最新：v${installed}` }
     }
     hooks.onProgress({ pct: 0, detail: `发现官方框架新版：本地 v${installed} → v${res.latest}，开始本地更新…`, url: null })
-    return await installFramework(res.latest, hooks)
+    const r = await installFramework(res.latest, hooks)
+    return { ok: r.ok, updated: r.ok, message: r.message }
   } finally {
     updating = false
   }

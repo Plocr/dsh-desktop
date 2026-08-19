@@ -19,10 +19,8 @@ export interface AppSettings {
   recentWorkspaces: string[]
   /** 全局唤出快捷键（Electron accelerator 语法；空串禁用） */
   globalShortcut: string
-  /** 启动后自动检查更新 */
+  /** 启动后自动检查更新（总开关：外壳下载 + 框架本地替换一起管） */
   autoUpdate: boolean
-  /** 冷启动自动检查到新的官方 harness 时，自动本地下载并替换（false 则仅提示） */
-  frameworkAutoReplace: boolean
   /** 被禁用的桌面插件（package name 列表；bridge 永远启用，不在此列） */
   disabledPlugins: string[]
 }
@@ -35,7 +33,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   recentWorkspaces: [],
   globalShortcut: 'CommandOrControl+Shift+Space',
   autoUpdate: true,
-  frameworkAutoReplace: true,
   disabledPlugins: [],
 }
 
@@ -53,7 +50,6 @@ export function loadSettings(file: string): AppSettings {
       }
       if (typeof raw.globalShortcut === 'string') out.globalShortcut = raw.globalShortcut
       if (typeof raw.autoUpdate === 'boolean') out.autoUpdate = raw.autoUpdate
-      if (typeof raw.frameworkAutoReplace === 'boolean') out.frameworkAutoReplace = raw.frameworkAutoReplace
       if (Array.isArray(raw.disabledPlugins)) {
         out.disabledPlugins = raw.disabledPlugins.filter((p): p is string => typeof p === 'string')
       }

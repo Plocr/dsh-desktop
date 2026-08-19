@@ -19,7 +19,6 @@ export interface TrayDeps {
     autoStart: boolean
     notifications: boolean
     autoUpdate: boolean
-    frameworkAutoReplace: boolean
     runningJobs: number
     harnessState: string
     globalShortcut: string
@@ -32,14 +31,12 @@ export interface TrayDeps {
   restartHarness: () => void
   openLogs: () => void
   checkUpdate: () => void
-  updateFramework: () => void
   cleanLogs: () => void
   uninstall: () => void
   togglePlugin: (name: string, enabled: boolean) => void
   setAutoStart: (v: boolean) => void
   setNotifications: (v: boolean) => void
   setAutoUpdate: (v: boolean) => void
-  setFrameworkAutoReplace: (v: boolean) => void
   quit: () => void
 }
 
@@ -81,19 +78,17 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
         label: '设置',
         submenu: [
           {
-            label: `自动检测更新（v${s.appVersion}）`,
+            // 总开关：开 = 冷启动自动检查（外壳下载 + 框架本地替换）；关 = 仅手动
+            label: `自动更新（v${s.appVersion}）`,
             type: 'checkbox' as const,
             checked: s.autoUpdate,
             click: (item) => deps.setAutoUpdate(item.checked),
           },
           {
-            label: '框架自动更新（本地下载替换）',
-            type: 'checkbox' as const,
-            checked: s.frameworkAutoReplace,
-            click: (item) => deps.setFrameworkAutoReplace(item.checked),
+            // 手动：检查外壳 + 框架，有新版自动下载/替换（本地，不跳浏览器）
+            label: '检查并更新…',
+            click: () => deps.checkUpdate(),
           },
-          { label: '检查更新…', click: () => deps.checkUpdate() },
-          { label: '更新框架（本地下载）…', click: () => deps.updateFramework() },
           { type: 'separator' },
           {
             label: s.globalShortcut ? `全局快捷键：${s.globalShortcut}` : '全局快捷键：未启用',

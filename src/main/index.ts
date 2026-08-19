@@ -26,8 +26,7 @@ import { handleBridgeEvent, runningJobCount } from './bridgeEvents'
 import { registerIpc } from './ipc'
 import { parseDeepLink, extractDeepLinkFromArgv, type DeepLinkAction } from './deepLink'
 import { registerGlobalShortcut, currentShortcut, unregisterAllShortcuts } from './shortcut'
-import { initUpdater, checkNow, type UpdaterHooks, type UpdateProgress } from './updater'
-import { initHarnessCheck, stopHarnessCheck, checkHarnessUpdate } from './harnessCheck'
+import { initUpdater, checkNow, type UpdateProgress } from './updater'
 import { runFrameworkUpdate, type FrameworkProgress } from './frameworkUpdate'
 import { cleanLogs, uninstallApp } from './maintenance'
 
@@ -208,22 +207,26 @@ function endUpdateOverlay(): void {
 }
 
 /** 框架（官方 harness）本地更新：检测 → 下载（进度） → 替换 → 重启。 */
-async function doFrameworkUpdate(manual: boolean): Promise<void> {
+async function doFrameworkUpdate(): Promise<void> {
   const open = beginUpdateOverlay({ pct: 0, detail: '正在检查框架更新…', url: null })
-  const r = await runFrameworkUpdate(manual, {
+  const r = await runFrameworkUpdate(false, {
     onProgress: (p: FrameworkProgress) => open({ pct: p.pct, detail: p.detail, url: p.url }),
   })
   endUpdateOverlay()
-  if (r.ok && manual) notify('框架更新完成', r.message, () => showWindow())
-  else if (!r.ok) notify('框架更新失败', r.message, () => showWindow())
-  else if (!manual) log('info', `frameworkUpdate(auto): ${r.message}`)
-  // 成功且非手动（冷启动自动）：更新已在 installFramework 内落地，重启 harness 生效
-  if (r.ok) {
+  if (!r.ok) {
+    notify('框架更新失败', r.message, () => showWindow())
+    return
+  }
+  if (r.updated) {
+    log('info', `frameworkUpdate: ${r.message}`)
+    // 已在 installFramework 内落地，重启 harness 生效
     try {
       harness.restart()
     } catch (err) {
       log('error', `frameworkUpdate: restart failed: ${err instanceof Error ? err.message : String(err)}`)
     }
+  } else {
+    log('info', `frameworkUpdate: ${r.message}`)
   }
 }
 
@@ -548,7 +551,6 @@ async function main(): Promise<void> {
       autoStart: settings.autoStart,
       notifications: settings.notifications,
       autoUpdate: settings.autoUpdate,
-      frameworkAutoReplace: settings.frameworkAutoReplace,
       runningJobs,
       harnessState: harness?.state === 'ready' ? '运行中' : harness?.state === 'starting' ? '启动中' : '已停止',
       globalShortcut: currentShortcut(),
@@ -575,13 +577,11 @@ async function main(): Promise<void> {
     openLogs: () => void shell.openPath(logDirPath()),
     cleanLogs: () => cleanLogs(),
     uninstall: () => uninstallApp(),
-    // 两层检测：桌面端 + 官方 harness
+    // 手动「检查并更新…」：外壳 + 框架一起查，有新版就本地下载/替换
     checkUpdate: () => {
       void checkNow(true)
-      void checkHarnessUpdate().then((msg) => log('info', `harnessCheck: manual -> ${msg}`))
+      void doFrameworkUpdate()
     },
-    // 本地更新框架（官方 harness）：直接下载最新版替换本地版本
-    updateFramework: () => void doFrameworkUpdate(true),
     setAutoStart: (v) => {
       settings.autoStart = v
       saveSettings(settingsFile, settings)
@@ -595,11 +595,6 @@ async function main(): Promise<void> {
     },
     setAutoUpdate: (v) => {
       settings.autoUpdate = v
-      saveSettings(settingsFile, settings)
-      refreshTray()
-    },
-    setFrameworkAutoReplace: (v) => {
-      settings.frameworkAutoReplace = v
       saveSettings(settingsFile, settings)
       refreshTray()
     },
@@ -648,13 +643,12 @@ async function main(): Promise<void> {
     },
     { autoCheck: settings.autoUpdate },
   )
-  // 第 2 层·官方 harness 更新：仅冷启动自动检查一次。
-  // frameworkAutoReplace=true → 检测到新版直接本地下载替换（进度条 + 重启）；
-  // 否则仅提示。
-  if (settings.frameworkAutoReplace) {
-    setTimeout(() => void doFrameworkUpdate(false), 30_000)
-  } else {
-    initHarnessCheck()
+  // 更新：总开关「自动更新」= 冷启动自动检查一次（外壳 15s 下载 + 框架 30s 本地替换）；
+  // 关闭则只保留手动「检查并更新…」。
+  if (settings.autoUpdate) {
+    // 第 1 层·外壳：启动 15s 后自动检查（electron-updater）
+    // 第 2 层·框架：仅冷启动 30s 后检查一次，有新版自动下载替换（进度条 + 重启）
+    setTimeout(() => void doFrameworkUpdate(), 30_000)
   }
 
   app.on('second-instance', (_e, argv) => {
@@ -697,7 +691,6 @@ app.on('before-quit', (e) => {
   quitting = true
   log('info', 'quitting: stopping harness')
   unregisterAllShortcuts()
-  stopHarnessCheck()
   bridge?.stop()
   void harness
     ?.stop()
