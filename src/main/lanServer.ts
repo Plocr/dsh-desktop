@@ -31,6 +31,9 @@ export interface LanProxyHandle {
   stop: () => Promise<void>
 }
 
+/** 授权等待上限：超时按拒绝处理（避免请求无限挂起 → 手机一直转圈）。 */
+const APPROVAL_TIMEOUT_MS = 90_000
+
 /** 归一化客户端 IP（IPv4-mapped `::ffff:a.b.c.d` → `a.b.c.d`）。 */
 export function clientIpOf(socket: object | null | undefined): string {
   const remote = (socket as { remoteAddress?: unknown } | null | undefined)?.remoteAddress
@@ -49,12 +52,43 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
   return new Promise<LanProxyHandle>((resolve, reject) => {
     // 已获授权的设备 IP（本次运行内有效）
     const approvedIps = new Set<string>()
+    // 正在授权的请求（同一 IP 并发请求共享一次授权，避免多次弹窗/竞态）
+    const pendingApprovals = new Map<string, Promise<boolean>>()
 
-    const gate = async (ip: string): Promise<boolean> => {
-      if (approvedIps.has(ip)) return true
-      const ok = await opts.requestApproval(ip)
-      if (ok) approvedIps.add(ip)
-      return ok
+    const gate = (ip: string): Promise<boolean> => {
+      if (approvedIps.has(ip)) return Promise.resolve(true)
+      let p = pendingApprovals.get(ip)
+      if (!p) {
+        p = new Promise<boolean>((resolveGate) => {
+          let timer: NodeJS.Timeout | undefined
+          let settled = false
+          const settle = (granted: boolean): void => {
+            if (settled) return
+            settled = true
+            if (timer) clearTimeout(timer)
+            if (granted) {
+              approvedIps.add(ip)
+              log('info', `lanProxy: ${ip} 已获授权`)
+            } else {
+              log('info', `lanProxy: ${ip} 未获授权或超时`)
+            }
+            resolveGate(granted)
+          }
+          // 授权（弹窗）超时/被忽略 → 按拒绝处理，绝不无限挂起
+          timer = setTimeout(() => settle(false), APPROVAL_TIMEOUT_MS)
+          opts.requestApproval(ip).then(
+            (ok) => settle(ok),
+            (err) => {
+              log('error', `lanProxy: approval error: ${err instanceof Error ? err.message : String(err)}`)
+              settle(false)
+            },
+          )
+        })
+        const final = p.finally(() => pendingApprovals.delete(ip))
+        pendingApprovals.set(ip, final)
+        p = final
+      }
+      return p
     }
 
     const server: Server = createServer()
@@ -65,65 +99,91 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
       s.on('close', () => sockets.delete(s))
     })
 
-  // HTTP 直通
-  server.on('request', (req, res) => {
-    void (async () => {
-      const ip = clientIpOf(req.socket)
-      if (!(await gate(ip))) {
-        deny(res)
-        return
+    // 畸形请求：直接 400，不挂连接
+    server.on('clientError', (_err, socket) => {
+      try {
+        socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
+      } catch {
+        /* ignore */
       }
-      const proxyReq = httpRequest({
-        host: opts.targetHost,
-        port: opts.targetPort,
-        method: req.method,
-        path: req.url,
-        headers: { ...req.headers },
-      })
-      proxyReq.on('error', (err) => {
-        log('error', `lanProxy: forward error: ${err.message}`)
-        if (!res.headersSent) {
-          res.statusCode = 502
-          res.end('harness 不可达')
-        } else {
-          res.destroy()
+    })
+
+    // HTTP 直通
+    server.on('request', (req, res) => {
+      void (async () => {
+        try {
+          const ip = clientIpOf(req.socket)
+          log('info', `lanProxy: ${req.method} ${req.url} from ${ip}`)
+          if (!(await gate(ip))) {
+            deny(res)
+            return
+          }
+          const proxyReq = httpRequest({
+            host: opts.targetHost,
+            port: opts.targetPort,
+            method: req.method,
+            path: req.url,
+            headers: { ...req.headers },
+          })
+          proxyReq.on('error', (err) => {
+            log('error', `lanProxy: forward error: ${err.message}`)
+            if (!res.headersSent) {
+              res.statusCode = 502
+              res.end('harness 不可达')
+            } else {
+              res.destroy()
+            }
+          })
+          proxyReq.on('response', (upRes) => {
+            res.writeHead(upRes.statusCode ?? 502, upRes.headers)
+            upRes.pipe(res)
+          })
+          req.pipe(proxyReq)
+        } catch (err) {
+          log('error', `lanProxy: request handler error: ${err instanceof Error ? err.message : String(err)}`)
+          if (!res.headersSent) {
+            res.statusCode = 500
+            res.end('internal error')
+          } else {
+            res.destroy()
+          }
         }
-      })
-      proxyReq.on('response', (upRes) => {
-        res.writeHead(upRes.statusCode ?? 502, upRes.headers)
-        upRes.pipe(res)
-      })
-      req.pipe(proxyReq)
-    })()
-  })
+      })()
+    })
 
   // WebSocket 升级转发（harness 客户端流式/工具事件走 WS）
   server.on('upgrade', (req, socket, head) => {
     void (async () => {
-      const ip = clientIpOf(socket)
-      if (!(await gate(ip))) {
-        socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
-        socket.destroy()
-        return
-      }
-      const proxyReq = httpRequest({
-        host: opts.targetHost,
-        port: opts.targetPort,
-        method: req.method ?? 'GET',
-        path: req.url,
-        headers: { ...req.headers },
-      })
-      proxyReq.on('error', (err) => {
-        log('error', `lanProxy: upgrade error: ${err.message}`)
-        socket.destroy()
-      })
-      proxyReq.on('upgrade', (upRes, upSock, upHead) => {
+      try {
+        const ip = clientIpOf(socket)
+        log('info', `lanProxy: upgrade ${req.url} from ${ip}`)
+        if (!(await gate(ip))) {
+          socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+          socket.destroy()
+          return
+        }
+        const proxyReq = httpRequest({
+          host: opts.targetHost,
+          port: opts.targetPort,
+          method: req.method ?? 'GET',
+          path: req.url,
+          headers: { ...req.headers },
+        })
+        proxyReq.on('error', (err) => {
+          log('error', `lanProxy: upgrade error: ${err.message}`)
+          socket.destroy()
+        })
+        proxyReq.on('upgrade', (upRes, upSock, upHead) => {
         socket.write('HTTP/1.1 101 Switching Protocols\r\n\r\n')
         upSock.write(upHead as Buffer)
         upSock.pipe(socket)
         socket.pipe(upSock)
       })
       proxyReq.end(head)
+      } catch (err) {
+        log('error', `lanProxy: upgrade handler error: ${err instanceof Error ? err.message : String(err)}`)
+        socket.destroy()
+      }
     })()
   })
 

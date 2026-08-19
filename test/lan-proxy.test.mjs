@@ -63,12 +63,46 @@ test('lanProxy: 目标不可达 → 502', async () => {
     requestApproval: async () => true,
   })
   try {
-    const r = await fetch(`http://127.0.0.1:${proxy.port}/`).catch((e) => e)
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), 6_000)
+    const r = await fetch(`http://127.0.0.1:${proxy.port}/`, { signal: ctrl.signal }).catch((e) => e)
+    clearTimeout(t)
     // Node fetch 可能抛 ECONNREFUSED（上游在建立连接时报错）→ 允许 502 或抛错都在预期内
-    if (r instanceof Error) assert.ok(/ECONNREFUSED|fetch failed/i.test(r.message))
+    if (r instanceof Error) assert.ok(/ECONNREFUSED|fetch failed|abort/i.test(r.message))
     else assert.equal(r.status, 502)
   } finally {
     await proxy.stop()
+  }
+})
+
+test('lanProxy: 授权并发去重与 approve 一次性', async () => {
+  const harness = await startFakeHarness((req, res) => res.end('ok'))
+  let approvals = 0
+  let release = null
+  const gate = new Promise((r) => { release = r })
+  const proxy = await createLanProxy({
+    targetHost: '127.0.0.1',
+    targetPort: harness.port,
+    requestApproval: async () => {
+      approvals += 1
+      await gate
+      return true
+    },
+  })
+  try {
+    const p1 = fetch(`http://127.0.0.1:${proxy.port}/1`).then((r) => r.status)
+    const p2 = fetch(`http://127.0.0.1:${proxy.port}/2`).then((r2) => r2.status)
+    // 同一 IP 的第一个请求正在授权（挂起），第二个应等待而不是叠加授权（由 gate 串行/白名单兜底）
+    await new Promise((r) => setTimeout(r, 150))
+    release(true)
+    const [s1, s2] = await Promise.all([p1, p2])
+    assert.equal(s1, 200)
+    assert.equal(s2, 200)
+    // 每个 IP 只触发一次授权
+    assert.equal(approvals, 1)
+  } finally {
+    await proxy.stop()
+    await new Promise((r) => harness.server.close(r))
   }
 })
 

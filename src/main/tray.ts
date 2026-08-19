@@ -26,6 +26,7 @@ export interface TrayDeps {
     harnessVersion: string | null
     lanShare: boolean
     lanUrl: string | null
+    lanCandidates: string[]
   }
   getPlugins: () => DesktopPluginToggle[]
   showWindow: () => void
@@ -42,6 +43,7 @@ export interface TrayDeps {
   setAutoUpdate: (v: boolean) => void
   setLanShare: (v: boolean) => void
   copyLanUrl: () => void
+  copyLanUrlFor: (ip: string) => void
   quit: () => void
 }
 
@@ -110,6 +112,13 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
             enabled: !!s.lanUrl,
             click: () => deps.copyLanUrl(),
           },
+          // 多网卡/多地址时，列出备用地址（点选复制）
+          ...s.lanCandidates
+            .filter((ip) => !s.lanUrl || !s.lanUrl.includes(ip))
+            .map((ip): Electron.MenuItemConstructorOptions => ({
+              label: `备用地址：http://${ip}:…`,
+              click: () => deps.copyLanUrlFor(ip),
+            })),
           { type: 'separator' },
           {
             label: s.globalShortcut ? `全局快捷键：${s.globalShortcut}` : '全局快捷键：未启用',

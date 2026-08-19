@@ -146,7 +146,7 @@ function regenerateOverlay(resourcesDir: string, token: string): string {
 }
 
 // ---- 局域网访问（壳内反向代理 + 电脑授权）----
-/** 当前选定的局域网 IPv4；null = 未开启或无非内部网卡。 */
+/** 当前选定的局域网 IPv4（对外主地址）；null = 未开启或无非内部网卡。 */
 let lanIp: string | null = null
 /** 局域网访问地址（http://<lanIp>:<代理端口>），ready 后填充。 */
 let lanUrl: string | null = null
@@ -154,33 +154,85 @@ let lanUrl: string | null = null
 let lanHandle: import('./lanServer').LanProxyHandle | null = null
 /** 当前代理转发的 harness web 端口（harness 重启随机端口变化 → 重建代理）。 */
 let lanTargetPort: number | null = null
+/** 授权弹窗串行锁（多设备同时来不叠弹窗）。 */
+let lanApprovalLock = false
 
-/** 挑选一个本机局域网 IPv4：优先私有网段（192.168/10/172.16-31），否则第一个非内部 IPv4。 */
-function detectLanIp(): string | null {
+/** 本机全部可用局域网 IPv4（排除 internal/链路本地），best-first 排序。 */
+function lanCandidates(): string[] {
+  const list: string[] = []
   const ifaces = os.networkInterfaces()
-  const all: string[] = []
-  const privateIp: string[] = []
-  for (const list of Object.values(ifaces)) {
-    for (const f of list ?? []) {
+  for (const l of Object.values(ifaces)) {
+    for (const f of l ?? []) {
       if (f.family !== 'IPv4' || f.internal) continue
       const ip = f.address
-      all.push(ip)
-      if (/^192\.168\./.test(ip) || /^10\./.test(ip) || /^172\.(1[6-9]|2\d|3[01])\./.test(ip)) privateIp.push(ip)
+      if (/^(169\.254\.|0\.)\./.test(ip) || /^0\.0\.0\.0$/.test(ip)) continue
+      if (!list.includes(ip)) list.push(ip)
     }
   }
-  return privateIp[0] ?? all[0] ?? null
+  // 优先级：192.168 > 10.x > 172.16-31 > 其它（常见虚拟网段排后）
+  const rank = (ip: string): number =>
+    /^192\.168\./.test(ip) ? 0 : /^10\./.test(ip) ? 1 : /^172\.(1[6-9]|2\d|3[01])\./.test(ip) ? 2 : 3
+  return list.sort((a, b) => rank(a) - rank(b))
+}
+
+/** 默认路由出口 IP（UDP connect 到公网 IP，OS 路由表选源地址，不发数据、断网也安全）。 */
+function defaultRouteIp(): Promise<string | null> {
+  return new Promise((resolve) => {
+    let sock: import('node:dgram').Socket | null = null
+    const t = setTimeout(() => {
+      try {
+        sock?.close()
+      } catch {
+        /* ignore */
+      }
+      resolve(null)
+    }, 1500)
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const dgram = require('node:dgram') as typeof import('node:dgram')
+      sock = dgram.createSocket('udp4')
+      const s = sock
+      s.once('error', () => {
+        clearTimeout(t)
+        resolve(null)
+      })
+      s.connect(80, '8.8.8.8', () => {
+        clearTimeout(t)
+        const addr = s.address().address
+        try {
+          s.close()
+        } catch {
+          /* ignore */
+        }
+        resolve(addr && !addr.startsWith('0.') ? addr : null)
+      })
+    } catch {
+      clearTimeout(t)
+      resolve(null)
+    }
+  })
+}
+
+/** 选「对外主」局域网 IP：优先默认路由出口，否则按 192.168/10/172 优先级取候选。 */
+async function resolveBestLanIp(): Promise<string | null> {
+  const dr = await defaultRouteIp()
+  if (dr) return dr
+  return lanCandidates()[0] ?? null
 }
 
 /**
- * 局域网访问：不改变 harness 监听（保持 127.0.0.1，浏览器版/本机窗口不受影响），
- * 仅让栈把 <局域网IP> 加入 /api 信任围栏（--trusted-host，host-only，容忍任意端口），
+ * 局域网访问：不改变 harness 监听（保持 127.0.0.1，浏览器版/本机窗口不受影响）；
+ * 把所有候选局域网 IP 加入 /api 信任围栏（--trusted-host，host-only，容忍任意端口），
  * 实际对外由壳起的反向代理 + 电脑授权负责。
  */
-function applyLanNetwork(): void {
-  lanIp = settings.lanShare ? detectLanIp() : null
-  harness?.setNetwork(undefined, lanIp ? [lanIp] : [])
-  if (settings.lanShare && !lanIp) {
+async function applyLanNetwork(): Promise<void> {
+  lanIp = settings.lanShare ? await resolveBestLanIp() : null
+  const trusted = settings.lanShare ? lanCandidates() : []
+  harness?.setNetwork(undefined, trusted)
+  if (settings.lanShare && trusted.length === 0) {
     log('error', 'lanShare: 未发现局域网 IPv4，无法对外提供访问')
+  } else if (settings.lanShare && lanIp) {
+    log('info', `lanShare: 主地址 ${lanIp}，候选 ${trusted.join(', ')} 加入信任围栏`)
   }
 }
 
@@ -215,28 +267,42 @@ async function manageLanProxy(harnessPort: number): Promise<void> {
   refreshTray()
 }
 
-/** 电脑授权：其它设备首次访问时弹原生确认框。 */
+/** 电脑授权：其它设备首次访问时弹确认框（无父窗口保证可见 + 通知提示 + 串行 + 失败即拒）。 */
 async function promptLanApproval(ip: string): Promise<boolean> {
-  showWindow()
-  const opts = {
-    type: 'question' as const,
-    buttons: ['允许访问', '拒绝'],
-    defaultId: 1,
-    cancelId: 1,
-    title: '局域网访问授权',
-    message: `设备 ${ip} 正在请求访问 DSH Desktop`,
-    detail: '允许后，该设备可在浏览器中打开本工作台（可读取文件、执行命令）。仅本次运行生效，关闭局域网访问后清除。',
-    noLink: true,
+  try {
+    // 串行：已有授权弹窗进行中 → 先拒绝后续设备，避免叠弹窗（它们下次再试即可）
+    if (lanApprovalLock) return false
+    lanApprovalLock = true
+    // 先把窗口唤回前台，再发一条可见通知作为提示
+    showWindow()
+    if (settings.notifications) {
+      notify('局域网访问授权', `设备 ${ip} 请求访问 DSH Desktop（点击已唤出授权框）`, () => showWindow())
+    }
+    const opts = {
+      type: 'question' as const,
+      buttons: ['允许访问', '拒绝'],
+      defaultId: 1,
+      cancelId: 1,
+      title: '局域网访问授权',
+      message: `设备 ${ip} 正在请求访问 DSH Desktop`,
+      detail: '允许后，该设备可在浏览器中打开本工作台（可读取文件、执行命令）。仅本次运行生效，关闭局域网访问后清除。',
+      noLink: true,
+    }
+    // 无父窗口的任务栏对话框：窗口最小化/隐藏到托盘也能显示
+    const r = await dialog.showMessageBox(opts)
+    return r.response === 0
+  } catch (err) {
+    log('error', `lanShare: approval dialog error: ${err instanceof Error ? err.message : String(err)}`)
+    return false // 弹窗异常 → 拒绝，绝不无限挂起
+  } finally {
+    lanApprovalLock = false
   }
-  const w = win?.win
-  const r = w ? await dialog.showMessageBox(w, opts) : await dialog.showMessageBox(opts)
-  return r.response === 0
 }
 
 /** 重启 Harness：先按当前设置重新同步插件并生成 overlay，再重启。 */
 async function restartHarness(dir?: string): Promise<void> {
   try {
-    applyLanNetwork()
+    await applyLanNetwork()
     const resourcesDir = appResourcesDir()
     // 同步 profile（插件启停后，profile node_modules 增删）+ 重生成 overlay
     ensureProfile(
@@ -639,8 +705,8 @@ async function main(): Promise<void> {
     },
   )
 
-  // 局域网访问：harness 保持回环监听 + 把局域网 IP 加入信任围栏（start 前应用）
-  applyLanNetwork()
+  // 局域网访问：harness 保持回环监听 + 把候选局域网 IP 加入信任围栏（start 前应用）
+  await applyLanNetwork()
 
   bridge = new BridgeClient(
     () => {
@@ -670,12 +736,14 @@ async function main(): Promise<void> {
   )
 
   trayHandle = createTray(path.join(resourcesDir, 'icons', 'tray.png'), {
-    getUrl: () => lanUrl ?? harness?.ready?.url ?? lastUrl,    getState: () => ({
+    getUrl: () => lanUrl ?? harness?.ready?.url ?? lastUrl,
+    getState: () => ({
       autoStart: settings.autoStart,
       notifications: settings.notifications,
       autoUpdate: settings.autoUpdate,
       lanShare: settings.lanShare,
       lanUrl,
+      lanCandidates: settings.lanShare ? lanCandidates() : [],
       runningJobs,
       harnessState: harness?.state === 'ready' ? '运行中' : harness?.state === 'starting' ? '启动中' : '已停止',
       globalShortcut: currentShortcut(),
@@ -740,7 +808,7 @@ async function main(): Promise<void> {
           lanUrl = null
           refreshTray()
         })()
-      } else if (!detectLanIp()) {
+      } else if (lanCandidates().length === 0) {
         notify('局域网访问已开启', '未发现局域网网卡 IPv4，无法对外提供服务。', () => showWindow())
       } else {
         notify('局域网访问已开启', '正在重启 harness 以开放局域网（手机/其它设备首次访问需在本机授权）。', () => showWindow())
@@ -755,6 +823,13 @@ async function main(): Promise<void> {
       }
       void clipboard.writeText(lanUrl)
       notify('局域网地址已复制', lanUrl, () => showWindow())
+    },
+    // 复制指定候选 IP 的局域网地址（多网卡时备用）
+    copyLanUrlFor: (ip: string) => {
+      if (!lanHandle) return
+      const url = `http://${ip}:${lanHandle.port}`
+      void clipboard.writeText(url)
+      notify('局域网地址已复制', url, () => showWindow())
     },
     quit: () => app.quit(),
   })
