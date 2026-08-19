@@ -28,6 +28,7 @@ import { parseDeepLink, extractDeepLinkFromArgv, type DeepLinkAction } from './d
 import { registerGlobalShortcut, currentShortcut, unregisterAllShortcuts } from './shortcut'
 import { initUpdater, checkNow, type UpdateProgress } from './updater'
 import { runFrameworkUpdate, type FrameworkProgress } from './frameworkUpdate'
+import { readLocalDshVersion } from './harnessCheck'
 import { cleanLogs, uninstallApp } from './maintenance'
 
 // dev 模式与已安装版隔离 userData（app 名解析为 productName → 默认同名目录，
@@ -54,6 +55,8 @@ let bridge: BridgeClient
 let settings: AppSettings
 let settingsFile = ''
 let quitting = false
+/** 当前框架（官方 harness）版本，供托盘菜单展示；用户自更新后同步刷新。 */
+let frameworkVersion: string | null = null
 let pendingRegisterWorkspace: string | null = null
 let lastUrl: string | null = null
 let runningJobs = 0
@@ -177,56 +180,72 @@ function refreshTray(): void {
   trayHandle?.refresh()
 }
 
-// ---- 本地更新反馈：更新覆盖层（进度条 + 下载地址）+ 任务栏进度 ----
+// ---- 本地更新反馈：右上角小卡片（进度条 + 下载地址）+ 任务栏进度 ----
 type UpdateOverlayState = { pct: number | null; detail: string; url?: string | null }
 let updateSink: ((p: UpdateOverlayState) => void) | null = null
 
-/** 打开更新覆盖层，返回可推送进度的更新函数。 */
+/** 打开更新小卡片，返回可推送进度的更新函数（不导航、不占整页、可关闭）。 */
 function beginUpdateOverlay(init: UpdateOverlayState): (p: UpdateOverlayState) => void {
   if (!win) return () => undefined
-  const sink = win.showUpdateOverlay(
-    { pct: init.pct, detail: init.detail, url: init.url },
-    resolveThemePreference(dshHome()),
-  )
+  const sink = win.showUpdateOverlay({ pct: init.pct, detail: init.detail, url: init.url })
   updateSink = sink
   return (p) => sink({ pct: p.pct, detail: p.detail, url: p.url })
 }
 
-function pushUpdate(p: UpdateOverlayState): void {
-  updateSink?.(p)
-}
-
-/** 结束更新覆盖：隐藏不确定进度并清除任务栏进度。 */
+/** 结束更新卡片：移除卡片并清除任务栏进度。 */
 function endUpdateOverlay(): void {
   updateSink = null
   try {
-    win?.win.setProgressBar(-1)
+    win?.hideUpdateOverlay()
   } catch {
     /* ignore */
   }
 }
 
-/** 框架（官方 harness）本地更新：检测 → 下载（进度） → 替换 → 重启。 */
-async function doFrameworkUpdate(): Promise<void> {
+/** 刷新托盘显示的「当前框架版本」（读已安装运行时，用户自更新后也准确）。 */
+function refreshFrameworkVersion(): void {
+  void readLocalDshVersion()
+    .then((v) => {
+      if (v && v !== frameworkVersion) {
+        frameworkVersion = v
+        refreshTray()
+      }
+    })
+    .catch(() => {})
+}
+
+/**
+ * 框架（官方 harness）更新：检测 → 下载（进度） → 替换 → 重启。
+ * - 页面不被打断：进度是一条右上角小卡片（可关闭、可最小化）；任务栏同步进度。
+ * - manual=false：冷启动自动检查；有新版则本地替换，已最新/失败静默（托盘常显版本）。
+ * - manual=true：托盘「检查并更新…」；无论结果都明确回报（含官方+框架版本）。
+ */
+async function doFrameworkUpdate(manual: boolean): Promise<void> {
   const open = beginUpdateOverlay({ pct: 0, detail: '正在检查框架更新…', url: null })
   const r = await runFrameworkUpdate(false, {
     onProgress: (p: FrameworkProgress) => open({ pct: p.pct, detail: p.detail, url: p.url }),
   })
   endUpdateOverlay()
-  if (!r.ok) {
-    notify('框架更新失败', r.message, () => showWindow())
-    return
-  }
-  if (r.updated) {
-    log('info', `frameworkUpdate: ${r.message}`)
-    // 已在 installFramework 内落地，重启 harness 生效
+
+  if (r.ok && r.updated) {
+    // 更新已落地：刷新版本显示 → 通知 → 重启 harness 生效
+    refreshFrameworkVersion()
+    notify('框架更新完成', r.message, () => undefined)
     try {
       harness.restart()
     } catch (err) {
       log('error', `frameworkUpdate: restart failed: ${err instanceof Error ? err.message : String(err)}`)
     }
+    return
+  }
+  if (manual) {
+    // 手动检查：明确回报（已最新 / 失败），含官方 + 框架当前版本
+    const label = `官方 v${app.getVersion()} · 框架 v${frameworkVersion ?? '—'}`
+    if (r.ok) notify('检查并更新', `${r.message}（${label}）`, () => showWindow())
+    else notify('检查并更新失败', `${r.message}（${label}）`, () => showWindow())
   } else {
-    log('info', `frameworkUpdate: ${r.message}`)
+    // 自动（冷启动）检查：只记日志，不打扰（托盘菜单已常显两个版本）
+    log('info', `frameworkUpdate(auto): ${r.message}（官方 v${app.getVersion()} · 框架 v${frameworkVersion ?? '—'}）`)
   }
 }
 
@@ -478,6 +497,8 @@ async function main(): Promise<void> {
     win?.showLoading('首次运行：正在解压运行时…', resolveThemePreference(dshHome()))
   })
   dshCliPath = runtime.bin
+  frameworkVersion = runtime.dshVersion ?? null
+  refreshFrameworkVersion()
   overlayPath = regenerateOverlay(resourcesDir, token)
 
   harness = new HarnessManager(
@@ -555,6 +576,7 @@ async function main(): Promise<void> {
       harnessState: harness?.state === 'ready' ? '运行中' : harness?.state === 'starting' ? '启动中' : '已停止',
       globalShortcut: currentShortcut(),
       appVersion: app.getVersion(),
+      frameworkVersion,
     }),
     showWindow,
     openBrowser,
@@ -577,10 +599,10 @@ async function main(): Promise<void> {
     openLogs: () => void shell.openPath(logDirPath()),
     cleanLogs: () => cleanLogs(),
     uninstall: () => uninstallApp(),
-    // 手动「检查并更新…」：外壳 + 框架一起查，有新版就本地下载/替换
+    // 手动「检查并更新…」：外壳 + 框架一起查，有新版就本地下载/替换（右上角小卡片进度）
     checkUpdate: () => {
       void checkNow(true)
-      void doFrameworkUpdate()
+      void doFrameworkUpdate(true)
     },
     setAutoStart: (v) => {
       settings.autoStart = v
@@ -648,7 +670,7 @@ async function main(): Promise<void> {
   if (settings.autoUpdate) {
     // 第 1 层·外壳：启动 15s 后自动检查（electron-updater）
     // 第 2 层·框架：仅冷启动 30s 后检查一次，有新版自动下载替换（进度条 + 重启）
-    setTimeout(() => void doFrameworkUpdate(), 30_000)
+    setTimeout(() => void doFrameworkUpdate(false), 30_000)
   }
 
   app.on('second-instance', (_e, argv) => {

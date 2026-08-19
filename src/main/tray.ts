@@ -23,6 +23,7 @@ export interface TrayDeps {
     harnessState: string
     globalShortcut: string
     appVersion: string
+    frameworkVersion: string | null
   }
   getPlugins: () => DesktopPluginToggle[]
   showWindow: () => void
@@ -79,7 +80,8 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
         submenu: [
           {
             // 总开关：开 = 冷启动自动检查（外壳下载 + 框架本地替换）；关 = 仅手动
-            label: `自动更新（v${s.appVersion}）`,
+            // 同时常显两个当前版本：官方（外壳） + 框架（官方 harness）
+            label: `自动更新（官方 v${s.appVersion} · 框架 v${s.frameworkVersion ?? '—'}）`,
             type: 'checkbox' as const,
             checked: s.autoUpdate,
             click: (item) => deps.setAutoUpdate(item.checked),

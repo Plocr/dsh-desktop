@@ -11,8 +11,14 @@ export interface WindowHandle {
   loadApp: (url: string) => void
   showLoading: (state?: string, theme?: 'light' | 'dark' | 'system') => void
   showError: (msg: string, theme?: 'light' | 'dark' | 'system') => void
-  /** 本地更新覆盖层：加载更新面板并返回实时进度 setter；调用方负责 setProgressBar 之外的任务栏进度。 */
-  showUpdateOverlay: (init: { pct?: number | null; detail: string; url?: string | null }, themeArg?: 'light' | 'dark' | 'system') => (p: { pct: number | null; detail: string; url?: string | null }) => void
+  /** 更新进度小卡片：在当前页面右上角注入一个非阻塞卡片（可关闭、不导航、不影响使用/最小化）。 */
+  showUpdateOverlay: (init: { pct?: number | null; detail: string; url?: string | null }) => (p: {
+    pct: number | null
+    detail: string
+    url?: string | null
+  }) => void
+  /** 移除更新进度卡片并清除任务栏进度。 */
+  hideUpdateOverlay: () => void
   updateTaskbarProgress: (fraction: number | null) => void
 }
 
@@ -161,38 +167,74 @@ export function createWindow(
   }
 
   /**
-   * 本地更新覆盖层：用 loading.html 的 mode=update 面板显示进度条 + 下载地址。
-   * 返回一个 setter 供调用方逐帧推送 { pct, detail, url }；调用时同步更新任务栏进度。
+   * 更新进度小卡片：在当前页面右上角注入一个非阻塞卡片（可关闭、不导航、
+   * 不挡操作、可最小化到托盘）。返回一个 setter 供逐帧推送 { pct, detail, url }，
+   * setter 同步更新任务栏进度。页面不可用（还没加载）时静默降级为任务栏进度。
    */
+  // 注入到页面里的卡片引导脚本：创建固定 div + 定义 window.__dshUpdate(pct,detail,url)
+  const UPDATE_TOAST = `function(){
+  var ID='dsh-update-toast';
+  var el=document.getElementById(ID);
+  if(!el){
+    el=document.createElement('div');
+    el.id=ID;
+    el.style.cssText='position:fixed;top:14px;right:14px;z-index:2147483647;min-width:280px;max-width:360px;font:13px/1.55 system-ui,"Segoe UI",sans-serif;color:#f5f7fa;background:rgba(18,20,26,.93);border:1px solid rgba(255,255,255,.15);border-radius:12px;padding:10px 12px 12px;box-shadow:0 10px 28px rgba(0,0,0,.4)';
+    el.innerHTML='<div class="dshut-title" style="font-weight:600;margin-bottom:4px;padding-right:18px">更新</div>'+
+      '<div class="dshut-detail" style="opacity:.92;margin-bottom:7px;white-space:pre-wrap;word-break:break-all">…</div>'+
+      '<div style="height:4px;border-radius:2px;background:rgba(255,255,255,.18);overflow:hidden"><div class="dshut-bar" style="height:100%;width:0;background:#4d7cfe;transition:width .2s"></div></div>'+
+      '<div class="dshut-url" style="opacity:.75;font-size:11px;margin-top:6px;word-break:break-all;display:none">…</div>'+
+      '<button class="dshut-close" aria-label="关闭" style="position:absolute;top:7px;right:9px;border:0;background:none;color:#fff;opacity:.65;cursor:pointer;font-size:16px;line-height:1">×</button>';
+    document.body.appendChild(el);
+    el.querySelector('.dshut-close').onclick=function(){var e=document.getElementById(ID); if(e) e.remove();};
+    window.__dshUpdate=function(p,d,u){
+      var de=el.querySelector('.dshut-detail'); if(typeof d==='string'&&d) de.textContent=d;
+      var ue=el.querySelector('.dshut-url'); if(typeof u==='string'&&u){ ue.textContent='下载地址：'+u; ue.style.display='block'; }
+      var bar=el.querySelector('.dshut-bar'); var n=typeof p==='number'&&Number.isFinite(p);
+      if(n) bar.style.width=Math.max(0,Math.min(100,p))+'%';
+    };
+  }
+  window.__dshUpdate(pct,detail,url);
+}`
+
+  const sendToast = (pct: number | null, detail: string, url?: string | null): void => {
+    if (win.isDestroyed()) return
+    const code = `(${UPDATE_TOAST})(...${JSON.stringify([pct, detail, url ?? null])})`
+    void win.webContents.executeJavaScript(code).catch(() => {})
+  }
+
   const showUpdateOverlay = (
     init: { pct?: number | null; detail: string; url?: string | null },
-    themeArg?: 'light' | 'dark' | 'system',
   ): ((p: { pct: number | null; detail: string; url?: string | null }) => void) => {
     if (win.isDestroyed()) return () => undefined
-    const query: Record<string, string> = { mode: 'update', detail: encodeURIComponent(init.detail) }
-    if (init.url) query.url = encodeURIComponent(init.url)
-    if (themeArg === 'light' || themeArg === 'dark') query.theme = themeArg
     const setTaskbar = (pct: number | null): void => {
-      if (win.isDestroyed()) return
       try {
-        if (typeof pct === 'number' && Number.isFinite(pct)) {
-          win.setProgressBar(Math.max(0, Math.min(1, pct / 100)))
-        } else {
-          win.setProgressBar(-1) // 不确定进度
-        }
+        if (typeof pct === 'number' && Number.isFinite(pct)) win.setProgressBar(Math.max(0, Math.min(1, pct / 100)))
+        else win.setProgressBar(-1)
       } catch {
         /* ignore */
       }
     }
     setTaskbar(typeof init.pct === 'number' ? init.pct : null)
-    void win.loadFile(loadingPage, { query })
+    sendToast(init.pct ?? null, init.detail, init.url)
     const setter = (p: { pct: number | null; detail: string; url?: string | null }): void => {
       if (win.isDestroyed()) return
       setTaskbar(p.pct)
-      const args = JSON.stringify([p.pct, p.detail, p.url ?? null])
-      void win.webContents.executeJavaScript(`window.__setUpdate ? window.__setUpdate(...${args}) : void 0`).catch(() => {})
+      sendToast(p.pct, p.detail, p.url)
     }
     return setter
+  }
+
+  /** 移除更新卡片 + 清除任务栏进度。 */
+  const hideUpdateOverlay = (): void => {
+    if (win.isDestroyed()) return
+    void win.webContents
+      .executeJavaScript(`(()=>{var e=document.getElementById('dsh-update-toast'); if(e) e.remove();})()`)
+      .catch(() => {})
+    try {
+      win.setProgressBar(-1)
+    } catch {
+      /* ignore */
+    }
   }
 
   /** 任务栏叠加进度（Windows/macOS 通用）；null 清除。 */
@@ -206,5 +248,5 @@ export function createWindow(
     }
   }
 
-  return { win, loadApp, showLoading, showError, showUpdateOverlay, updateTaskbarProgress }
+  return { win, loadApp, showLoading, showError, showUpdateOverlay, hideUpdateOverlay, updateTaskbarProgress }
 }
