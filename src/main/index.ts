@@ -29,6 +29,7 @@ import { registerGlobalShortcut, currentShortcut, unregisterAllShortcuts } from 
 import { initUpdater, checkNow, type UpdateProgress } from './updater'
 import { runHarnessUpdate, type HarnessProgress } from './harnessUpdate'
 import { readLocalDshVersion } from './harnessCheck'
+import { createLanProxy } from './lanServer'
 import { cleanLogs, uninstallApp } from './maintenance'
 
 // dev 模式与已安装版隔离 userData（app 名解析为 productName → 默认同名目录，
@@ -144,11 +145,15 @@ function regenerateOverlay(resourcesDir: string, token: string): string {
   return p
 }
 
-// ---- 局域网访问 ----
-/** 当前选定的局域网 IPv4（局域网访问开启时绑定）；null = 未开启或无非内部网卡。 */
+// ---- 局域网访问（壳内反向代理 + 电脑授权）----
+/** 当前选定的局域网 IPv4；null = 未开启或无非内部网卡。 */
 let lanIp: string | null = null
-/** 局域网访问地址（http://<lanIp>:<port>），ready 后填充。 */
+/** 局域网访问地址（http://<lanIp>:<代理端口>），ready 后填充。 */
 let lanUrl: string | null = null
+/** 局域网反向代理句柄（关掉 LAN/退出时 stop）。 */
+let lanHandle: import('./lanServer').LanProxyHandle | null = null
+/** 当前代理转发的 harness web 端口（harness 重启随机端口变化 → 重建代理）。 */
+let lanTargetPort: number | null = null
 
 /** 挑选一个本机局域网 IPv4：优先私有网段（192.168/10/172.16-31），否则第一个非内部 IPv4。 */
 function detectLanIp(): string | null {
@@ -166,32 +171,66 @@ function detectLanIp(): string | null {
   return privateIp[0] ?? all[0] ?? null
 }
 
-/** 局域网访问：把 harness 的 web server 绑定到本机局域网 IP。无 IP/未开启 → 回环。 */
+/**
+ * 局域网访问：不改变 harness 监听（保持 127.0.0.1，浏览器版/本机窗口不受影响），
+ * 仅让栈把 <局域网IP> 加入 /api 信任围栏（--trusted-host，host-only，容忍任意端口），
+ * 实际对外由壳起的反向代理 + 电脑授权负责。
+ */
 function applyLanNetwork(): void {
   lanIp = settings.lanShare ? detectLanIp() : null
-  lanUrl = null
-  harness?.setNetwork(lanIp ?? undefined, lanIp ? [lanIp] : [])
+  harness?.setNetwork(undefined, lanIp ? [lanIp] : [])
   if (settings.lanShare && !lanIp) {
-    log('error', 'lanShare: 未发现局域网 IPv4，回退为本机回环（仅本机可访问）')
-  } else if (settings.lanShare && lanIp) {
-    log('info', `lanShare: web server 将绑定 ${lanIp}，局域网可经 http://${lanIp}:<port> 访问`)
+    log('error', 'lanShare: 未发现局域网 IPv4，无法对外提供访问')
   }
 }
 
-/** ready 后构造实际访问地址：局域网开启时用局域网 IP（web-app 打印的一律是 127.0.0.1）。 */
-function resolveWebUrl(printedUrl: string): string {
-  if (settings.lanShare && lanIp) return `http://${lanIp}:${lanPortOf(printedUrl)}`
-  return printedUrl
+/** 依据当前状态启停局域网反向代理：转发到 127.0.0.1:<harnessPort>，首次访问需电脑授权。 */
+async function manageLanProxy(harnessPort: number): Promise<void> {
+  if (settings.lanShare && lanIp) {
+    // 目标端口变化（harness 重启换了随机端口）→ 重建代理
+    if (lanTargetPort !== harnessPort) {
+      if (lanHandle) {
+        await lanHandle.stop()
+        lanHandle = null
+      }
+      lanTargetPort = harnessPort
+    }
+    if (!lanHandle) {
+      lanHandle = await createLanProxy({
+        targetHost: '127.0.0.1',
+        targetPort: harnessPort,
+        requestApproval: (ip) => promptLanApproval(ip),
+      })
+      lanUrl = `http://${lanIp}:${lanHandle.port}`
+      log('info', `lanShare: proxy up -> ${lanUrl}（转发 127.0.0.1:${harnessPort}，需电脑授权）`)
+    }
+  } else {
+    if (lanHandle) {
+      await lanHandle.stop()
+      lanHandle = null
+    }
+    lanTargetPort = null
+    lanUrl = null
+  }
+  refreshTray()
 }
 
-function lanPortOf(printedUrl: string): string {
-  try {
-    const u = new URL(printedUrl)
-    if (u.port) return u.port
-  } catch {
-    /* fallthrough */
+/** 电脑授权：其它设备首次访问时弹原生确认框。 */
+async function promptLanApproval(ip: string): Promise<boolean> {
+  showWindow()
+  const opts = {
+    type: 'question' as const,
+    buttons: ['允许访问', '拒绝'],
+    defaultId: 1,
+    cancelId: 1,
+    title: '局域网访问授权',
+    message: `设备 ${ip} 正在请求访问 DSH Desktop`,
+    detail: '允许后，该设备可在浏览器中打开本工作台（可读取文件、执行命令）。仅本次运行生效，关闭局域网访问后清除。',
+    noLink: true,
   }
-  return '0'
+  const w = win?.win
+  const r = w ? await dialog.showMessageBox(w, opts) : await dialog.showMessageBox(opts)
+  return r.response === 0
 }
 
 /** 重启 Harness：先按当前设置重新同步插件并生成 overlay，再重启。 */
@@ -439,8 +478,7 @@ function execJsWithTimeout(w: Electron.BrowserWindow, code: string, timeoutMs = 
 function uiReady(): boolean {
   const w = win?.win
   if (!w || w.isDestroyed()) return false
-  const cur = w.webContents.getURL()
-  return cur.startsWith('http://127.0.0.1:') || (settings.lanShare && !!lanUrl && cur.startsWith(`http://${lanIp}:`))
+  return w.webContents.getURL().startsWith('http://127.0.0.1:')
 }
 
 /** 处理一条深链：聚焦窗口 + 尽力导航（新会话/指定会话）。 */
@@ -511,16 +549,13 @@ async function main(): Promise<void> {
   // 首启解压运行时 tar.gz（约 200MB）耗时较长，若先 await 再建窗口，
   // 用户在任务管理器里只见进程、长时间看不到界面。
   win = createWindow(path.join(__dirname, '..', 'preload', 'index.cjs'), resourcesDir, {
-    // 导航锁：file:// 壳页面 + 精确匹配已解析的 harness URL（host+port），
-    // 不放行任意 127.0.0.1:* 或任意局域网端口（防本机/网段恶意服务诱导导航）
+    // 导航锁：file:// 壳页面 + 精确匹配已解析的 harness URL（host+port）。
+    // 窗口只加载回环地址；局域网走壳的反向代理，不让窗口直接访问任意主机/端口。
     isAllowed: (url) => {
       if (url.startsWith('file://')) return true
       try {
         const u = new URL(url)
-        if (u.protocol !== 'http:') return false
-        const hostOk =
-          u.hostname === '127.0.0.1' || (settings.lanShare && !!lanIp && u.hostname === lanIp)
-        if (!hostOk) return false
+        if (u.protocol !== 'http:' || u.hostname !== '127.0.0.1') return false
         const known = [lastUrl, harness?.ready?.url].filter((x): x is string => !!x)
         return known.some((k) => {
           try {
@@ -572,11 +607,13 @@ async function main(): Promise<void> {
     },
     {
       onReady: (r: HarnessReady) => {
-        // 局域网开启时：web-app 打印的一律是 127.0.0.1，实际绑定在局域网 IP —— 这里重写
-        const url = resolveWebUrl(r.url)
+        // 本机窗口永远加载回环地址；局域网经壳的反向代理（manageLanProxy）对外
+        const url = r.url
         lastUrl = url
-        lanUrl = settings.lanShare && lanIp ? `http://${lanIp}:${lanPortOf(r.url)}` : null
-        log('info', `harness ready: ${url} bridgePort=${r.bridgePort}${lanUrl ? ` lan=${lanUrl}` : ''}`)
+        void manageLanProxy(r.port).then(() => {
+          log('info', `harness ready: ${url} bridgePort=${r.bridgePort}${lanUrl ? ` lan=${lanUrl}` : ''}`)
+          refreshTray()
+        })
         win?.loadApp(url)
         bridge.connect()
         refreshTray()
@@ -602,7 +639,7 @@ async function main(): Promise<void> {
     },
   )
 
-  // 局域网访问：把 web server 绑定到本机局域网 IP（在 harness.start() 前应用）
+  // 局域网访问：harness 保持回环监听 + 把局域网 IP 加入信任围栏（start 前应用）
   applyLanNetwork()
 
   bridge = new BridgeClient(
@@ -633,8 +670,7 @@ async function main(): Promise<void> {
   )
 
   trayHandle = createTray(path.join(resourcesDir, 'icons', 'tray.png'), {
-    getUrl: () => lanUrl ?? harness?.ready?.url ?? lastUrl,
-    getState: () => ({
+    getUrl: () => lanUrl ?? harness?.ready?.url ?? lastUrl,    getState: () => ({
       autoStart: settings.autoStart,
       notifications: settings.notifications,
       autoUpdate: settings.autoUpdate,
@@ -688,15 +724,26 @@ async function main(): Promise<void> {
       saveSettings(settingsFile, settings)
       refreshTray()
     },
-    // 局域网访问开关：开启 → 绑定本机局域网 IP；关闭 → 回环。需重启 harness 生效。
+    // 局域网访问开关：开启 → 重启 harness 加入信任围栏，ready 后台起反向代理（手机访问需电脑授权）；
+    // 关闭 → 立即停代理并重启 harness。不改 harness 监听地址，本机 127.0.0.1 始终可用。
     setLanShare: (v) => {
       settings.lanShare = v
       saveSettings(settingsFile, settings)
       refreshTray()
-      if (v && !detectLanIp()) {
-        notify('局域网访问已开启', '未发现局域网网卡 IPv4，将回退为本机回环（仅本机可访问）。', () => showWindow())
-      } else if (v) {
-        notify('局域网访问已开启', '正在重启 harness 以绑定局域网地址…', () => showWindow())
+      if (!v) {
+        // 立刻断开对外：停止代理，避免未经授权仍可访问
+        void (async () => {
+          if (lanHandle) {
+            await lanHandle.stop()
+            lanHandle = null
+          }
+          lanUrl = null
+          refreshTray()
+        })()
+      } else if (!detectLanIp()) {
+        notify('局域网访问已开启', '未发现局域网网卡 IPv4，无法对外提供服务。', () => showWindow())
+      } else {
+        notify('局域网访问已开启', '正在重启 harness 以开放局域网（手机/其它设备首次访问需在本机授权）。', () => showWindow())
       }
       void restartHarness()
     },
@@ -802,6 +849,12 @@ app.on('before-quit', (e) => {
   quitting = true
   log('info', 'quitting: stopping harness')
   unregisterAllShortcuts()
+  // 停局域网代理，断开所有外部设备
+  if (lanHandle) {
+    const h = lanHandle
+    lanHandle = null
+    void h.stop()
+  }
   bridge?.stop()
   void harness
     ?.stop()
