@@ -8,7 +8,7 @@
  * 架构（0.4.1）：壳只保留桌面原生能力；与 harness 之间仅通过 dsh-desktop-bridge
  * 插件通信（通知/徽标/深链/工作区注册），壳不注入任何 UI。
  */
-import { app, dialog, shell } from 'electron'
+import { app, clipboard, dialog, shell } from 'electron'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -144,9 +144,60 @@ function regenerateOverlay(resourcesDir: string, token: string): string {
   return p
 }
 
+// ---- 局域网访问 ----
+/** 当前选定的局域网 IPv4（局域网访问开启时绑定）；null = 未开启或无非内部网卡。 */
+let lanIp: string | null = null
+/** 局域网访问地址（http://<lanIp>:<port>），ready 后填充。 */
+let lanUrl: string | null = null
+
+/** 挑选一个本机局域网 IPv4：优先私有网段（192.168/10/172.16-31），否则第一个非内部 IPv4。 */
+function detectLanIp(): string | null {
+  const ifaces = os.networkInterfaces()
+  const all: string[] = []
+  const privateIp: string[] = []
+  for (const list of Object.values(ifaces)) {
+    for (const f of list ?? []) {
+      if (f.family !== 'IPv4' || f.internal) continue
+      const ip = f.address
+      all.push(ip)
+      if (/^192\.168\./.test(ip) || /^10\./.test(ip) || /^172\.(1[6-9]|2\d|3[01])\./.test(ip)) privateIp.push(ip)
+    }
+  }
+  return privateIp[0] ?? all[0] ?? null
+}
+
+/** 局域网访问：把 harness 的 web server 绑定到本机局域网 IP。无 IP/未开启 → 回环。 */
+function applyLanNetwork(): void {
+  lanIp = settings.lanShare ? detectLanIp() : null
+  lanUrl = null
+  harness?.setNetwork(lanIp ?? undefined, lanIp ? [lanIp] : [])
+  if (settings.lanShare && !lanIp) {
+    log('error', 'lanShare: 未发现局域网 IPv4，回退为本机回环（仅本机可访问）')
+  } else if (settings.lanShare && lanIp) {
+    log('info', `lanShare: web server 将绑定 ${lanIp}，局域网可经 http://${lanIp}:<port> 访问`)
+  }
+}
+
+/** ready 后构造实际访问地址：局域网开启时用局域网 IP（web-app 打印的一律是 127.0.0.1）。 */
+function resolveWebUrl(printedUrl: string): string {
+  if (settings.lanShare && lanIp) return `http://${lanIp}:${lanPortOf(printedUrl)}`
+  return printedUrl
+}
+
+function lanPortOf(printedUrl: string): string {
+  try {
+    const u = new URL(printedUrl)
+    if (u.port) return u.port
+  } catch {
+    /* fallthrough */
+  }
+  return '0'
+}
+
 /** 重启 Harness：先按当前设置重新同步插件并生成 overlay，再重启。 */
 async function restartHarness(dir?: string): Promise<void> {
   try {
+    applyLanNetwork()
     const resourcesDir = appResourcesDir()
     // 同步 profile（插件启停后，profile node_modules 增删）+ 重生成 overlay
     ensureProfile(
@@ -388,7 +439,8 @@ function execJsWithTimeout(w: Electron.BrowserWindow, code: string, timeoutMs = 
 function uiReady(): boolean {
   const w = win?.win
   if (!w || w.isDestroyed()) return false
-  return w.webContents.getURL().startsWith('http://127.0.0.1:')
+  const cur = w.webContents.getURL()
+  return cur.startsWith('http://127.0.0.1:') || (settings.lanShare && !!lanUrl && cur.startsWith(`http://${lanIp}:`))
 }
 
 /** 处理一条深链：聚焦窗口 + 尽力导航（新会话/指定会话）。 */
@@ -460,12 +512,15 @@ async function main(): Promise<void> {
   // 用户在任务管理器里只见进程、长时间看不到界面。
   win = createWindow(path.join(__dirname, '..', 'preload', 'index.cjs'), resourcesDir, {
     // 导航锁：file:// 壳页面 + 精确匹配已解析的 harness URL（host+port），
-    // 不放行任意 127.0.0.1:*（防本机恶意回环服务诱导导航）
+    // 不放行任意 127.0.0.1:* 或任意局域网端口（防本机/网段恶意服务诱导导航）
     isAllowed: (url) => {
       if (url.startsWith('file://')) return true
       try {
         const u = new URL(url)
-        if (u.protocol !== 'http:' || u.hostname !== '127.0.0.1') return false
+        if (u.protocol !== 'http:') return false
+        const hostOk =
+          u.hostname === '127.0.0.1' || (settings.lanShare && !!lanIp && u.hostname === lanIp)
+        if (!hostOk) return false
         const known = [lastUrl, harness?.ready?.url].filter((x): x is string => !!x)
         return known.some((k) => {
           try {
@@ -517,9 +572,12 @@ async function main(): Promise<void> {
     },
     {
       onReady: (r: HarnessReady) => {
-        lastUrl = r.url
-        log('info', `harness ready: ${r.url} bridgePort=${r.bridgePort}`)
-        win?.loadApp(r.url)
+        // 局域网开启时：web-app 打印的一律是 127.0.0.1，实际绑定在局域网 IP —— 这里重写
+        const url = resolveWebUrl(r.url)
+        lastUrl = url
+        lanUrl = settings.lanShare && lanIp ? `http://${lanIp}:${lanPortOf(r.url)}` : null
+        log('info', `harness ready: ${url} bridgePort=${r.bridgePort}${lanUrl ? ` lan=${lanUrl}` : ''}`)
+        win?.loadApp(url)
         bridge.connect()
         refreshTray()
         // UI 加载完成后处理启动时排队的深链
@@ -543,6 +601,9 @@ async function main(): Promise<void> {
       },
     },
   )
+
+  // 局域网访问：把 web server 绑定到本机局域网 IP（在 harness.start() 前应用）
+  applyLanNetwork()
 
   bridge = new BridgeClient(
     () => {
@@ -572,11 +633,13 @@ async function main(): Promise<void> {
   )
 
   trayHandle = createTray(path.join(resourcesDir, 'icons', 'tray.png'), {
-    getUrl: () => harness?.ready?.url ?? lastUrl,
+    getUrl: () => lanUrl ?? harness?.ready?.url ?? lastUrl,
     getState: () => ({
       autoStart: settings.autoStart,
       notifications: settings.notifications,
       autoUpdate: settings.autoUpdate,
+      lanShare: settings.lanShare,
+      lanUrl,
       runningJobs,
       harnessState: harness?.state === 'ready' ? '运行中' : harness?.state === 'starting' ? '启动中' : '已停止',
       globalShortcut: currentShortcut(),
@@ -624,6 +687,27 @@ async function main(): Promise<void> {
       settings.autoUpdate = v
       saveSettings(settingsFile, settings)
       refreshTray()
+    },
+    // 局域网访问开关：开启 → 绑定本机局域网 IP；关闭 → 回环。需重启 harness 生效。
+    setLanShare: (v) => {
+      settings.lanShare = v
+      saveSettings(settingsFile, settings)
+      refreshTray()
+      if (v && !detectLanIp()) {
+        notify('局域网访问已开启', '未发现局域网网卡 IPv4，将回退为本机回环（仅本机可访问）。', () => showWindow())
+      } else if (v) {
+        notify('局域网访问已开启', '正在重启 harness 以绑定局域网地址…', () => showWindow())
+      }
+      void restartHarness()
+    },
+    // 复制局域网地址到剪贴板（供同网段设备浏览器打开）
+    copyLanUrl: () => {
+      if (!lanUrl) {
+        notify('局域网访问', settings.lanShare ? '尚未就绪，稍后在托盘查看地址。' : '局域网访问未开启。', () => showWindow())
+        return
+      }
+      void clipboard.writeText(lanUrl)
+      notify('局域网地址已复制', lanUrl, () => showWindow())
     },
     quit: () => app.quit(),
   })

@@ -24,6 +24,8 @@ export interface TrayDeps {
     globalShortcut: string
     appVersion: string
     harnessVersion: string | null
+    lanShare: boolean
+    lanUrl: string | null
   }
   getPlugins: () => DesktopPluginToggle[]
   showWindow: () => void
@@ -38,6 +40,8 @@ export interface TrayDeps {
   setAutoStart: (v: boolean) => void
   setNotifications: (v: boolean) => void
   setAutoUpdate: (v: boolean) => void
+  setLanShare: (v: boolean) => void
+  copyLanUrl: () => void
   quit: () => void
 }
 
@@ -90,6 +94,21 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
             // 手动：检查外壳 + 框架，有新版自动下载/替换（本地，不跳浏览器）
             label: '检查并更新…',
             click: () => deps.checkUpdate(),
+          },
+          { type: 'separator' },
+          // 局域网访问：绑定本机局域网 IP，同网段设备浏览器可访问（重启 Harness 生效）
+          {
+            label: '局域网访问（同网段可访问）',
+            type: 'checkbox' as const,
+            checked: s.lanShare,
+            click: (item) => deps.setLanShare(item.checked),
+          },
+          {
+            label: s.lanShare
+              ? `局域网地址：${s.lanUrl ?? '获取中…'}`
+              : '局域网地址：未开启',
+            enabled: !!s.lanUrl,
+            click: () => deps.copyLanUrl(),
           },
           { type: 'separator' },
           {

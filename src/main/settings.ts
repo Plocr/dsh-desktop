@@ -21,6 +21,8 @@ export interface AppSettings {
   globalShortcut: string
   /** 启动后自动检查更新（总开关：外壳下载 + 框架本地替换一起管） */
   autoUpdate: boolean
+  /** 局域网访问：harness web 绑定到本机局域网 IP，同网段设备可用 http://<LAN-IP>:<port> 访问 */
+  lanShare: boolean
   /** 被禁用的桌面插件（package name 列表；bridge 永远启用，不在此列） */
   disabledPlugins: string[]
 }
@@ -33,6 +35,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   recentWorkspaces: [],
   globalShortcut: 'CommandOrControl+Shift+Space',
   autoUpdate: true,
+  lanShare: false,
   disabledPlugins: [],
 }
 
@@ -50,6 +53,7 @@ export function loadSettings(file: string): AppSettings {
       }
       if (typeof raw.globalShortcut === 'string') out.globalShortcut = raw.globalShortcut
       if (typeof raw.autoUpdate === 'boolean') out.autoUpdate = raw.autoUpdate
+      if (typeof raw.lanShare === 'boolean') out.lanShare = raw.lanShare
       if (Array.isArray(raw.disabledPlugins)) {
         out.disabledPlugins = raw.disabledPlugins.filter((p): p is string => typeof p === 'string')
       }

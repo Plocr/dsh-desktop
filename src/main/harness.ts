@@ -33,6 +33,10 @@ export interface HarnessOptions {
   overlay: string
   cwd: string
   maxRestartDelayMs?: number
+  /** 局域网访问：web server 绑定 host（具体局域网 IP；0.0.0.0 被官方禁止）。缺省 = 仅回环。 */
+  host?: string
+  /** 局域网访问：/api 浏览器信任围栏额外放行的主机（host 或 host:port）。 */
+  trustedHosts?: string[]
 }
 
 export class HarnessManager {
@@ -50,6 +54,17 @@ export class HarnessManager {
     private opts: HarnessOptions,
     private handlers: HarnessHandlers,
   ) {}
+
+  /** 局域网访问：更新绑定 host 与信任主机（应在 restart/start 前调用）。 */
+  setNetwork(host: string | undefined, trustedHosts: string[]): void {
+    this.opts.host = host
+    this.opts.trustedHosts = trustedHosts
+  }
+
+  /** 当前绑定 host（局域网访问时为局域网 IP，否则 undefined）。 */
+  get bindHost(): string | undefined {
+    return this.opts.host
+  }
 
   /** 首次启动（或崩溃后手动重启入口）。 */
   start(): void {
@@ -137,7 +152,13 @@ export class HarnessManager {
   private spawn(): void {
     if (this.quit) return
     this.setState('starting')
-    const args = ['--profile', 'desktop', '--patch', this.opts.overlay, '--port', '0']
+    const args = ['--profile', 'desktop', '--patch', this.opts.overlay]
+    // 局域网访问：web server 绑定具体局域网 IP + 信任围栏放行该主机
+    if (this.opts.host) {
+      args.push('--host', this.opts.host)
+      for (const h of this.opts.trustedHosts ?? []) args.push('--trusted-host', h)
+    }
+    args.push('--port', '0')
     log('info', `spawn ${this.opts.node} ${this.opts.bin} ${args.join(' ')} (cwd=${this.opts.cwd}, DSH_HOME=${this.opts.dshHome})`)
     let child: ChildProcess
     try {
