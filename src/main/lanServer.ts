@@ -4,17 +4,24 @@
  * 官方默认，浏览器版/本机窗口永不受影响）。
  *
  * 设计：
- *  - 代理监听 0.0.0.0:<随机端口>（对外地址 http://<本机局域网IP>:<代理端口>）；
+ *  - 代理监听 0.0.0.0:<固定端口>（默认 DSH_LAN_PORT，占用时退回随机端口），
+ *    对外地址 http://<本机局域网IP>:<端口>，端口固定 → 手机链接稳定；
  *  - HTTP 直通转发到 127.0.0.1:<harness web 端口>，WebSocket upgrade 一起转发；
  *  - 首次来自某设备 IP 的请求 → 调用 requestApproval(ip)（壳弹原生授权框）；
  *    允许 → 该 IP 本次运行放行；拒绝 → 403，不加入白名单；
  *  - Host 头原样转发；harness 的 /api 浏览器信任围栏依赖壳在启动时传入
- *    --trusted-host <局域网IP>（host-only 匹配，容忍任意端口）。
+ *    --trusted-host <局域网IP>（host-only 匹配，容忍任意端口）；
+ *  - 特例：`/api/host.*`（如 host.pickDirectory）官方「loopback 直连钉死」——
+ *    只有回环 Host 才放行。代理本就是从 127.0.0.1 连入，故对这些请求把转发
+ *    Host 改写成 127.0.0.1:<目标端口>，让手机也能触发本机原生能力（选目录等）。
  */
 import { createServer, request as httpRequest, type Server } from 'node:http'
 import { Socket } from 'node:net'
 // 显式 .ts：既满足 esbuild 打包，也便于 Node 直跑单测
 import { log } from './logger.ts'
+
+/** 局域网代理默认固定端口（被占用时回退随机端口）。可用 DSH_LAN_PROXY_PORT 覆盖。 */
+export const DSH_LAN_PORT = Number(process.env.DSH_LAN_PROXY_PORT) || 46123
 
 export interface LanProxyOptions {
   /** 转发目标 host（固定 127.0.0.1）。 */
@@ -23,6 +30,8 @@ export interface LanProxyOptions {
   targetPort: number
   /** 首次访问授权回调：允许 → true。 */
   requestApproval: (ip: string) => Promise<boolean>
+  /** 代理监听端口；缺省 DSH_LAN_PORT（占用自动回退随机）。传 0 = 随机。 */
+  port?: number
 }
 
 export interface LanProxyHandle {
@@ -99,6 +108,15 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
       s.on('close', () => sockets.delete(s))
     })
 
+    /** 计算转发请求头：`/api/host.*` 用回环权威（官方 loopback 钉死原生能力）。 */
+    const forwardHeaders = (req: { url?: string; headers: import('node:http').IncomingHttpHeaders }): Record<string, unknown> => {
+      const headers: Record<string, unknown> = { ...req.headers }
+      if (typeof req.url === 'string' && req.url.startsWith('/api/host.')) {
+        headers.host = `127.0.0.1:${opts.targetPort}`
+      }
+      return headers
+    }
+
     // 畸形请求：直接 400，不挂连接
     server.on('clientError', (_err, socket) => {
       try {
@@ -127,7 +145,7 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
             port: opts.targetPort,
             method: req.method,
             path: req.url,
-            headers: { ...req.headers },
+            headers: forwardHeaders(req) as import('node:http').OutgoingHttpHeaders,
           })
           proxyReq.on('error', (err) => {
             log('error', `lanProxy: forward error: ${err.message}`)
@@ -196,7 +214,7 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
           port: opts.targetPort,
           method: req.method ?? 'GET',
           path: req.url,
-          headers: { ...req.headers },
+          headers: forwardHeaders(req) as import('node:http').OutgoingHttpHeaders,
         })
         proxyReq.on('error', (err) => {
           log('error', `lanProxy: upgrade error: ${err.message}`)
@@ -220,33 +238,44 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
     log('error', `lanProxy: server error: ${err.message}`)
   })
 
-  // 用端口 0 让 OS 分配，监听所有接口（对外用 detectLanIp 构造地址）；等 listening 再取端口
-  const ready = new Promise<void>((r, j) => {
-    server.once('listening', r)
-    server.once('error', j)
-  })
-  server.listen(0, '0.0.0.0')
-  void ready.then(() => {
-    const addr = server.address()
-    const port = typeof addr === 'object' && addr !== null ? (addr as { port: number }).port : 0
-    resolve({
-      port,
-      stop: async () => {
-        for (const s of sockets) {
-          try {
-            s.destroy()
-          } catch {
-            /* ignore */
-          }
-        }
-        await new Promise<void>((res2) => {
-          server.close(() => res2())
-          // 无活动连接时 close 回调可能不触发，兜底
-          setTimeout(res2, 500)
-        })
-      },
+  // 固定端口优先（手机链接稳定）；被占用时回退 OS 随机端口
+  let settled = false
+  const tryListen = (port: number): void => {
+    if (settled) return
+    const srv = server
+    srv.once('error', (err: NodeJS.ErrnoException) => {
+      if (!settled && err.code === 'EADDRINUSE') {
+        log('info', `lanProxy: 端口 ${port} 被占用，回退随机端口`)
+        tryListen(0)
+      } else {
+        reject(err)
+      }
     })
-  }, reject)
+    srv.listen(port, '0.0.0.0', () => {
+      settled = true
+      const addr = srv.address()
+      const actual = typeof addr === 'object' && addr !== null ? (addr as { port: number }).port : 0
+      log('info', `lanProxy: 监听 0.0.0.0:${actual}`)
+      resolve({
+        port: actual,
+        stop: async () => {
+          for (const s of sockets) {
+            try {
+              s.destroy()
+            } catch {
+              /* ignore */
+            }
+          }
+          await new Promise<void>((res2) => {
+            srv.close(() => res2())
+            // 无活动连接时 close 回调可能不触发，兜底
+            setTimeout(res2, 500)
+          })
+        },
+      })
+    })
+  }
+  tryListen(opts.port ?? DSH_LAN_PORT) // 传 0 → 直接随机
   })
 }
 

@@ -10,6 +10,8 @@ function startFakeHarness(handler) {
   })
 }
 
+const APPROVE = async () => true
+
 test('lanProxy: 首次访问授权后放行，白名单免重复授权', async () => {
   const harness = await startFakeHarness((req, res) => {
     res.setHeader('content-type', 'text/plain')
@@ -19,6 +21,7 @@ test('lanProxy: 首次访问授权后放行，白名单免重复授权', async (
   const proxy = await createLanProxy({
     targetHost: '127.0.0.1',
     targetPort: harness.port,
+    port: 0,
     requestApproval: async () => {
       approvals += 1
       return true
@@ -43,6 +46,7 @@ test('lanProxy: 拒绝授权 → 403，且不放行', async () => {
   const proxy = await createLanProxy({
     targetHost: '127.0.0.1',
     targetPort: harness.port,
+    port: 0,
     requestApproval: async () => false,
   })
   try {
@@ -60,7 +64,8 @@ test('lanProxy: 目标不可达 → 502', async () => {
   const proxy = await createLanProxy({
     targetHost: '127.0.0.1',
     targetPort: 1, // 没有服务
-    requestApproval: async () => true,
+    port: 0,
+    requestApproval: APPROVE,
   })
   try {
     const ctrl = new AbortController()
@@ -83,6 +88,7 @@ test('lanProxy: 授权并发去重与 approve 一次性', async () => {
   const proxy = await createLanProxy({
     targetHost: '127.0.0.1',
     targetPort: harness.port,
+    port: 0,
     requestApproval: async () => {
       approvals += 1
       await gate
@@ -92,13 +98,12 @@ test('lanProxy: 授权并发去重与 approve 一次性', async () => {
   try {
     const p1 = fetch(`http://127.0.0.1:${proxy.port}/1`).then((r) => r.status)
     const p2 = fetch(`http://127.0.0.1:${proxy.port}/2`).then((r2) => r2.status)
-    // 同一 IP 的第一个请求正在授权（挂起），第二个应等待而不是叠加授权（由 gate 串行/白名单兜底）
+    // 同一 IP 的第一个请求正在授权（挂起），第二个应等待而不是叠加授权
     await new Promise((r) => setTimeout(r, 150))
     release(true)
     const [s1, s2] = await Promise.all([p1, p2])
     assert.equal(s1, 200)
     assert.equal(s2, 200)
-    // 每个 IP 只触发一次授权
     assert.equal(approvals, 1)
   } finally {
     await proxy.stop()
@@ -119,7 +124,8 @@ test('lanProxy: HTML 响应注入 crypto.randomUUID 垫片（手机非安全上�
   const proxy = await createLanProxy({
     targetHost: '127.0.0.1',
     targetPort: harness.port,
-    requestApproval: async () => true,
+    port: 0,
+    requestApproval: APPROVE,
   })
   try {
     const r = await fetch(`http://127.0.0.1:${proxy.port}/html`)
@@ -127,10 +133,61 @@ test('lanProxy: HTML 响应注入 crypto.randomUUID 垫片（手机非安全上�
     assert.equal(r.status, 200)
     assert.match(body, /randomUUID/)
     assert.match(body, /<head>/)
-    // 非 HTML（JS）不注入、原样返回
     const js = await (await fetch(`http://127.0.0.1:${proxy.port}/a.js`)).text()
     assert.ok(!js.includes('randomUUID'))
     assert.match(js, /export const a = 1/)
+  } finally {
+    await proxy.stop()
+    await new Promise((r) => harness.server.close(r))
+  }
+})
+
+test('lanProxy: 固定端口（占用则回退随机）', async () => {
+  const harness = await startFakeHarness((req, res) => res.end('ok'))
+  const fixed = 49301
+  const p1 = await createLanProxy({ targetHost: '127.0.0.1', targetPort: harness.port, port: fixed, requestApproval: APPROVE })
+  try {
+    assert.equal(p1.port, fixed)
+    // 占用同一固定端口 → 回退随机（≠fixed）
+    const p2 = await createLanProxy({ targetHost: '127.0.0.1', targetPort: harness.port, port: fixed, requestApproval: APPROVE })
+    try {
+      assert.ok(p2.port !== fixed)
+    } finally {
+      await p2.stop()
+    }
+  } finally {
+    await p1.stop()
+    await new Promise((r) => harness.server.close(r))
+  }
+})
+
+test('lanProxy: /api/host.* 转发 Host 改回环（解锁原生能力）', async () => {
+  let seenHost = ''
+  const harness = await startFakeHarness((req, res) => {
+    if (req.url.startsWith('/api/host.')) {
+      seenHost = String(req.headers.host ?? '')
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ ok: true, value: { path: null } }))
+    } else {
+      seenHost = String(req.headers.host ?? '')
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ ok: true }))
+    }
+  })
+  const proxy = await createLanProxy({
+    targetHost: '127.0.0.1',
+    targetPort: harness.port,
+    port: 0,
+    requestApproval: APPROVE,
+  })
+  try {
+    // 手机侧以局域网 Host 访问
+    await fetch(`http://127.0.0.1:${proxy.port}/api/host.pickDirectory`, {
+      method: 'POST',
+      headers: { host: `192.168.30.41:${proxy.port}`, 'content-type': 'application/json', connection: 'close' },
+      body: '{}',
+    })
+    assert.equal(seenHost, `127.0.0.1:${harness.port}`, 'host.* 应把 Host 改成回环')
   } finally {
     await proxy.stop()
     await new Promise((r) => harness.server.close(r))

@@ -746,7 +746,6 @@ async function main(): Promise<void> {
       autoUpdate: settings.autoUpdate,
       lanShare: settings.lanShare,
       lanUrl,
-      lanCandidates: settings.lanShare ? lanCandidates() : [],
       runningJobs,
       harnessState: harness?.state === 'ready' ? '运行中' : harness?.state === 'starting' ? '启动中' : '已停止',
       globalShortcut: currentShortcut(),
@@ -826,13 +825,6 @@ async function main(): Promise<void> {
       }
       void clipboard.writeText(lanUrl)
       notify('局域网地址已复制', lanUrl, () => showWindow())
-    },
-    // 复制指定候选 IP 的局域网地址（多网卡时备用）
-    copyLanUrlFor: (ip: string) => {
-      if (!lanHandle) return
-      const url = `http://${ip}:${lanHandle.port}`
-      void clipboard.writeText(url)
-      notify('局域网地址已复制', url, () => showWindow())
     },
     quit: () => app.quit(),
   })
