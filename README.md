@@ -45,7 +45,27 @@ Electron 壳 ──spawn──▶ dsh --profile desktop --patch <overlay> --port
 - **全局唤出**：任意界面按 `Ctrl+Shift+Space` 呼出/隐藏窗口
 - **深链**：浏览器或其他应用点击 `dsh://` 链接可唤起并打开对应会话
 - **托盘**：关闭窗口默认最小化到托盘；右键托盘图标可切换工作区、重启 Harness、查看日志、检查更新、开机自启、开关通知
-- **会话共享**：桌面版与 Web/CLI 共享同一 `~/.dsh` 数据，会话跨端可见
+- **会话共享**：桌面版默认使用**独立数据目录**（`%LOCALAPPDATA%/DSH Desktop/dsh-home`），并与 Web/CLI 并存互不冲突；首次启动会自动把旧的 `~/.dsh` 迁移过去，原数据保留。
+
+## 更新机制
+
+两条独立链路，互不干扰：
+
+1. **壳（DSH Desktop 自身）** —— `src/main/updater.ts`
+   - 源：GitHub Releases（[Plocr/dsh-desktop](https://github.com/Plocr/dsh-desktop/releases)）
+   - **本地下载不跳浏览器**：electron-updater `autoDownload`，下载进度走任务栏进度条，退出时自动安装
+   - 通知内附两个下载地址：官方 GitHub 地址 + **GitHub 免费加速代理地址**（默认 `ghfast.top`，可用环境变量 `DSH_DESKTOP_GH_PROXY` 覆盖）
+   - 启动 15s 自动检查（托盘「自动检测更新」开关控制）；托盘「检查更新…」手动
+
+2. **框架（官方 harness `@deepseek-ai/dsh`）** —— `src/main/harnessCheck.ts` + `frameworkUpdate.ts`
+   - 源：npm registry（官方失败回退 **npmmirror 镜像**；框架包很小，仅几十 KB）
+   - **仅冷启动自动检查一次**（启动后 30s），不再做 24h 轮询
+   - 「框架自动更新（本地下载替换）」开启（默认）时：发现新版 → 显示更新覆盖层（**进度条 + 下载地址**）→ 下载 tgz → 原子替换 `%LOCALAPPDATA%/DSH Desktop/runtime` 里的 dsh 包（含回滚）→ 写用户自更新标记 → 重启 harness 生效
+   - 用户自更新后的运行时不会被安装包重复覆盖，除非安装包内嵌的 dsh 版本更新
+   - 托盘「更新框架（本地下载）…」手动触发
+
+> Why npm not GitHub tags：deepseek-harness 通过 npm 分发（GitHub 只有源码 tags，无构建产物），所以框架「最新版」以 npm registry 的 `latest` 为准。
+
 
 ## 平台支持
 
