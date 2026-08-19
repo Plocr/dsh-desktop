@@ -108,7 +108,11 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
       }
     })
 
-    // HTTP 直通
+    // 手机端是 http://<LAN-IP>（非安全上下文），浏览器没有 crypto.randomUUID；
+    // 对 HTML 响应注入兼容垫片（用 getRandomValues 实现），让手机端等同一个完整浏览器。
+    const RANDOM_UUID_SHIM = `<script>(function(){try{if(self.crypto&&typeof self.crypto.randomUUID!=='function'){var g=self.crypto.getRandomValues.bind(self.crypto);self.crypto.randomUUID=function(){var b=new Uint8Array(16);g(b);b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;var h='';for(var i=0;i<16;i++){if(i===4||i===6||i===8||i===10)h+='-';var v=b[i].toString(16);if(v.length<2)v='0'+v;h+=v;}return h;};}}catch(e){}})();</script>`
+
+    // HTTP 直通（HTML 响应缓冲后注入垫片；其余流式直通）
     server.on('request', (req, res) => {
       void (async () => {
         try {
@@ -135,8 +139,33 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
             }
           })
           proxyReq.on('response', (upRes) => {
-            res.writeHead(upRes.statusCode ?? 502, upRes.headers)
-            upRes.pipe(res)
+            const isHtml = /text\/html/i.test(String(upRes.headers['content-type'] ?? ''))
+            if (!isHtml) {
+              res.writeHead(upRes.statusCode ?? 502, upRes.headers)
+              upRes.pipe(res)
+              return
+            }
+            // 缓冲 HTML 主体 → 注入垫片 → 返回（content-length 失效，按 chunked 发送）
+            const chunks: Buffer[] = []
+            upRes.on('data', (c: Buffer) => chunks.push(c))
+            upRes.on('end', () => {
+              const headers: import('node:http').OutgoingHttpHeaders = { ...upRes.headers }
+              delete headers['content-length']
+              if (!res.headersSent) res.writeHead(upRes.statusCode ?? 200, headers)
+              let html = Buffer.concat(chunks).toString('utf8')
+              if (/<head[^>]*>/i.test(html)) html = html.replace(/<head[^>]*>/i, (m) => m + RANDOM_UUID_SHIM)
+              else html = RANDOM_UUID_SHIM + html
+              res.end(html)
+            })
+            upRes.on('error', (err) => {
+              log('error', `lanProxy: html buffering error: ${err instanceof Error ? err.message : String(err)}`)
+              if (!res.headersSent) {
+                res.statusCode = 502
+                res.end('harness 不可达')
+              } else {
+                res.destroy()
+              }
+            })
           })
           req.pipe(proxyReq)
         } catch (err) {
