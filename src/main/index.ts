@@ -129,43 +129,13 @@ function migrateToIsolatedHome(): void {
   }
 }
 
-/** 用户安装插件目录（运行时可装，无需重新打包）。 */
-function userPluginsDir(): string {
-  return path.join(app.getPath('userData'), 'plugins')
-}
-
-/** 依据当前设置重新生成 overlay（启停插件后重启 Harness 生效）。 */
+/** 依据当前设置重新生成 overlay（启停插件后重启 Harness 生效）。只含随包内置插件。 */
 function regenerateOverlay(resourcesDir: string, token: string): string {
   const pluginsDir = path.join(resourcesDir, 'plugins')
-  const usersDir = userPluginsDir()
-  const enabled = listDesktopPlugins(pluginsDir, usersDir).filter(
+  const enabled = listDesktopPlugins(pluginsDir, undefined).filter(
     (p) => p.name === 'dsh-desktop-bridge' || !settings.disabledPlugins.includes(p.name),
   )
-  // better-setting 需要壳注入目录/设置路径与 bundled 清单：
-  // bundledPluginsDir 在 asar 内，harness 子进程的 Node fs 读不到，
-  // 故由壳（Electron 可读 asar）枚举清单注入；userPluginsDir 是真实目录可直接读。
-  const rows = enabled.map((p) => ({
-    name: p.name,
-    ...(p.name === 'dsh-desktop-better-setting'
-      ? {
-          config: {
-            bundledPlugins: listDesktopPlugins(pluginsDir, usersDir).map((bp) => ({
-              name: bp.name,
-              version: bp.version,
-              enabled: bp.name === 'dsh-desktop-bridge' || !settings.disabledPlugins.includes(bp.name),
-              locked: bp.name === 'dsh-desktop-bridge',
-            })),
-            userPluginsDir: usersDir,
-            settingsFile: settingsFile,
-            appVersion: app.getVersion(),
-            dshBin: dshCliPath,
-            dshHome: dshHome(),
-            profileName: 'desktop',
-            wallpaperDir: path.join(app.getPath('userData'), 'wallpapers'),
-          },
-        }
-      : {}),
-  }))
+  const rows = enabled.map((p) => ({ name: p.name }))
   const p = writeOverlay(app.getPath('userData'), token, rows)
   log('info', `overlay regenerated: ${rows.map((x) => x.name).join(', ') || '(none)'}`)
   return p
@@ -180,7 +150,7 @@ async function restartHarness(dir?: string): Promise<void> {
       dshHome(),
       path.join(resourcesDir, 'profile-template', 'desktop'),
       path.join(resourcesDir, 'plugins'),
-      userPluginsDir(),
+      undefined,
       settings.disabledPlugins,
     )
     overlayPath = regenerateOverlay(resourcesDir, launchToken || randomBytes(16).toString('hex'))
@@ -446,7 +416,7 @@ async function main(): Promise<void> {
     dshHome(),
     path.join(resourcesDir, 'profile-template', 'desktop'),
     path.join(resourcesDir, 'plugins'),
-    userPluginsDir(),
+    undefined,
     settings.disabledPlugins,
   )
   // 定位运行时（打包模式首启解压到本地目录；窗口与加载页已先行显示）。
@@ -537,7 +507,7 @@ async function main(): Promise<void> {
     openBrowser,
     pickWorkspace: () => void pickWorkspace(),
     getPlugins: () =>
-      listDesktopPlugins(path.join(appResourcesDir(), 'plugins'), userPluginsDir()).map((p) => ({
+      listDesktopPlugins(path.join(appResourcesDir(), 'plugins'), undefined).map((p) => ({
         name: p.name,
         enabled: p.name === 'dsh-desktop-bridge' || !settings.disabledPlugins.includes(p.name),
         locked: p.name === 'dsh-desktop-bridge',
