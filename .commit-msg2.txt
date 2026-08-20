@@ -1,8 +1,0 @@
-ci: 对齐 0.7.2 版本；mac 运行时安装再降并发(best-effort)；tag 自建 release 再上传
-
-- package.json 0.7.1 -> 0.7.2（此前 v0.7.2 标签指向的提交产物名会错标成 0.7.1）。
-- setup-runtime：darwin 用 --maxsockets 2 极端降并发控峰值内存（便携 Node 装 453 包在
-  mac runner 上 SIGABRT/峰值 OOM）；win/linux 保持默认并发；npmjs 失败切 npmmirror。
-- workflow：mac 两个 job 与 merge 设 continue-on-error（best-effort：mac 非当前发布主平台，
-  失败不再让整组检查变红）；build-windows 上传前若 release 不存在则自动创建
-  （避免刚打 tag 时 gh upload 报 release not found）。
