@@ -35,18 +35,20 @@ const REG_NPMJS = 'https://registry.npmjs.org/'
 
 /**
  * 执行一次 npm install。
- * 不压 V8 堆（压堆会让 Windows 也 OOM）：用降并发控「峰值内存」。
- * macOS runner 内存最小（且便携 Node 在其上装 453 包会 SIGABRT 峰值 OOM）→
- * darwin 用 maxsockets 2 极端降并发；win/linux 保持默认并发（快）。
+ * macOS runner 上便携 Node 装 453 包时 `V8::FatalProcessOutOfMemory`（npm arborist
+ * 单线程建依赖树的老年代堆 OOM，与并发无关）→ darwin 显式放大 V8 堆 + 降并发；
+ * win/linux 保持默认（高并发更快）。
  * npmjs 失败自动切 npmmirror 重试。
  */
 function runNpmInstall(extraArgs) {
-  const concurrency = process.platform === 'darwin' ? ['--maxsockets', '2'] : []
+  const isDarwin = process.platform === 'darwin'
+  const installEnv = isDarwin ? { ...process.env, NODE_OPTIONS: `--max-old-space-size=4096 ${process.env.NODE_OPTIONS ?? ''}`.trim() } : process.env
+  const concurrency = isDarwin ? ['--maxsockets', '2'] : []
   const common = [npmCli(), 'install', '--no-audit', '--no-fund', '--loglevel=error', ...concurrency, '--fetch-retries', '3']
   let lastErr = null
   for (const reg of [REG_NPMJS, REG_NPMMIRROR]) {
     try {
-      run(nodeBin(), [...common, '--registry', reg, ...extraArgs, '--prefix', runtimeDir])
+      run(nodeBin(), [...common, '--registry', reg, ...extraArgs, '--prefix', runtimeDir], { env: installEnv })
       return
     } catch (err) {
       lastErr = err
