@@ -35,11 +35,14 @@ const REG_NPMJS = 'https://registry.npmjs.org/'
 
 /**
  * 执行一次 npm install。
- * 不压 V8 堆（mac 小内存是「峰值内存」问题不是堆配置→用降并发控峰；压堆会让 Windows 也 OOM），
- * 用 --maxsockets 4 显著降低并发抽取/下载的峰值内存；npmjs 失败自动切 npmmirror 重试。
+ * 不压 V8 堆（压堆会让 Windows 也 OOM）：用降并发控「峰值内存」。
+ * macOS runner 内存最小（且便携 Node 在其上装 453 包会 SIGABRT 峰值 OOM）→
+ * darwin 用 maxsockets 2 极端降并发；win/linux 保持默认并发（快）。
+ * npmjs 失败自动切 npmmirror 重试。
  */
 function runNpmInstall(extraArgs) {
-  const common = [npmCli(), 'install', '--no-audit', '--no-fund', '--loglevel=error', '--maxsockets', '4', '--fetch-retries', '3']
+  const concurrency = process.platform === 'darwin' ? ['--maxsockets', '2'] : []
+  const common = [npmCli(), 'install', '--no-audit', '--no-fund', '--loglevel=error', ...concurrency, '--fetch-retries', '3']
   let lastErr = null
   for (const reg of [REG_NPMJS, REG_NPMMIRROR]) {
     try {

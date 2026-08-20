@@ -63,11 +63,17 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
+          # 若 release 尚不存在（刚打 tag 尚未建 release）则先创建，避免 upload 报 release not found
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes
+          fi
           # 上传安装包 + latest.yml（GitHub provider 的更新元数据，updater 依赖）
           gh release upload "$RELEASE_TAG" release/*.exe release/latest.yml --clobber
 
   build-macos-arm64:
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+    # macOS 非当前发布主平台（无维护者在 mac 上调试运行时构建），best-effort：失败不红。
+    continue-on-error: true
     runs-on: macos-latest
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -96,6 +102,8 @@ jobs:
 
   build-macos-x64:
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+    # macOS 非当前发布主平台，best-effort：失败不红。
+    continue-on-error: true
     runs-on: macos-14
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -126,6 +134,8 @@ jobs:
   merge-mac-manifest:
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
     needs: [build-macos-arm64, build-macos-x64]
+    # mac 为 best-effort（continue-on-error）；合并同样不红。
+    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
