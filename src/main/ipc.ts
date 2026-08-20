@@ -19,6 +19,8 @@ export interface IpcDeps {
   restartHarness: () => void
   getInfo: () => unknown
   openSession: (sessionId: string) => Promise<void>
+  /** 更新下载完成后，由页面右上角「安装更新」按钮触发：确认后退出并安装。 */
+  requestUpdateInstall: () => Promise<boolean>
 }
 
 /** 仅放行壳页面（file:// 加载的 loading/error 页）；其他来源拒绝。 */
@@ -79,6 +81,12 @@ export function registerIpc(deps: IpcDeps): void {
     if (!fromShellPage(e)) throw new Error('forbidden: shell page only')
     if (typeof sessionId === 'string' && sessionId) void deps.openSession(sessionId)
     return { ok: true }
+  })
+
+  // 更新「安装更新」：由页面右上角卡片按钮触发（harness 页，不 gate file://）。
+  // 主进程侧 requestUpdateInstall 会再做「就绪检查 + 原生确认」，双保险。
+  ipcMain.on('dsh:update-install', () => {
+    void deps.requestUpdateInstall()
   })
 
   // 保留：无窗口时也能触发的原生对话框兜底

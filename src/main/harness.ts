@@ -108,6 +108,21 @@ export class HarnessManager {
     this.setState('stopped')
   }
 
+  /** 同步强杀子进程（更新安装退出兜底用；不等待、不优雅停机）。 */
+  killNow(): void {
+    this.quit = true
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer)
+      this.restartTimer = null
+    }
+    try {
+      this.child?.kill('SIGKILL')
+    } catch {
+      /* ignore */
+    }
+    this.setState('stopped')
+  }
+
   /** 重启：可切换 cwd（新工作区）。 */
   restart(cwd?: string): void {
     if (cwd) this.opts.cwd = cwd

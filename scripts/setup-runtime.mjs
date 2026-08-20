@@ -24,9 +24,23 @@ const NODE_VERSION = process.env.DSH_RUNTIME_NODE_VERSION ?? 'v24.15.0'
 const DSH_VERSION = process.env.DSH_RUNTIME_DSH_VERSION ?? '0.1.0-rc.8'
 const TAR = process.env.DSH_RUNTIME_TAR ?? 'tar'
 
-function run(cmd, args) {
+function run(cmd, args, opts = {}) {
   console.log(`[runtime] ${cmd} ${args.join(' ')}`)
-  execFileSync(cmd, args, { stdio: 'inherit' })
+  execFileSync(cmd, args, { stdio: 'inherit', ...opts })
+}
+
+/** npm 安装用环境：限堆 + 降并发，避免 macOS 小内存 runner 上 npm 安装 453 包时 SIGABRT(OOM)。 */
+const NPM_ENV = { ...process.env, NODE_OPTIONS: '--max-old-space-size=2048' }
+
+/** 执行一次 npm install（含失败换 npmmirror 重试一次）。 */
+function runNpmInstall(extraArgs) {
+  const base = [npmCli(), 'install', '--no-audit', '--no-fund', '--loglevel=error', '--maxsockets', '8']
+  try {
+    run(nodeBin(), [...base, ...extraArgs, '--prefix', runtimeDir], { env: NPM_ENV })
+  } catch (err) {
+    console.log(`[runtime] npm install 失败（${err?.message ?? err}），改用 npmmirror 重试一次…`)
+    run(nodeBin(), [...base, ...extraArgs, '--prefix', runtimeDir, '--registry', 'https://registry.npmmirror.com'], { env: NPM_ENV })
+  }
 }
 
 async function downloadNode() {
@@ -91,18 +105,8 @@ async function installDsh() {
   const tgz = readdirSync(packDir).find((f) => f.endsWith('.tgz'))
   if (!tgz) throw new Error('bridge pack failed')
   const pluginTar = path.join(packDir, tgz)
-  // 安装 dsh + bridge（同一次 install，保证解析一致）
-  run(nodeBin(), [
-    npmCli(),
-    'install',
-    '--no-audit',
-    '--no-fund',
-    '--loglevel=error',
-    `@deepseek-ai/dsh@${DSH_VERSION}`,
-    pluginTar,
-    '--prefix',
-    runtimeDir,
-  ])
+  // 安装 dsh + bridge（同一次 install，保证解析一致；含失败换 npmmirror 重试）
+  runNpmInstall([`@deepseek-ai/dsh@${DSH_VERSION}`, pluginTar])
   rmSync(packDir, { recursive: true, force: true })
   console.log('[runtime] dsh + bridge installed')
 }

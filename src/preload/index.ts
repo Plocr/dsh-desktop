@@ -14,6 +14,8 @@ const api = {
   getInfo: (): Promise<unknown> => ipcRenderer.invoke('dsh:get-info'),
   openDevConsole: (): Promise<boolean> => ipcRenderer.invoke('dsh:open-dev-console'),
   openSession: (sessionId: string): Promise<unknown> => ipcRenderer.invoke('dsh:open-session', sessionId),
+  /** 更新下载完成后，由右上角卡片按钮触发：让壳重启并安装更新。 */
+  installUpdate: (): void => ipcRenderer.send('dsh:update-install'),
 }
 
 contextBridge.exposeInMainWorld('dshDesktop', api)

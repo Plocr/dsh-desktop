@@ -17,8 +17,10 @@ export interface WindowHandle {
     detail: string
     url?: string | null
   }) => void
-  /** 移除更新进度卡片并清除任务栏进度。 */
+  /** 移除更新小卡片并清除任务栏进度。 */
   hideUpdateOverlay: () => void
+  /** 显示/隐藏「安装更新并重启」按钮（下载完成后调用）。 */
+  setUpdateInstallButton: (show: boolean) => void
   updateTaskbarProgress: (fraction: number | null) => void
 }
 
@@ -172,6 +174,7 @@ export function createWindow(
    * setter 同步更新任务栏进度。页面不可用（还没加载）时静默降级为任务栏进度。
    */
   // 注入到页面里的卡片引导脚本：创建固定 div + 定义 window.__dshUpdate(pct,detail,url)
+  // 下载完成时显示「安装更新并重启」按钮 → 调 window.dshDesktop.installUpdate()（壳 IPC 触发安装）
   const UPDATE_TOAST = `function(){
   var ID='dsh-update-toast';
   var el=document.getElementById(ID);
@@ -183,9 +186,12 @@ export function createWindow(
       '<div class="dshut-detail" style="opacity:.92;margin-bottom:7px;white-space:pre-wrap;word-break:break-all">…</div>'+
       '<div style="height:4px;border-radius:2px;background:rgba(255,255,255,.18);overflow:hidden"><div class="dshut-bar" style="height:100%;width:0;background:#4d7cfe;transition:width .2s"></div></div>'+
       '<div class="dshut-url" style="opacity:.75;font-size:11px;margin-top:6px;word-break:break-all;display:none">…</div>'+
+      '<button class="dshut-install" style="display:none;margin-top:8px;width:100%;border:0;border-radius:8px;padding:7px 10px;font:600 13px/1.4 system-ui,sans-serif;color:#fff;background:#4d7cfe;cursor:pointer">安装更新并重启</button>'+
       '<button class="dshut-close" aria-label="关闭" style="position:absolute;top:7px;right:9px;border:0;background:none;color:#fff;opacity:.65;cursor:pointer;font-size:16px;line-height:1">×</button>';
     document.body.appendChild(el);
     el.querySelector('.dshut-close').onclick=function(){var e=document.getElementById(ID); if(e) e.remove();};
+    var ib=el.querySelector('.dshut-install');
+    ib.onclick=function(){var d=window.dshDesktop; if(d&&typeof d.installUpdate==='function') d.installUpdate();};
     window.__dshUpdate=function(p,d,u){
       var de=el.querySelector('.dshut-detail'); if(typeof d==='string'&&d) de.textContent=d;
       var ue=el.querySelector('.dshut-url'); if(typeof u==='string'&&u){ ue.textContent='下载地址：'+u; ue.style.display='block'; }
@@ -224,6 +230,13 @@ export function createWindow(
     return setter
   }
 
+  /** 显示/隐藏「安装更新并重启」按钮（下载完成后调用）。 */
+  const setUpdateInstallButton = (show: boolean): void => {
+    if (win.isDestroyed()) return
+    const code = `(()=>{var b=document.getElementById('dsh-update-toast'); if(b){var s=b.querySelector('.dshut-install'); if(s) s.style.display='${show ? 'block' : 'none'}';}})()`
+    void win.webContents.executeJavaScript(code).catch(() => {})
+  }
+
   /** 移除更新卡片 + 清除任务栏进度。 */
   const hideUpdateOverlay = (): void => {
     if (win.isDestroyed()) return
@@ -248,5 +261,5 @@ export function createWindow(
     }
   }
 
-  return { win, loadApp, showLoading, showError, showUpdateOverlay, hideUpdateOverlay, updateTaskbarProgress }
+  return { win, loadApp, showLoading, showError, showUpdateOverlay, hideUpdateOverlay, setUpdateInstallButton, updateTaskbarProgress }
 }

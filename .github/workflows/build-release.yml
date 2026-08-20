@@ -38,7 +38,10 @@ jobs:
       - name: Test
         run: npm test
 
+  # 重型构建（含 20-30 分钟运行时安装）只在打 tag / 手动触发时跑；
+  # master 与 PR 只跑上方 check，避免每次 push 白烧时长与上传到不存在 release 的失败。
   build-windows:
+    if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -64,6 +67,7 @@ jobs:
           gh release upload "$RELEASE_TAG" release/*.exe release/latest.yml --clobber
 
   build-macos-arm64:
+    if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
     runs-on: macos-latest
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -91,6 +95,7 @@ jobs:
           gh release upload "$RELEASE_TAG" release/*arm64*.dmg release/*arm64*.dmg.blockmap --clobber
 
   build-macos-x64:
+    if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
     runs-on: macos-14
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -119,6 +124,7 @@ jobs:
   # macOS 多架构更新的关键：把两个架构各自生成的 latest-mac.yml 合并为一份
   # 含 arm64+x64 的 files[]，供 electron-updater 按 process.arch 挑选。
   merge-mac-manifest:
+    if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
     needs: [build-macos-arm64, build-macos-x64]
     runs-on: ubuntu-latest
     steps:

@@ -38,6 +38,8 @@ export function withGhProxy(url: string): string {
 
 let autoUpdater: import('electron-updater').AppUpdater | null = null
 let initialized = false
+/** 已下载待安装的版本（安装前由用户在右上角点「安装更新并重启」）。 */
+let downloadedVersion: string | null = null
 let hooks: UpdaterHooks = {
   onManualResult: () => {},
   onAvailable: () => {},
@@ -55,6 +57,23 @@ export interface UpdateProgress {
   /** 总字节 */
   total: number
   bytesPerSecond: number
+}
+
+/** 是否已有可安装的下载完成更新。 */
+export function updateDownloadReady(): boolean {
+  return downloadedVersion !== null
+}
+
+/** 立即退出并安装已下载的更新（由用户点「安装更新并重启」触发）。返回是否启动安装。 */
+export function installDownloadedUpdate(): boolean {
+  if (!autoUpdater || !downloadedVersion) return false
+  try {
+    autoUpdater.quitAndInstall()
+    return true
+  } catch (err) {
+    log('error', `updater: quitAndInstall failed: ${err instanceof Error ? err.message : String(err)}`)
+    return false
+  }
 }
 
 export interface UpdaterHooks {
@@ -93,9 +112,10 @@ export function initUpdater(initHooks: UpdaterHooks, opts: { autoCheck: boolean 
       log('info', `updater: feed overridden -> ${feed}`)
     }
 
-    // 本地下载（进度可观测）、退出时自动安装；Web 安装器关闭（用 NSIS 静默安装）
+    // 本地下载（进度推送）；安装需用户点「安装更新并重启」（不随退出自动装——
+    // 且不能在我们 after-quit 强退时被吞，见 index.ts before-quit 的更新安装分支）
     au.autoDownload = true
-    au.autoInstallOnAppQuit = true
+    au.autoInstallOnAppQuit = false
     au.disableWebInstaller = true
 
     const fileUrlOf = (info: { files?: { url?: string }[] }): string =>
@@ -124,14 +144,8 @@ export function initUpdater(initHooks: UpdaterHooks, opts: { autoCheck: boolean 
       const version = typeof info?.version === 'string' ? info.version : '未知版本'
       const fileUrl = fileUrlOf(info as { files?: { url?: string }[] })
       log('info', `updater: update downloaded ${version}`)
+      downloadedVersion = version
       hooks.onDownloaded({ version, fileUrl })
-      notify('更新已就绪', `DSH Desktop ${version} 下载完成，退出时自动安装；点击立即重启安装`, () => {
-        try {
-          au.quitAndInstall()
-        } catch (err) {
-          log('error', `updater: quitAndInstall failed: ${err instanceof Error ? err.message : String(err)}`)
-        }
-      })
     })
     au.on('update-not-available', () => {
       log('info', 'updater: no update')

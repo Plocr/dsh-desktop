@@ -26,7 +26,7 @@ import { handleBridgeEvent, runningJobCount } from './bridgeEvents'
 import { registerIpc } from './ipc'
 import { parseDeepLink, extractDeepLinkFromArgv, type DeepLinkAction } from './deepLink'
 import { registerGlobalShortcut, currentShortcut, unregisterAllShortcuts } from './shortcut'
-import { initUpdater, checkNow, type UpdateProgress } from './updater'
+import { initUpdater, checkNow, updateDownloadReady, installDownloadedUpdate, type UpdateProgress } from './updater'
 import { runHarnessUpdate, type HarnessProgress } from './harnessUpdate'
 import { readLocalDshVersion } from './harnessCheck'
 import { createLanProxy } from './lanServer'
@@ -74,6 +74,8 @@ let bridge: BridgeClient
 let settings: AppSettings
 let settingsFile = ''
 let quitting = false
+/** 用户点击「安装更新」后置位：before-quit 放行正常退出，让 electron-updater 执行安装。 */
+let quitForUpdateInstall = false
 /** 当前「官方 Harness」（DeepSeek Harness @deepseek-ai/dsh）版本，供托盘菜单展示；用户自更新后同步刷新。 */
 let harnessVersion: string | null = null
 let pendingRegisterWorkspace: string | null = null
@@ -360,6 +362,8 @@ function refreshTray(): void {
 // ---- 本地更新反馈：右上角小卡片（进度条 + 下载地址）+ 任务栏进度 ----
 type UpdateOverlayState = { pct: number | null; detail: string; url?: string | null }
 let updateSink: ((p: UpdateOverlayState) => void) | null = null
+/** 外壳（electron-updater）下载进度卡的推送句柄：下载完成前一直显示。 */
+let shellUpdateSink: ((p: UpdateOverlayState) => void) | null = null
 
 /** 打开更新小卡片，返回可推送进度的更新函数（不导航、不占整页、可关闭）。 */
 function beginUpdateOverlay(init: UpdateOverlayState): (p: UpdateOverlayState) => void {
@@ -377,6 +381,27 @@ function endUpdateOverlay(): void {
   } catch {
     /* ignore */
   }
+}
+
+/** 更新已下载 → 右上角卡片变成「安装更新并重启」按钮；点按（卡片或系统通知）进入安装。 */
+async function requestUpdateInstall(): Promise<boolean> {
+  if (!updateDownloadReady()) {
+    notify('更新', '暂无已下载的更新', () => showWindow())
+    return false
+  }
+  const r = await dialog.showMessageBox({
+    type: 'question',
+    buttons: ['立即安装并重启', '取消'],
+    defaultId: 0,
+    cancelId: 1,
+    title: '安装更新',
+    message: 'DSH Desktop 更新已下载完成',
+    detail: '现在将结束应用并安装更新，安装完成后自动重启。你的配置与会话会保留。',
+    noLink: true,
+  })
+  if (r.response !== 0) return false
+  quitForUpdateInstall = true
+  return installDownloadedUpdate()
 }
 
 /** 刷新托盘显示的「官方 Harness 当前版本」（读已安装运行时，用户自更新后也准确）。 */
@@ -855,6 +880,7 @@ async function main(): Promise<void> {
     restartHarness: () => void restartHarness(),
     getInfo: currentInfo,
     openSession: (sessionId) => handleDeepLink({ kind: 'session', sessionId }),
+    requestUpdateInstall: () => requestUpdateInstall(),
   })
 
   // dsh:// 协议 + 全局快捷键 + 自动更新
@@ -863,28 +889,46 @@ async function main(): Promise<void> {
   initUpdater(
     {
       onManualResult: (msg) => notify('检查更新', msg, () => showWindow()),
-      // 外壳有新版：本地开始下载；通知附官方 + 加速两个下载地址（不打断当前界面）
+      // 外壳有新版：右上角进度卡从下载开始一直显示，直到装完/关闭
       onAvailable: (info) => {
+        shellUpdateSink = beginUpdateOverlay({
+          pct: 0,
+          detail: `发现新版 DSH Desktop ${info.version}，正在下载…`,
+          url: info.fileUrl,
+        })
         notify(
-          '发现新版本（本地下载中）',
-          `DSH Desktop ${info.version} 已开始在线下载，退出时自动安装。\n官方地址：${info.fileUrl}\n加速地址：${info.proxyUrl}`,
+          '发现新版本（下载中）',
+          `DSH Desktop ${info.version} 已开始在线下载。\n官方地址：${info.fileUrl}\n加速地址：${info.proxyUrl}`,
           () => showWindow(),
         )
       },
-      // 外壳下载进度 → 任务栏进度条（Windows/macOS 任务栏可见）
+      // 外壳下载进度 → 任务栏 + 右上角卡片实时百分比
       onProgress: (p: UpdateProgress) => {
         try {
           win?.updateTaskbarProgress(p.percent / 100)
         } catch {
           /* ignore */
         }
+        if (shellUpdateSink) {
+          shellUpdateSink({ pct: p.percent, detail: `正在下载 DSH Desktop 更新… ${p.percent}%`, url: undefined })
+        }
       },
+      // 下载完成：卡片变「安装更新并重启」按钮 + 系统通知可点击直接安装
       onDownloaded: (info) => {
         try {
           win?.win.setProgressBar(-1)
         } catch {
           /* ignore */
         }
+        if (shellUpdateSink) {
+          shellUpdateSink({ pct: 100, detail: `DSH Desktop ${info.version} 下载完成，点下方按钮或通知安装`, url: undefined })
+        }
+        try {
+          win?.setUpdateInstallButton(true)
+        } catch {
+          /* ignore */
+        }
+        notify('更新已就绪', `DSH Desktop ${info.version} 下载完成，点击立即安装并重启。`, () => void requestUpdateInstall())
       },
     },
     { autoCheck: settings.autoUpdate },
@@ -932,6 +976,17 @@ async function main(): Promise<void> {
 }
 
 app.on('before-quit', (e) => {
+  // 更新安装：放行正常退出，让 electron-updater 执行安装（禁止走下面的强退 app.exit(0)）
+  if (quitForUpdateInstall) {
+    quitForUpdateInstall = false
+    log('info', 'before-quit: update install flow, allowing normal quit')
+    try {
+      harness?.killNow()
+    } catch {
+      /* ignore */
+    }
+    return
+  }
   if (quitting) return
   e.preventDefault()
   quitting = true
