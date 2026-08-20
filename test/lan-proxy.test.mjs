@@ -204,6 +204,45 @@ test('lanProxy: /api/host.* 转发 Host+Origin 改回环（解锁原生能力）
   }
 })
 
+test('lanProxy: 客户端中途断开不崩（ECONNRESET 兜底）', async () => {
+  const harness = await startFakeHarness((req, res) => {
+    if (req.url === '/ok') {
+      res.end('ok')
+      return
+    }
+    // /hold 挂起，客户端断开后触发 ECONNRESET
+    const hold = setTimeout(() => {
+      try {
+        res.end('late')
+      } catch {
+        /* ignored */
+      }
+    }, 1200)
+    res.on('close', () => clearTimeout(hold))
+  })
+  const proxy = await createLanProxy({
+    targetHost: '127.0.0.1',
+    targetPort: harness.port,
+    port: 0,
+    requestApproval: APPROVE,
+  })
+  try {
+    const ctrl = new AbortController()
+    const p = fetch(`http://127.0.0.1:${proxy.port}/hold`, { signal: ctrl.signal }).catch(() => 'aborted')
+    await new Promise((r) => setTimeout(r, 40))
+    ctrl.abort() // 客户端主动断开 → 上游吞掉 ECONNRESET，不崩
+    await p
+    // 断开后再发新请求，代理必须仍可用
+    await new Promise((r) => setTimeout(r, 150))
+    const ok = await fetch(`http://127.0.0.1:${proxy.port}/ok`)
+    assert.equal(ok.status, 200)
+    assert.equal(await ok.text(), 'ok')
+  } finally {
+    await proxy.stop()
+    await new Promise((r) => harness.server.close(r))
+  }
+})
+
 test('lanProxy: clientIpOf 归一化 IPv4-mapped', () => {
   assert.equal(clientIpOf({ remoteAddress: '::ffff:192.168.1.5' }), '192.168.1.5')
   assert.equal(clientIpOf({ remoteAddress: '127.0.0.1' }), '127.0.0.1')

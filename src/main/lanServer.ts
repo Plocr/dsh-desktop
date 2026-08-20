@@ -103,21 +103,23 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
     const server: Server = createServer()
     const sockets = new Set<Socket>()
 
+    // 每个接受的连接都必须有 error 处理器：手机/设备中途断开会发 ECONNRESET，
+    // 没有处理器会变成主进程未捕获异常 → Electron 崩溃弹窗卡死。
     server.on('connection', (s) => {
+      s.on('error', () => {})
       sockets.add(s)
       s.on('close', () => sockets.delete(s))
     })
 
     /**
      * 计算转发请求头。
-     * 普通请求：Host/Origin 原样（配合 --trusted-host <局域网IP> 通过 trusted-host 围栏）。
-     * `/api/host.*`：官方 loopback 钉死——`isTrustedApiRequest` 要求 Host 是回环，且
-     * （若带 Origin）`new URL(origin).host === hostUrl.host`。故 Host/Origin/Referer
-     * 一并改写成回环权威 `127.0.0.1:<harness端口>`，让手机也能触发本机原生能力。
+     * 已授权的设备视为「等同本地」：对 `/api/*` 把 Host/Origin/Referer 改写为回环权威
+     * `127.0.0.1:<harness端口>`，绕过 harness 的 trusted/loopback 分级（免得诸如
+     * workspace.* / host.* 等「碰本地文件」的接口对手机 403）。静态资源原样走局域网。
      */
     const forwardHeaders = (req: { url?: string; headers: import('node:http').IncomingHttpHeaders }): Record<string, unknown> => {
       const headers: Record<string, unknown> = { ...req.headers }
-      if (typeof req.url === 'string' && req.url.startsWith('/api/host.')) {
+      if (typeof req.url === 'string' && req.url.startsWith('/api/')) {
         const loopAuthority = `127.0.0.1:${opts.targetPort}`
         headers.host = loopAuthority
         headers.origin = `http://${loopAuthority}`
@@ -141,6 +143,8 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
 
     // HTTP 直通（HTML 响应缓冲后注入垫片；其余流式直通）
     server.on('request', (req, res) => {
+      req.on('error', () => {})
+      res.on('error', () => {})
       void (async () => {
         try {
           const ip = clientIpOf(req.socket)
@@ -156,6 +160,16 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
             path: req.url,
             headers: forwardHeaders(req) as import('node:http').OutgoingHttpHeaders,
           })
+          // 客户端在响应完成前断开 → 立即销毁上游，避免连接泄漏/残留
+          res.on('close', () => {
+            if (!res.writableEnded) {
+              try {
+                proxyReq.destroy()
+              } catch {
+                /* ignore */
+              }
+            }
+          })
           proxyReq.on('error', (err) => {
             log('error', `lanProxy: forward error: ${err.message}`)
             if (!res.headersSent) {
@@ -168,6 +182,7 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
           proxyReq.on('response', (upRes) => {
             const isHtml = /text\/html/i.test(String(upRes.headers['content-type'] ?? ''))
             if (!isHtml) {
+              upRes.on('error', () => {})
               res.writeHead(upRes.statusCode ?? 502, upRes.headers)
               upRes.pipe(res)
               return
@@ -209,6 +224,8 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
 
   // WebSocket 升级转发（harness 客户端流式/工具事件走 WS）
   server.on('upgrade', (req, socket, head) => {
+    // WS socket 中途断线（ECONNRESET）同样要有 error 处理器，否则会炸主进程
+    socket.on('error', () => {})
     void (async () => {
       try {
         const ip = clientIpOf(socket)
@@ -230,12 +247,13 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
           socket.destroy()
         })
         proxyReq.on('upgrade', (upRes, upSock, upHead) => {
-        socket.write('HTTP/1.1 101 Switching Protocols\r\n\r\n')
-        upSock.write(upHead as Buffer)
-        upSock.pipe(socket)
-        socket.pipe(upSock)
-      })
-      proxyReq.end(head)
+          upSock.on('error', () => {})
+          socket.write('HTTP/1.1 101 Switching Protocols\r\n\r\n')
+          upSock.write(upHead as Buffer)
+          upSock.pipe(socket)
+          socket.pipe(upSock)
+        })
+        proxyReq.end(head)
       } catch (err) {
         log('error', `lanProxy: upgrade handler error: ${err instanceof Error ? err.message : String(err)}`)
         socket.destroy()

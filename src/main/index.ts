@@ -46,6 +46,24 @@ if (!gotLock) {
 
 app.setAppUserModelId('com.dsh.desktop.workbench')
 
+// 主进程兜底：任何未捕获异常/拒绝只记日志，绝不弹「A JavaScript error occurred…」崩溃框
+// 卡死（那种情况托盘点不开、只能任务管理器强杀）。局域网代理等任何一处漏处理都不应整机崩。
+process.on('uncaughtException', (err) => {
+  const msg = err instanceof Error ? (err.stack ?? err.message) : String(err)
+  try {
+    log('error', `uncaughtException: ${msg}`)
+  } catch {
+    /* ignore */
+  }
+})
+process.on('unhandledRejection', (reason) => {
+  try {
+    log('error', `unhandledRejection: ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`)
+  } catch {
+    /* ignore */
+  }
+})
+
 // 本地地址绕过系统代理（electron-updater/Chromium net 走系统代理时会劫持 127.0.0.1 请求）
 app.commandLine.appendSwitch('proxy-bypass-list', '127.0.0.1;localhost;<local>')
 
