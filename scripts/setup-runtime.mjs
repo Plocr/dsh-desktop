@@ -29,18 +29,28 @@ function run(cmd, args, opts = {}) {
   execFileSync(cmd, args, { stdio: 'inherit', ...opts })
 }
 
-/** npm 安装用环境：限堆 + 降并发，避免 macOS 小内存 runner 上 npm 安装 453 包时 SIGABRT(OOM)。 */
-const NPM_ENV = { ...process.env, NODE_OPTIONS: '--max-old-space-size=2048' }
+/** npm 源：npmmirror 较快，失败自动切回官方 npmjs。 */
+const REG_NPMMIRROR = 'https://registry.npmmirror.com/'
+const REG_NPMJS = 'https://registry.npmjs.org/'
 
-/** 执行一次 npm install（含失败换 npmmirror 重试一次）。 */
+/**
+ * 执行一次 npm install。
+ * 不压 V8 堆（mac 小内存是「峰值内存」问题不是堆配置→用降并发控峰；压堆会让 Windows 也 OOM），
+ * 用 --maxsockets 4 显著降低并发抽取/下载的峰值内存；npmjs 失败自动切 npmmirror 重试。
+ */
 function runNpmInstall(extraArgs) {
-  const base = [npmCli(), 'install', '--no-audit', '--no-fund', '--loglevel=error', '--maxsockets', '8']
-  try {
-    run(nodeBin(), [...base, ...extraArgs, '--prefix', runtimeDir], { env: NPM_ENV })
-  } catch (err) {
-    console.log(`[runtime] npm install 失败（${err?.message ?? err}），改用 npmmirror 重试一次…`)
-    run(nodeBin(), [...base, ...extraArgs, '--prefix', runtimeDir, '--registry', 'https://registry.npmmirror.com'], { env: NPM_ENV })
+  const common = [npmCli(), 'install', '--no-audit', '--no-fund', '--loglevel=error', '--maxsockets', '4', '--fetch-retries', '3']
+  let lastErr = null
+  for (const reg of [REG_NPMJS, REG_NPMMIRROR]) {
+    try {
+      run(nodeBin(), [...common, '--registry', reg, ...extraArgs, '--prefix', runtimeDir])
+      return
+    } catch (err) {
+      lastErr = err
+      console.log(`[runtime] npm install（registry=${reg}）失败：${err?.message ?? err}，切换源重试…`)
+    }
   }
+  throw lastErr ?? new Error('npm install 多次失败')
 }
 
 async function downloadNode() {
