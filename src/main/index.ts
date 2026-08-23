@@ -386,6 +386,13 @@ function endUpdateOverlay(): void {
 /** 更新已下载 → 右上角卡片变成「安装更新并重启」按钮；点按（卡片或系统通知）进入安装。 */
 async function requestUpdateInstall(): Promise<boolean> {
   if (!updateDownloadReady()) {
+    // 刚重启过：electron-updater 的下载缓存需一次检查来重新确认（确认完自动进安装）
+    if (settings.pendingUpdateVersion) {
+      autoInstallAfterDownload = true
+      notify('更新', `检测到已下载的 ${settings.pendingUpdateVersion}，正在确认…`, () => showWindow())
+      void checkNow(false)
+      return false
+    }
     notify('更新', '暂无已下载的更新', () => showWindow())
     return false
   }
@@ -401,7 +408,39 @@ async function requestUpdateInstall(): Promise<boolean> {
   })
   if (r.response !== 0) return false
   quitForUpdateInstall = true
-  return installDownloadedUpdate()
+  const ok = installDownloadedUpdate()
+  if (ok || settings.pendingUpdateVersion === app.getVersion()) {
+    // 安装已启动 / 已处于该版本 → 清掉待安装标记
+    if (settings.pendingUpdateVersion) {
+      settings.pendingUpdateVersion = null
+      saveSettings(settingsFile, settings)
+    }
+  }
+  return ok
+}
+
+/** 已下载待安装的版本（跨重启保留）：启动时若存在则重新显示「安装更新」卡片。 */
+let autoInstallAfterDownload = false
+function maybeResumePendingUpdate(): void {
+  const pending = settings.pendingUpdateVersion
+  if (!pending) return
+  if (pending === app.getVersion()) {
+    // 已在该版本（装完重启）→ 清理标记
+    settings.pendingUpdateVersion = null
+    saveSettings(settingsFile, settings)
+    return
+  }
+  shellUpdateSink = beginUpdateOverlay({
+    pct: 100,
+    detail: `已下载的 DSH Desktop ${pending} 待安装，点下方按钮或通知安装`,
+    url: null,
+  })
+  try {
+    win?.setUpdateInstallButton(true)
+  } catch {
+    /* ignore */
+  }
+  notify('更新待安装', `DSH Desktop ${pending} 已下载完成，点击立即安装并重启。`, () => void requestUpdateInstall())
 }
 
 /** 刷新托盘显示的「官方 Harness 当前版本」（读已安装运行时，用户自更新后也准确）。 */
@@ -928,11 +967,23 @@ async function main(): Promise<void> {
         } catch {
           /* ignore */
         }
+        // 持久化「待安装」：即使重启也能再次提示/一键安装
+        if (info.version && info.version !== settings.pendingUpdateVersion) {
+          settings.pendingUpdateVersion = info.version
+          saveSettings(settingsFile, settings)
+        }
         notify('更新已就绪', `DSH Desktop ${info.version} 下载完成，点击立即安装并重启。`, () => void requestUpdateInstall())
+        // 重启后点过安装但 electron-updater 需重新确认时：确认完自动进入安装确认
+        if (autoInstallAfterDownload) {
+          autoInstallAfterDownload = false
+          setTimeout(() => void requestUpdateInstall(), 500)
+        }
       },
     },
     { autoCheck: settings.autoUpdate },
   )
+  // 启动后：若上次下载完但没装，重新显示「安装更新」卡片（跨重启不丢）
+  setTimeout(() => maybeResumePendingUpdate(), 4000)
   // 更新：总开关「自动更新」= 冷启动自动检查一次（外壳 15s 下载 + 框架 30s 本地替换）；
   // 关闭则只保留手动「检查并更新…」。
   if (settings.autoUpdate) {

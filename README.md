@@ -54,7 +54,9 @@ Electron 壳 ──spawn──▶ dsh --profile desktop --patch <overlay> --port
 
 1. **框架（DSH Desktop 自身）** —— `src/main/updater.ts`
    - 源：GitHub Releases（[Plocr/dsh-desktop](https://github.com/Plocr/dsh-desktop/releases)）
-   - **本地下载不跳浏览器**：electron-updater `autoDownload`，下载进度走任务栏进度条，退出时自动安装
+   - **本地下载，不跳浏览器**：electron-updater `autoDownload`；下载全程右上角卡片实时进度 + 任务栏进度条
+   - **下载完成 → 点「安装更新并重启」按钮（或系统通知）→ 确认后退出并安装**，安装完自动重启。
+     若下载完没点安装就退出，下次启动仍会重新提示（跨重启保留，不会丢）
    - 通知内附两个下载地址：GitHub 官方地址 + **免费加速代理地址**（默认 `ghfast.top`，可用环境变量 `DSH_DESKTOP_GH_PROXY` 覆盖）
 
 2. **官方 Harness（DeepSeek Harness 本体）** —— `src/main/harnessCheck.ts` + `harnessUpdate.ts`
@@ -65,7 +67,7 @@ Electron 壳 ──spawn──▶ dsh --profile desktop --patch <overlay> --port
 
 **入口只有两个（托盘 → 设置）：**
 - `自动更新（框架 v… · 官方 Harness v…）`（开关，默认开）：冷启动自动检查一次（框架 15s 下载 + 官方 Harness 30s 本地替换）；关闭则仅手动
-- `检查并更新…`（动作）：同时查框架 + 官方 Harness，有新版自动本地下载/替换（不跳浏览器）
+- `检查并更新…`（动作）：同时查框架 + 官方 Harness，有新版自动本地下载/替换；**外壳下载完成后需点「安装更新」按钮确认安装**
 
 > Why npm not GitHub tags：deepseek-harness 通过 npm 分发（GitHub 只有源码 tags，无构建产物），所以「官方 Harness 最新」为 npm 已发布版本的最大 semver。
 

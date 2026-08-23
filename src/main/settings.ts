@@ -23,6 +23,8 @@ export interface AppSettings {
   autoUpdate: boolean
   /** 局域网访问：harness web 绑定到本机局域网 IP，同网段设备可用 http://<LAN-IP>:<port> 访问 */
   lanShare: boolean
+  /** 已下载但尚未安装的更新版本（跨重启保留，下次启动提示一键安装；装完/当前版本即清） */
+  pendingUpdateVersion: string | null
   /** 被禁用的桌面插件（package name 列表；bridge 永远启用，不在此列） */
   disabledPlugins: string[]
 }
@@ -36,6 +38,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   globalShortcut: 'CommandOrControl+Shift+Space',
   autoUpdate: true,
   lanShare: false,
+  pendingUpdateVersion: null,
   disabledPlugins: [],
 }
 
@@ -54,6 +57,7 @@ export function loadSettings(file: string): AppSettings {
       if (typeof raw.globalShortcut === 'string') out.globalShortcut = raw.globalShortcut
       if (typeof raw.autoUpdate === 'boolean') out.autoUpdate = raw.autoUpdate
       if (typeof raw.lanShare === 'boolean') out.lanShare = raw.lanShare
+      if (typeof raw.pendingUpdateVersion === 'string') out.pendingUpdateVersion = raw.pendingUpdateVersion
       if (Array.isArray(raw.disabledPlugins)) {
         out.disabledPlugins = raw.disabledPlugins.filter((p): p is string => typeof p === 'string')
       }
