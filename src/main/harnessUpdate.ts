@@ -1,45 +1,61 @@
 /**
- * 官方 Harness（DeepSeek Harness @deepseek-ai/dsh）本地更新 —— 「直接下载最新版替换本地版本」。
+ * 官方 Harness（DeepSeek Harness @deepseek-ai/dsh）本地更新 —— 整树刷新。
  *
  * 术语对齐（与用户一致）：
- *  - 「框架」= DSH Desktop（外壳，版本如 0.6.0）
+ *  - 「框架」= DSH Desktop（外壳，版本如 0.7.3）
  *  - 「官方 Harness」= deepseek-ai/deepseek-harness 发行到 npm 的 @deepseek-ai/dsh（本体）
  *
- * 流程：
- *  1. 检测：npm registry（官方失败回退 npmmirror 镜像）取最大已发布版本；
- *  2. 下载：npm tgz（优先 npmmirror 镜像加速），带进度回调 —— 进度条 + 下载地址展示；
- *  3. 解压并用 atomic 替换 runtime/node_modules/@deepseek-ai/dsh（含回滚）；
- *  4. 写入用户自更新 marker（tar=user-*），extractPackagedRuntime 因此不会被重复解压覆盖；
- *  5. 重启 harness 生效。
+ * 历史缺陷：旧实现只下载 @deepseek-ai/dsh 单包并原地替换，从不刷新整棵依赖树
+ * （dsh-llm-deepseek / dsh-llm / dsh-host-apiproxy / dsh-client-* 等兄弟包保持旧版），
+ * 导致新能力（如视觉模型 inputModalities）永远到不了用户机器，且树变成「混血」。
  *
- * 只替换 dsh 包本体：便携 Node 与 bridge 不变。开发模式跳过。
+ * 现流程（整树刷新，镜像 scripts/setup-runtime.mjs 的构建方式）：
+ *  1. 检测：npm registry（官方失败回退 npmmirror 镜像）取最大已发布版本；
+ *     本地树不一致（@deepseek-ai/* 锁步包不同版本线）也视为「需要修复」；
+ *  2. 暂存：在 runtime/.harness-update-<ts> 写最小 package.json，
+ *     npm pack 已安装的 bridge → _pack/，再 npm install @deepseek-ai/dsh@<v> <bridgeTgz>
+ *     （npmjs → npmmirror 自动回退；darwin 放大 V8 堆 + 降并发）；
+ *  3. 校验暂存树（web-frontend dist、bridge、dsh bin.js）；
+ *  4. 原子替换：onBeforeSwap（调用方停 harness）→ 整目录 rename node_modules 含回滚，
+ *     同步 package.json / package-lock.json / _pack；
+ *  5. 写用户自更新 marker（tar=user-<整树指纹>），extractPackagedRuntime 因此
+ *     不会用随包覆盖「一致的较新用户树」，但会回退「混血/残缺」树；
+ *  6. 重启 harness 生效。
+ *
+ * 便携 Node 与 bridge 不变（bridge 随壳发版，版本号固定）。开发模式跳过。
  */
 import { app } from 'electron'
-import { createHash } from 'node:crypto'
-import { createWriteStream } from 'node:fs'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { spawn } from 'node:child_process'
+import { copyFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { log } from './logger'
-import { checkHarnessUpdateResult, readLocalDshVersion } from './harnessCheck'
+import { checkHarnessUpdateResult, readLocalDshVersion, updateAvailable } from './harnessCheck'
 import { buildUserMarker } from './runtimeMarker'
 import { appDataRoot } from './runtime'
+import { readRuntimeTreeState, treeFingerprint } from './runtimeTree'
+import { compareDots } from './version'
 
-const OFFICIAL_TGZ = (v: string) => `https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-${v}.tgz`
-const MIRROR_TGZ = (v: string) => `https://registry.npmmirror.com/@deepseek-ai/dsh/-/dsh-${v}.tgz`
-/** 单源下载超时（毫秒）。 */
-const DOWNLOAD_TIMEOUT_MS = 8 * 60_000
+const REG_NPMJS = 'https://registry.npmjs.org/'
+const REG_NPMMIRROR = 'https://registry.npmmirror.com/'
+/** 供用户手动复制的 registry 地址。 */
+const MANUAL_URL = 'https://registry.npmjs.org/@deepseek-ai/dsh'
+/** 单步命令超时（npm install 整树耗时较长）。 */
+const NPM_INSTALL_TIMEOUT_MS = 20 * 60_000
+const NPM_PACK_TIMEOUT_MS = 5 * 60_000
 
 export interface HarnessProgress {
   /** 0-100；null 表示不确定（未知总大小）。 */
   pct: number | null
   detail: string
-  /** 当前正在下载的 tgz 地址（供用户复制/手动下载）。 */
+  /** 当前操作相关的地址（供用户复制/手动下载）。 */
   url: string | null
 }
 
 export interface HarnessUpdateHooks {
   onProgress: (p: HarnessProgress) => void
+  /** 原子替换前回调（调用方应在此停掉 harness，规避 Windows 下已加载原生模块占用）。 */
+  onBeforeSwap?: () => Promise<void> | void
 }
 
 let updating = false
@@ -50,7 +66,25 @@ function runtimePaths(): { localRoot: string; runtimeDir: string } {
   return { localRoot, runtimeDir: path.join(localRoot, 'runtime') }
 }
 
-/** 干净地执行 tar -xzf。 */
+/** 便携 Node 的可执行文件路径（Windows: node/node.exe；mac/linux: node/bin/node）。 */
+function nodeBin(runtimeDir: string): string {
+  return process.platform === 'win32'
+    ? path.join(runtimeDir, 'node', 'node.exe')
+    : path.join(runtimeDir, 'node', 'bin', 'node')
+}
+
+/** 便携 Node 自带的 npm-cli.js（Windows 分发包在 node_modules/npm，macOS/Linux 在 lib/node_modules/npm）。 */
+function npmCli(runtimeDir: string): string {
+  const candidates = [
+    path.join(runtimeDir, 'node', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.join(runtimeDir, 'node', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ]
+  const found = candidates.find((p) => existsSync(p))
+  if (!found) throw new Error(`npm-cli.js not found in portable node (tried: ${candidates.join(', ')})`)
+  return found
+}
+
+/** 干净地执行命令，等待退出；超时/非零退出码视为失败。 */
 function spawnOk(cmd: string, args: string[], timeoutMs: number, cwd?: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: 'ignore', windowsHide: true, cwd })
@@ -74,55 +108,40 @@ function spawnOk(cmd: string, args: string[], timeoutMs: number, cwd?: string): 
   })
 }
 
-/** 下载 url → dest，流式报告进度。 */
-async function downloadFile(url: string, dest: string, onProgress: (p: HarnessProgress) => void): Promise<void> {
-  const ctrl = new AbortController()
-  const t = setTimeout(() => ctrl.abort(), DOWNLOAD_TIMEOUT_MS)
-  let received = 0
-  try {
-    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow' })
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`)
-    const total = Number(res.headers.get('content-length')) || 0
-    const body = res.body
-    if (!body) throw new Error('响应无数据流')
-    await new Promise<void>((resolve, reject) => {
-      const ws = createWriteStream(dest)
-      const reader = body.getReader()
-      const pump = async (): Promise<void> => {
-        try {
-          for (;;) {
-            const { done, value } = await reader.read()
-            if (done) break
-            received += value.byteLength
-            if (!ws.write(Buffer.from(value))) await new Promise((r) => ws.once('drain', r))
-            const pct = total > 0 ? Math.min(99, Math.round((received / total) * 100)) : null
-            onProgress({ pct, detail: `已下载 ${(received / 1024 / 1024).toFixed(1)} MB${total > 0 ? ` / ${(total / 1024 / 1024).toFixed(1)} MB` : ''}`, url })
-          }
-          ws.end()
-          ws.on('finish', resolve)
-          ws.on('error', reject)
-        } catch (err) {
-          reject(err instanceof Error ? err : new Error(String(err)))
-        }
-      }
-      void pump()
-    })
-  } finally {
-    clearTimeout(t)
-  }
-}
-
-/** 计算「决定性」内容指纹：package.json + lib/bin.js 的 sha256。 */
-function contentHash(pkgDir: string): string {
-  const h = createHash('sha256')
-  for (const rel of ['package.json', 'lib/bin.js']) {
+/**
+ * 执行一次 npm install（registry 官方 → npmmirror 自动回退）。
+ * macOS runner 上便携 Node 装包时 npm arborist 老年代堆 OOM → 放大 V8 堆 + 降并发。
+ */
+async function runNpmInstall(runtimeDir: string, args: string[], cwd: string): Promise<void> {
+  const isDarwin = process.platform === 'darwin'
+  const installEnv = isDarwin ? { ...process.env, NODE_OPTIONS: `--max-old-space-size=4096 ${process.env.NODE_OPTIONS ?? ''}`.trim() } : process.env
+  const concurrency = isDarwin ? ['--maxsockets', '2'] : []
+  const common = [
+    npmCli(runtimeDir),
+    'install',
+    '--no-audit',
+    '--no-fund',
+    '--loglevel=error',
+    ...concurrency,
+    '--fetch-retries',
+    '3',
+  ]
+  let lastErr: Error | null = null
+  for (const reg of [REG_NPMJS, REG_NPMMIRROR]) {
     try {
-      h.update(readFileSync(path.join(pkgDir, rel)))
-    } catch {
-      h.update(Buffer.from('missing:' + rel))
+      await spawnOk(
+        nodeBin(runtimeDir),
+        [...common, '--registry', reg, ...args],
+        NPM_INSTALL_TIMEOUT_MS,
+        cwd,
+      )
+      return
+    } catch (err) {
+      lastErr = err instanceof Error ? err : new Error(String(err))
+      log('info', `harnessUpdate: npm install（registry=${reg}）失败：${lastErr.message}，切换源重试…`)
     }
   }
-  return h.digest('hex').slice(0, 16)
+  throw lastErr ?? new Error('npm install 多次失败')
 }
 
 /** 从已解压运行时目录读取当前版本。 */
@@ -137,7 +156,44 @@ function installedVersionFromDir(runtimeDir: string): string | null {
   }
 }
 
-/** 下载并替换官方 Harness 到版本 version，返回安装结果。 */
+/** 递归复制目录（staging 产物同步进 runtime 用）。 */
+function copyDir(src: string, dest: string): void {
+  mkdirSync(dest, { recursive: true })
+  for (const entry of readdirSync(src)) {
+    const s = path.join(src, entry)
+    const d = path.join(dest, entry)
+    let isDir = false
+    try {
+      isDir = statSync(s).isDirectory()
+    } catch {
+      continue
+    }
+    if (isDir) copyDir(s, d)
+    else copyFileSync(s, d)
+  }
+}
+
+/** 打包已安装的 bridge 插件（零依赖，随壳发版），返回 tgz 绝对路径。 */
+function packBridge(runtimeDir: string, packDir: string): string {
+  const bridgeSrc = path.join(runtimeDir, 'node_modules', 'dsh-desktop-bridge')
+  if (!existsSync(path.join(bridgeSrc, 'package.json'))) {
+    throw new Error(`bridge 插件缺失：${bridgeSrc}`)
+  }
+  mkdirSync(packDir, { recursive: true })
+  const result = spawnSync(
+    nodeBin(runtimeDir),
+    [npmCli(runtimeDir), 'pack', '--pack-destination', packDir, '--silent', bridgeSrc],
+    { stdio: 'ignore', windowsHide: true, timeout: NPM_PACK_TIMEOUT_MS },
+  )
+  if (result.status !== 0) {
+    throw new Error(`npm pack bridge 失败（退出码 ${String(result.status)}）`)
+  }
+  const tgz = readdirSync(packDir).find((f) => f.endsWith('.tgz'))
+  if (!tgz) throw new Error('bridge pack 未产出 tgz')
+  return path.join(packDir, tgz)
+}
+
+/** 整树刷新官方 Harness 到版本 version（暂存构建 + 原子替换），返回安装结果。 */
 async function installHarness(version: string, hooks: HarnessUpdateHooks): Promise<{ ok: boolean; message: string }> {
   const { localRoot, runtimeDir } = runtimePaths()
   if (!existsSync(runtimeDir)) {
@@ -145,71 +201,71 @@ async function installHarness(version: string, hooks: HarnessUpdateHooks): Promi
   }
   const work = path.join(runtimeDir, `.harness-update-${Date.now()}`)
   mkdirSync(work, { recursive: true })
-  const tarball = path.join(work, 'dsh.tgz')
-  const extractDir = path.join(work, 'x')
-
-  const candidates = [MIRROR_TGZ(version), OFFICIAL_TGZ(version)]
-  const tried = new Set<string>()
 
   try {
-    // 下载：优先 npmmirror 镜像，失败回退官方
-    let downloadedUrl: string | null = null
-    let lastErr: Error | null = null
-    for (const url of candidates) {
-      if (tried.has(url)) continue
-      tried.add(url)
-      try {
-        hooks.onProgress({ pct: 0, detail: `开始下载官方 Harness v${version}（${candidates.indexOf(url) === 0 ? '镜像' : '官方'}源）…`, url })
-        await downloadFile(url, tarball, hooks.onProgress)
-        downloadedUrl = url
-        break
-      } catch (err) {
-        lastErr = err instanceof Error ? err : new Error(String(err))
-        log('info', `harnessUpdate: download ${url} failed: ${lastErr.message}`)
-      }
-    }
-    if (!downloadedUrl) {
-      return {
-        ok: false,
-        message: `官方 Harness 下载失败：${lastErr ? lastErr.message : '未知错误'}。可手动下载 ${candidates[0]}`,
-      }
-    }
+    // 1. 暂存目录：最小 package.json（与 setup-runtime.mjs 一致）
+    hooks.onProgress({ pct: null, detail: `准备整树刷新到官方 Harness v${version}…`, url: MANUAL_URL })
+    writeFileSync(
+      path.join(work, 'package.json'),
+      JSON.stringify({ name: 'dsh-runtime', private: true, type: 'module' }, null, 2),
+    )
 
-    // 解压 npm tgz（内含 package/ 目录）
-    hooks.onProgress({ pct: null, detail: '正在解压 Harness 包…', url: downloadedUrl })
-    mkdirSync(extractDir, { recursive: true })
-    await spawnOk('tar', ['-xzf', tarball, '-C', extractDir], 120_000)
-    let pkgDir = path.join(extractDir, 'package')
-    if (!existsSync(pkgDir)) {
-      // 个别包根目录带版本名
-      const inner = readdirSync(extractDir).filter((e) => existsSync(path.join(extractDir, e, 'package.json')) && !e.startsWith('.'))
-      if (inner.length === 1) pkgDir = path.join(extractDir, inner[0])
-    }
-    if (!existsSync(path.join(pkgDir, 'lib', 'bin.js'))) {
-      throw new Error('下载的包不完整（缺少 lib/bin.js）')
-    }
+    // 2. 打包 bridge + npm install @deepseek-ai/dsh@<v>（整树解析到同一 rc 线）
+    //    以相对路径传 bridge tgz（相对暂存目录），npm 会写入 package.json 的
+    //    file:_pack/... 引用；随后 _pack 整体同步进 runtime，引用不悬空。
+    const bridgeTgz = packBridge(runtimeDir, path.join(work, '_pack'))
+    const bridgeTgzRel = path.relative(work, bridgeTgz)
+    hooks.onProgress({ pct: null, detail: `正在安装官方 Harness v${version}（含全部依赖，约数分钟）…`, url: MANUAL_URL })
+    await runNpmInstall(runtimeDir, [`@deepseek-ai/dsh@${version}`, bridgeTgzRel], work)
 
-    hooks.onProgress({ pct: null, detail: '正在替换本地运行时…', url: downloadedUrl })
-    const target = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh')
-    const backup = path.join(work, 'old-dsh')
-    if (existsSync(target)) renameSync(target, backup)
+    // 3. 校验暂存树
+    const stagedNm = path.join(work, 'node_modules')
+    if (!existsSync(path.join(stagedNm, '@deepseek-ai', 'dsh', 'lib', 'bin.js'))) {
+      throw new Error('安装后校验失败（缺少 dsh lib/bin.js）')
+    }
+    if (!existsSync(path.join(stagedNm, '@deepseek-ai', 'dsh-web-frontend', 'dist', 'index.html'))) {
+      throw new Error('安装后校验失败（缺少 dsh-web-frontend dist）')
+    }
+    if (!existsSync(path.join(stagedNm, 'dsh-desktop-bridge', 'lib', 'index.js'))) {
+      throw new Error('安装后校验失败（缺少 dsh-desktop-bridge）')
+    }
+    const fingerprint = treeFingerprint(readRuntimeTreeState(work))
+
+    // 4. 原子替换：先停 harness（onBeforeSwap），再整目录替换，失败回滚
+    hooks.onProgress({ pct: null, detail: '正在替换本地运行时…', url: MANUAL_URL })
+    await hooks.onBeforeSwap?.()
+    const nmTarget = path.join(runtimeDir, 'node_modules')
+    const backup = path.join(runtimeDir, `.node_modules.bak-${Date.now()}`)
+    if (existsSync(nmTarget)) renameSync(nmTarget, backup)
     try {
-      renameSync(pkgDir, target)
+      renameSync(stagedNm, nmTarget)
     } catch (err) {
-      // 目标可能被占用（如正在运行的进程读取）；回滚
-      if (existsSync(backup) && !existsSync(target)) renameSync(backup, target)
+      // 目标可能被占用；回滚
+      if (existsSync(backup) && !existsSync(nmTarget)) renameSync(backup, nmTarget)
       throw err
     }
-    if (!existsSync(path.join(target, 'lib', 'bin.js'))) {
-      rmSync(target, { recursive: true, force: true })
-      if (existsSync(backup)) renameSync(backup, target)
+    // 同步 package.json / package-lock.json / _pack（含回滚保护）
+    try {
+      copyFileSync(path.join(work, 'package.json'), path.join(runtimeDir, 'package.json'))
+      const lockSrc = path.join(work, 'package-lock.json')
+      if (existsSync(lockSrc)) copyFileSync(lockSrc, path.join(runtimeDir, 'package-lock.json'))
+      rmSync(path.join(runtimeDir, '_pack'), { recursive: true, force: true })
+      copyDir(path.join(work, '_pack'), path.join(runtimeDir, '_pack'))
+    } catch (err) {
+      rmSync(nmTarget, { recursive: true, force: true })
+      if (existsSync(backup)) renameSync(backup, nmTarget)
+      throw err
+    }
+    if (!existsSync(path.join(nmTarget, '@deepseek-ai', 'dsh', 'lib', 'bin.js'))) {
+      rmSync(nmTarget, { recursive: true, force: true })
+      if (existsSync(backup)) renameSync(backup, nmTarget)
       throw new Error('替换后校验失败，已回滚')
     }
     rmSync(backup, { recursive: true, force: true })
 
-    // 写用户自更新 marker（防止 extractPackagedRuntime 用随包覆盖）
-    writeFileSync(path.join(localRoot, 'runtime.version'), buildUserMarker(version, contentHash(target)), 'utf8')
-    log('info', `harnessUpdate: official harness ${version} installed at ${target}`)
+    // 5. 写用户自更新 marker（整树指纹；防 extractPackagedRuntime 用随包覆盖一致的新树）
+    writeFileSync(path.join(localRoot, 'runtime.version'), buildUserMarker(version, fingerprint), 'utf8')
+    log('info', `harnessUpdate: official harness ${version} installed (tree ${fingerprint})`)
     return { ok: true, message: `官方 Harness 已更新到 v${version}，重启后生效` }
   } catch (err) {
     log('error', `harnessUpdate: ${err instanceof Error ? err.stack ?? err.message : String(err)}`)
@@ -221,15 +277,15 @@ async function installHarness(version: string, hooks: HarnessUpdateHooks): Promi
 
 export interface HarnessUpdateResult {
   ok: boolean
-  /** 是否真的执行并完成了「下载+替换」。false 时 message 是查询失败/已最新/未开始。 */
+  /** 是否真的执行并完成了「整树刷新」。false 时 message 是查询失败/已最新/未开始。 */
   updated: boolean
   message: string
 }
 
 /**
- * 执行一次官方 Harness 检查/更新（检测 + 按需下载替换）。
- * - 有新版 → 直接本地下载替换（hooks 驱动进度条），return { ok, updated: true }。
- * - 已最新 → { ok, updated: false }。
+ * 执行一次官方 Harness 检查/更新（检测 + 按需整树刷新）。
+ * - 有新版 / 本地树不一致（混血）→ 整树刷新（hooks 驱动进度），return { ok, updated: true }。
+ * - 已最新且树一致 → { ok, updated: false }。
  * - 失败   → { ok: false, updated: false }。
  * 开发模式直接返回（不做）。
  */
@@ -255,10 +311,17 @@ export async function runHarnessUpdate(
     }
     const { runtimeDir } = runtimePaths()
     const installed = installedVersionFromDir(runtimeDir) ?? local
-    if (!res.available) {
+    if (!updateAvailable(res.local, res.latest, res.consistent)) {
       return { ok: true, updated: false, message: `官方 Harness 已是最新：v${installed}` }
     }
-    hooks.onProgress({ pct: 0, detail: `发现官方 Harness 新版：本地 v${installed} → v${res.latest}，开始本地更新…`, url: null })
+    const versionNewer = res.latest != null && res.local != null && compareDots(res.latest, res.local) > 0
+    hooks.onProgress({
+      pct: 0,
+      detail: versionNewer
+        ? `发现官方 Harness 新版：本地 v${installed} → v${res.latest}，开始整树刷新…`
+        : `检测到官方 Harness 运行时不完整（依赖树不一致），正在重建到 v${res.latest}…`,
+      url: MANUAL_URL,
+    })
     const r = await installHarness(res.latest, hooks)
     return { ok: r.ok, updated: r.ok, message: r.message }
   } finally {

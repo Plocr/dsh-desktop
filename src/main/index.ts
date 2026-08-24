@@ -461,15 +461,26 @@ function updateVersionLabel(): string {
 }
 
 /**
- * 官方 Harness 更新：检测 → 下载（进度） → 替换 → 重启。
+ * 官方 Harness 更新：检测 → 整树刷新（进度） → 替换 → 重启。
  * - 页面不被打断：进度是一条右上角小卡片（可关闭、可最小化）；任务栏同步进度。
- * - manual=false：冷启动自动检查；有新版则本地替换，已最新/失败静默（托盘常显版本）。
+ * - manual=false：冷启动自动检查；有新版或运行时不完整则本地整树刷新，已最新/失败静默（托盘常显版本）。
  * - manual=true：托盘「检查并更新…」；无论结果都明确回报（含框架+官方 Harness 版本）。
  */
 async function doHarnessUpdate(manual: boolean): Promise<void> {
   const open = beginUpdateOverlay({ pct: 0, detail: '正在检查官方 Harness 更新…', url: null })
+  let stoppedBeforeSwap = false
   const r = await runHarnessUpdate(false, {
     onProgress: (p: HarnessProgress) => open({ pct: p.pct, detail: p.detail, url: p.url }),
+    // 原子替换前停掉 harness，规避 Windows 下已加载原生模块占用导致的替换失败；
+    // 成功/失败路径随后统一 restart 恢复（失败时树已回滚，restart 用旧树即可）。
+    onBeforeSwap: async () => {
+      stoppedBeforeSwap = true
+      try {
+        if (harness.state !== 'stopped') await harness.stop()
+      } catch (err) {
+        log('error', `harnessUpdate: stop before swap failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    },
   })
   endUpdateOverlay()
 
@@ -483,6 +494,14 @@ async function doHarnessUpdate(manual: boolean): Promise<void> {
       log('error', `harnessUpdate: restart failed: ${err instanceof Error ? err.message : String(err)}`)
     }
     return
+  }
+  if (!r.ok && stoppedBeforeSwap) {
+    // 更新失败且已停掉 harness：恢复运行（树已回滚，用旧树即可）
+    try {
+      harness.start()
+    } catch (err) {
+      log('error', `harnessUpdate: recover start failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
   if (manual) {
     // 手动检查：明确回报（已最新 / 失败），含框架 + 官方 Harness 当前版本

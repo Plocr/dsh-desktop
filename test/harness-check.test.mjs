@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { compareDots } from '../src/main/version.ts'
+import { compareDots, updateAvailable } from '../src/main/version.ts'
 import { parseHarnessLine } from '../src/main/harnessParse.ts'
 
 test('compareDots: 纯数字版本', () => {
@@ -56,4 +56,23 @@ test('parseHarnessLine: 无关行返回 null', () => {
 test('parseHarnessLine: 坏行不崩溃', () => {
   assert.equal(parseHarnessLine('dsh web: not-a-url', null), null)
   assert.equal(parseHarnessLine('dsh desktop: {bad json', null), null)
+})
+
+test('updateAvailable: 版本更新 → 可用', () => {
+  assert.equal(updateAvailable('0.1.0-rc.7', '0.1.1-rc.2', true), true)
+  assert.equal(updateAvailable('0.1.0-rc.8', '0.1.1-rc.2', true), true)
+})
+
+test('updateAvailable: 已最新且树一致 → 不可用', () => {
+  assert.equal(updateAvailable('0.1.1-rc.2', '0.1.1-rc.2', true), false)
+})
+
+test('updateAvailable: 已最新但树不一致（混血）→ 可用（需修复重建）', () => {
+  assert.equal(updateAvailable('0.1.1-rc.2', '0.1.1-rc.2', false), true)
+  assert.equal(updateAvailable('0.1.1-rc.2', '0.1.1-rc.2', false), true, 'dsh 已最新但兄弟包旧 → 仍视为需要修复')
+})
+
+test('updateAvailable: 缺版本信息 → 不可用', () => {
+  assert.equal(updateAvailable(null, '0.1.1-rc.2', true), false)
+  assert.equal(updateAvailable('0.1.1-rc.2', null, true), false)
 })

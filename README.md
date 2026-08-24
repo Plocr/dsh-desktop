@@ -60,10 +60,13 @@ Electron 壳 ──spawn──▶ dsh --profile desktop --patch <overlay> --port
    - 通知内附两个下载地址：GitHub 官方地址 + **免费加速代理地址**（默认 `ghfast.top`，可用环境变量 `DSH_DESKTOP_GH_PROXY` 覆盖）
 
 2. **官方 Harness（DeepSeek Harness 本体）** —— `src/main/harnessCheck.ts` + `harnessUpdate.ts`
-   - 源：npm registry（官方失败回退 **npmmirror 镜像**；包很小，仅几十 KB）
+   - 源：npm registry（官方失败回退 **npmmirror 镜像**）
    - **检测不再依赖 `latest` dist-tag**（官方可能忘打 tag：rc.8 已发而 latest 指 rc.7）——枚举全部已发布版本取最大 semver
-   - 发现新版 → 右上角小卡片（**进度条 + 下载地址**，可关闭、不挡操作）→ 下载 tgz → 原子替换 `%LOCALAPPDATA%/DSH Desktop/runtime` 里的 dsh 包（含回滚）→ 写用户自更新标记 → 重启 harness 生效
-   - 用户自更新后的运行时不会被安装包重复覆盖，除非安装包内嵌的 dsh 版本更新
+   - **整树刷新而非单包替换**：发现新版后在 `%LOCALAPPDATA%/DSH Desktop/runtime` 暂存目录用内置便携 Node 的 npm 安装 `@deepseek-ai/dsh@<新版>`（整棵 `@deepseek-ai/*` 依赖树解析到同一 rc 线，含视觉模型等兄弟包能力）→ 校验 → 原子替换 `node_modules`（含回滚）→ 写用户自更新标记（携带**整树指纹**）→ 重启 harness 生效
+   - **混血树自愈**：检测与解压决策均基于整树一致性（`@deepseek-ai/*` 锁步包是否同版本线）。本地树不一致（如旧版单包更新残留：dsh 已升、兄弟包仍旧）时——
+     - 在线：更新流程判定「需要修复」，自动整树重建到最新版；
+     - 离线：启动期解压决策回退到安装包内置的一致运行时
+   - 用户自更新后**一致且较新**的运行时不会被安装包重复覆盖，除非安装包内嵌的 dsh 版本更新
 
 **入口只有两个（托盘 → 设置）：**
 - `自动更新（框架 v… · 官方 Harness v…）`（开关，默认开）：冷启动自动检查一次（框架 15s 下载 + 官方 Harness 30s 本地替换）；关闭则仅手动

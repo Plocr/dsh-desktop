@@ -26,8 +26,39 @@ import { spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { log } from './logger'
-import { parseMarker, shouldExtractBundled } from './runtimeMarker'
+import { isUserMarker, parseMarker, shouldExtractBundled } from './runtimeMarker'
+import { isTreeConsistent, readRuntimeTreeState, treeVersions } from './runtimeTree'
 import { compareDots } from './version'
+
+/** 清理上次中断解压/更新遗留的临时目录（runtime.tmp-* 与 .harness-update-*）。 */
+function cleanStaleTempDirs(localRoot: string, runtimeDir: string): void {
+  // localRoot 下：中断的解压暂存（runtime.tmp-*）；runtimeDir 下：中断的整树刷新
+  // 暂存（.harness-update-*）与替换备份（.node_modules.bak-*）
+  for (const [dir, pattern] of [
+    [localRoot, /^runtime\.tmp-/],
+    [runtimeDir, /^\.harness-update-/],
+    [runtimeDir, /^\.node_modules\.bak-/],
+  ] as const) {
+    let entries: string[] = []
+    try {
+      entries = readdirSync(dir)
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (!pattern.test(entry)) continue
+      const full = path.join(dir, entry)
+      try {
+        if (statSync(full).isDirectory()) {
+          rmSync(full, { recursive: true, force: true })
+          log('info', `runtime: cleaned stale temp dir ${entry}`)
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
 
 /** 以继承 stdio 的方式运行命令并等待退出（不捕获输出，兼容受限环境）。 */
 function runInherit(cmd: string, args: string[], timeoutMs: number): Promise<void> {
@@ -113,6 +144,9 @@ async function extractPackagedRuntime(
   const nodeExe = path.join(runtimeDir, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node')
   const bin = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 
+  // 清理上次中断遗留的临时目录（不阻塞就绪判断）
+  cleanStaleTempDirs(localRoot, runtimeDir)
+
   const localText = (() => {
     try {
       return readFileSync(localMarker, 'utf8')
@@ -122,8 +156,12 @@ async function extractPackagedRuntime(
   })()
 
   // 就绪判断：node/bin 均存在，且按 marker 决策不需要解压覆盖
-  // （用户自更新的运行时不再被误覆盖，除非随包内嵌 dsh 更新）
-  const needsExtract = shouldExtractBundled(marker, localText, compareDots)
+  // （用户自更新的运行时不再被误覆盖，除非随包内嵌 dsh 更新；
+  //   用户标记下若本地整树不一致（混血）→ 回退内置一致运行时）
+  const localTreeConsistent = isUserMarker(localText ?? '')
+    ? isTreeConsistent(treeVersions(readRuntimeTreeState(runtimeDir)))
+    : undefined
+  const needsExtract = shouldExtractBundled(marker, localText, compareDots, { localTreeConsistent })
   const binVersion = (() => {
     try {
       return parseMarker(marker).dsh

@@ -46,3 +46,15 @@ export function compareDots(a: string, b: string): number {
   }
   return 0
 }
+
+/**
+ * 更新可用性（纯函数，不触网，便于单测）：
+ * 有更新版本，或本地树不一致（混血/残缺，即使 dsh 版本相同也需要重建）。
+ * @param local      本地 dsh 版本（可空）
+ * @param latest     最新已发布 dsh 版本（可空）
+ * @param consistent 本地整树一致性（@deepseek-ai/* 锁步包是否同版本线）
+ */
+export function updateAvailable(local: string | null, latest: string | null, consistent: boolean): boolean {
+  if (!local || !latest) return false
+  return compareDots(latest, local) > 0 || !consistent
+}

@@ -15,6 +15,7 @@ import path from 'node:path'
 import { log } from './logger'
 import { compareDots } from './version'
 import { appDataRoot } from './runtime'
+import { isTreeConsistent, readRuntimeTreeState, treeVersions } from './runtimeTree'
 
 /** packument 元数据（含全部 versions / dist-tags）。 */
 export const REGISTRY_META_URL = 'https://registry.npmjs.org/@deepseek-ai%2Fdsh'
@@ -87,6 +88,27 @@ export async function fetchLatestDshVersion(): Promise<string | null> {
   }
 }
 
+/** 运行时目录（%LOCALAPPDATA%/DSH Desktop/runtime）。 */
+export function runtimeDirPath(): string {
+  return path.join(appDataRoot(), 'DSH Desktop', 'runtime')
+}
+
+/**
+ * 本地运行时整树一致性（@deepseek-ai/* 锁步包是否同版本线）。
+ * 混血树（如 dsh 已升、兄弟包仍旧）即使 dsh 版本已最新也不可用，视为需修复。
+ * 目录不存在 / 无锁步包时视为一致（无树可查，不误判）。
+ */
+export async function localTreeConsistent(): Promise<boolean> {
+  const versions = treeVersions(readRuntimeTreeState(runtimeDirPath()))
+  return isTreeConsistent(versions)
+}
+
+/**
+ * 更新可用性判定：见 src/main/version.ts（纯函数，便于单测）。
+ */
+import { updateAvailable } from './version'
+export { updateAvailable }
+
 /**
  * 结构化检测：区分「有新版 / 已最新 / 查询失败」，供自动替换流程判断。
  */
@@ -95,16 +117,19 @@ export async function checkHarnessUpdateResult(): Promise<{
   local: string | null
   latest: string | null
   available: boolean
+  consistent: boolean
 }> {
   const local = await readLocalDshVersion()
   const latest = await fetchLatestDshVersion()
+  const consistent = await localTreeConsistent()
   if (!local || !latest) {
-    return { ok: false, local, latest, available: false }
+    return { ok: false, local, latest, available: false, consistent }
   }
   return {
     ok: true,
     local,
     latest,
-    available: compareDots(latest, local) > 0,
+    available: updateAvailable(local, latest, consistent),
+    consistent,
   }
 }

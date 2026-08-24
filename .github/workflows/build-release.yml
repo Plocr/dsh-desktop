@@ -1,8 +1,11 @@
-﻿name: build-release
+name: build-release
 
-# 鎺ㄩ€?v* 鏍囩鏃舵瀯寤?Windows + macOS 瀹夎鍖呭苟涓婁紶鍒板搴?Release銆?# 姣忎釜骞冲彴 job 鐙珛鏋勫缓锛堣繍琛屾椂 tar.gz 鏄钩鍙扮浉鍏崇殑锛屽繀椤绘湰骞冲彴鐢熸垚锛夛紝
-# macOS arm64/x64 鍒嗕袱涓?runner锛坢acos-latest=arm64锛宮acos-13=x64锛夛紝
-# 浜х墿鎸夊钩鍙板墠缂€鍛藉悕锛屼簰涓嶈鐩栥€?# 鎵嬪姩瑙﹀彂锛坵orkflow_dispatch锛夛細蹇呴』鎸囧畾 tag 鍚嶏紙濡?v0.4.1锛夛紝涓婁紶鍒拌 Release銆?
+# 推送 v* 标签时构建 Windows + macOS 安装包并上传到对应 Release。
+# 每个平台 job 独立构建（运行时 tar.gz 是平台相关的，必须本平台生成），
+# macOS arm64/x64 分两个 job（macos-latest=x64 runner 交叉构建 arm64 dmg；
+# 运行时便携 Node 通过 DSH_RUNTIME_NODE_ARCH 显式指定目标架构，避免打进错误架构的 Node）。
+# 产物按平台前缀命名，互不覆盖。
+# 手动触发（workflow_dispatch）：必须指定 tag 名（如 v0.4.1），上传到该 Release。
 on:
   push:
     branches:
@@ -13,14 +16,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag 鍚嶏紙濡?v0.4.1锛?
+        description: 'Release tag 名（如 v0.4.1）'
         required: true
 
 permissions:
   contents: write
 
 jobs:
-  # 璐ㄩ噺闂ㄧ锛氱被鍨嬫鏌?+ 鍗曞厓娴嬭瘯锛坧ush master / PR 蹇呰窇锛泃ag 鎺ㄩ€佷篃璺戯級
+  # 质量门禁：类型检查 + 单元测试（push master / PR 必跑；tag 推送也跑）
   check:
     runs-on: ubuntu-latest
     steps:
@@ -35,7 +38,9 @@ jobs:
       - name: Test
         run: npm test
 
-  # 閲嶅瀷鏋勫缓锛堝惈 20-30 鍒嗛挓杩愯鏃跺畨瑁咃級鍙湪鎵?tag / 鎵嬪姩瑙﹀彂鏃惰窇锛?  # master 涓?PR 鍙窇涓婃柟 check锛岄伩鍏嶆瘡娆?push 鐧界儳鏃堕暱涓庝笂浼犲埌涓嶅瓨鍦?release 鐨勫け璐ャ€?  build-windows:
+  # 重量级构建（含 20-30 分钟运行时安装）只在打 tag / 手动触发时跑；
+  # master 与 PR 只跑上方 check，避免每次 push 白烧时长与上传到不存在 release 的失败。
+  build-windows:
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
     runs-on: windows-latest
     steps:
@@ -45,11 +50,11 @@ jobs:
           node-version: 22
       - name: Install deps
         run: npm install
-      - name: Cache dsh runtime (鍛戒腑鍒欒烦杩?20-30 鍒嗛挓 npm install)
+      - name: Cache dsh runtime（命中则跳过 20-30 分钟 npm install）
         uses: actions/cache@v4
         with:
           path: resources/dsh-runtime
-          key: dsh-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/setup-runtime.mjs', 'packages/bridge/package.json') }}
+          key: dsh-runtime-${{ runner.os }}-${{ runner.arch }}-x64-${{ hashFiles('scripts/setup-runtime.mjs', 'packages/bridge/package.json') }}
           restore-keys: |
             dsh-runtime-${{ runner.os }}-${{ runner.arch }}-
       - name: Build app + runtime
@@ -65,18 +70,23 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
-          # 鑻?release 灏氫笉瀛樺湪锛堝垰鎵?tag 灏氭湭寤?release锛夊垯鍏堝垱寤猴紝閬垮厤 upload 鎶?release not found
+          # 若 release 尚不存在（刚打 tag 尚未建 release）则先创建，避免 upload 报 release not found
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes
           fi
-          # 涓婁紶瀹夎鍖?+ latest.yml锛圙itHub provider 鐨勬洿鏂板厓鏁版嵁锛寀pdater 渚濊禆锛?          gh release upload "$RELEASE_TAG" release/*.exe release/latest.yml --clobber
+          # 上传安装包 + latest.yml（GitHub provider 的更新元数据，updater 依赖）
+          gh release upload "$RELEASE_TAG" release/*.exe release/latest.yml --clobber
 
+  # macOS arm64：x64 runner 交叉构建。便携 Node 显式取 arm64，
+  # 与 --arm64 dmg 匹配（否则打进 x64 Node，arm64 Mac 上无法运行）。
   build-macos-arm64:
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
-    # macOS 闈炲綋鍓嶅彂甯冧富骞冲彴锛堟棤缁存姢鑰呭湪 mac 涓婅皟璇曡繍琛屾椂鏋勫缓锛夛紝best-effort锛氬け璐ヤ笉绾€?    continue-on-error: true
+    # macOS 非当前发布主平台（无维护者在 mac 上调试运行时构建），best-effort：失败不红。
+    continue-on-error: true
     runs-on: macos-latest
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      DSH_RUNTIME_NODE_ARCH: arm64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -84,11 +94,11 @@ jobs:
           node-version: 22
       - name: Install deps
         run: npm install
-      - name: Cache dsh runtime (鍛戒腑鍒欒烦杩?20-30 鍒嗛挓 npm install)
+      - name: Cache dsh runtime（命中则跳过 20-30 分钟 npm install）
         uses: actions/cache@v4
         with:
           path: resources/dsh-runtime
-          key: dsh-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/setup-runtime.mjs', 'packages/bridge/package.json') }}
+          key: dsh-runtime-${{ runner.os }}-${{ runner.arch }}-arm64-${{ hashFiles('scripts/setup-runtime.mjs', 'packages/bridge/package.json') }}
           restore-keys: |
             dsh-runtime-${{ runner.os }}-${{ runner.arch }}-
       - name: Build app + runtime
@@ -104,14 +114,17 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
-          # 涓婁紶 DMG + blockmap锛堝樊鍒嗘洿鏂扮敤锛沴atest-mac.yml 鐢?merge-mac-manifest 鍚堝苟涓婁紶锛?          gh release upload "$RELEASE_TAG" release/*arm64*.dmg release/*arm64*.dmg.blockmap --clobber
+          gh release upload "$RELEASE_TAG" release/*arm64*.dmg release/*arm64*.dmg.blockmap --clobber
 
+  # macOS x64：原生 x64 构建。
   build-macos-x64:
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
-    # macOS 闈炲綋鍓嶅彂甯冧富骞冲彴锛宐est-effort锛氬け璐ヤ笉绾€?    continue-on-error: true
+    # macOS 非当前发布主平台（无维护者在 mac 上调试运行时构建），best-effort：失败不红。
+    continue-on-error: true
     runs-on: macos-14
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      DSH_RUNTIME_NODE_ARCH: x64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -119,11 +132,11 @@ jobs:
           node-version: 22
       - name: Install deps
         run: npm install
-      - name: Cache dsh runtime (鍛戒腑鍒欒烦杩?20-30 鍒嗛挓 npm install)
+      - name: Cache dsh runtime（命中则跳过 20-30 分钟 npm install）
         uses: actions/cache@v4
         with:
           path: resources/dsh-runtime
-          key: dsh-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/setup-runtime.mjs', 'packages/bridge/package.json') }}
+          key: dsh-runtime-${{ runner.os }}-${{ runner.arch }}-x64-${{ hashFiles('scripts/setup-runtime.mjs', 'packages/bridge/package.json') }}
           restore-keys: |
             dsh-runtime-${{ runner.os }}-${{ runner.arch }}-
       - name: Build app + runtime
@@ -141,16 +154,16 @@ jobs:
         run: |
           gh release upload "$RELEASE_TAG" release/*x64*.dmg release/*x64*.dmg.blockmap --clobber
 
-  # macOS 澶氭灦鏋勬洿鏂扮殑鍏抽敭锛氭妸涓や釜鏋舵瀯鍚勮嚜鐢熸垚鐨?latest-mac.yml 鍚堝苟涓轰竴浠?  # 鍚?arm64+x64 鐨?files[]锛屼緵 electron-updater 鎸?process.arch 鎸戦€夈€?  merge-mac-manifest:
+  # macOS 多架构更新的关键：把两个架构各自生成的 latest-mac.yml 合并为一份
+  # 含 arm64+x64 的 files[]，供 electron-updater 按 process.arch 挑选对应 dmg。
+  merge-mac-manifest:
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
     needs: [build-macos-arm64, build-macos-x64]
-    # mac 涓?best-effort锛坈ontinue-on-error锛夛紱鍚堝苟鍚屾牱涓嶇孩銆?    continue-on-error: true
+    # mac 上 best-effort（continue-on-error）；合并同样不红。
+    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - name: Download dmg + blockmap assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -169,4 +182,3 @@ jobs:
         shell: bash
         run: |
           gh release upload "$RELEASE_TAG" ./dmg/latest-mac.yml --clobber
-

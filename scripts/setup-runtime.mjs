@@ -21,8 +21,20 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const runtimeDir = path.join(root, 'resources', 'dsh-runtime')
 const NODE_VERSION = process.env.DSH_RUNTIME_NODE_VERSION ?? 'v24.15.0'
-const DSH_VERSION = process.env.DSH_RUNTIME_DSH_VERSION ?? '0.1.0-rc.8'
+const DSH_VERSION = process.env.DSH_RUNTIME_DSH_VERSION ?? '0.1.1-rc.2'
 const TAR = process.env.DSH_RUNTIME_TAR ?? 'tar'
+/**
+ * 目标 Node 架构：默认宿主架构；交叉构建（如在 x64 runner 上打 arm64 dmg）时
+ * 用 DSH_RUNTIME_NODE_ARCH 显式指定（nodejs.org 包名：x64 / arm64）。
+ * 运行时打进哪个架构的安装包，便携 Node 就必须是哪个架构。
+ */
+const NODE_ARCH = process.env.DSH_RUNTIME_NODE_ARCH ?? process.arch
+/**
+ * 工具 Node：npm 操作用宿主 Node（process.execPath）执行 npm-cli.js——
+ * 交叉构建时目标架构 Node 无法在宿主架构上运行，而 npm-cli.js 是纯 JS，
+ * 任何 Node 都能执行；目标架构 Node 只作为运行时产物，不用于构建命令。
+ */
+const toolNode = () => process.execPath
 
 function run(cmd, args, opts = {}) {
   console.log(`[runtime] ${cmd} ${args.join(' ')}`)
@@ -48,7 +60,8 @@ function runNpmInstall(extraArgs) {
   let lastErr = null
   for (const reg of [REG_NPMJS, REG_NPMMIRROR]) {
     try {
-      run(nodeBin(), [...common, '--registry', reg, ...extraArgs, '--prefix', runtimeDir], { env: installEnv })
+      // npm 操作用宿主 Node 执行（交叉构建时目标架构 Node 无法在宿主上运行）
+      run(toolNode(), [...common, '--registry', reg, ...extraArgs, '--prefix', runtimeDir], { env: installEnv })
       return
     } catch (err) {
       lastErr = err
@@ -60,13 +73,23 @@ function runNpmInstall(extraArgs) {
 
 async function downloadNode() {
   const nodeDir = path.join(runtimeDir, 'node')
-  if (existsSync(path.join(nodeDir, process.platform === 'win32' ? 'node.exe' : 'bin/node'))) {
-    console.log(`[runtime] node ${NODE_VERSION} already present`)
+  const archMarker = path.join(nodeDir, '.dsh-node-arch')
+  let existingArch = null
+  try {
+    existingArch = readFileSync(archMarker, 'utf8').trim()
+  } catch {
+    /* 旧缓存无架构标记 → 视为不匹配，重建 */
+  }
+  if (
+    existsSync(path.join(nodeDir, process.platform === 'win32' ? 'node.exe' : 'bin/node')) &&
+    existingArch === NODE_ARCH
+  ) {
+    console.log(`[runtime] node ${NODE_VERSION} (${NODE_ARCH}) already present`)
     return
   }
   rmSync(nodeDir, { recursive: true, force: true })
   mkdirSync(nodeDir, { recursive: true })
-  const arch = process.arch === 'x64' ? 'x64' : process.arch
+  const arch = NODE_ARCH === 'x64' ? 'x64' : NODE_ARCH
   const plat = process.platform === 'win32' ? 'win' : process.platform === 'darwin' ? 'darwin' : 'linux'
   const ext = process.platform === 'win32' ? 'zip' : process.platform === 'darwin' ? 'tar.gz' : 'tar.xz'
   const url = `https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-${plat}-${arch}.${ext}`
@@ -87,13 +110,11 @@ async function downloadNode() {
   }
   const inner = path.join(tmpDir, `node-${NODE_VERSION}-${plat}-${arch}`)
   cpSync(inner, nodeDir, { recursive: true })
+  writeFileSync(archMarker, `${NODE_ARCH}\n`, 'utf8')
   rmSync(tmpDir, { recursive: true, force: true })
   rmSync(tmp, { force: true })
-  console.log(`[runtime] node extracted to ${nodeDir}`)
+  console.log(`[runtime] node extracted to ${nodeDir} (arch=${NODE_ARCH})`)
 }
-
-const nodeBin = () =>
-  process.platform === 'win32' ? path.join(runtimeDir, 'node', 'node.exe') : path.join(runtimeDir, 'node', 'bin', 'node')
 
 /** 便携 Node 内的 npm-cli.js：Windows 分发包在 node_modules/npm，macOS/Linux 在 lib/node_modules/npm。 */
 const npmCli = () => {
@@ -116,13 +137,14 @@ async function installDsh() {
   mkdirSync(packDir, { recursive: true })
   const bridgeSrc = path.join(root, 'packages', 'bridge')
   if (!existsSync(bridgeSrc)) throw new Error(`plugin package missing: ${bridgeSrc}`)
-  run(nodeBin(), [npmCli(), 'pack', '--pack-destination', packDir, '--silent', bridgeSrc])
+  run(toolNode(), [npmCli(), 'pack', '--pack-destination', packDir, '--silent', bridgeSrc])
   const tgz = readdirSync(packDir).find((f) => f.endsWith('.tgz'))
   if (!tgz) throw new Error('bridge pack failed')
   const pluginTar = path.join(packDir, tgz)
   // 安装 dsh + bridge（同一次 install，保证解析一致；含失败换 npmmirror 重试）
   runNpmInstall([`@deepseek-ai/dsh@${DSH_VERSION}`, pluginTar])
-  rmSync(packDir, { recursive: true, force: true })
+  // 保留 _pack：runtime package.json 的 file:_pack/... 引用不再悬空，
+  // 且后续应用内整树刷新（harnessUpdate 的 npm install）可解析 bridge 依赖。
   console.log('[runtime] dsh + bridge installed')
 }
 
@@ -219,15 +241,20 @@ function treeSize(dir) {
   return total
 }
 
-// 增量：运行时已就绪且 dsh 版本匹配时跳过下载/安装，只重建 zip
+// 增量：运行时已就绪、dsh 版本匹配、且 Node 架构与目标一致时才跳过下载/安装
+// （交叉构建时缓存里的旧架构 Node 不能复用，必须重建）
 const dshPkg = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
+const archMarkerPath = path.join(runtimeDir, 'node', '.dsh-node-arch')
 let fresh = false
-if (existsSync(dshPkg)) {
+if (existsSync(dshPkg) && existsSync(archMarkerPath)) {
   try {
     const v = JSON.parse(readFileSync(dshPkg, 'utf8')).version
-    if (v === DSH_VERSION) {
-      console.log(`[runtime] incremental: dsh@${v} already installed`)
+    const nodeArch = readFileSync(archMarkerPath, 'utf8').trim()
+    if (v === DSH_VERSION && nodeArch === NODE_ARCH) {
+      console.log(`[runtime] incremental: dsh@${v} node=${nodeArch} already installed`)
       fresh = true
+    } else {
+      console.log(`[runtime] cache mismatch: dsh=${v} node=${nodeArch} vs target dsh=${DSH_VERSION} node=${NODE_ARCH} -> rebuild`)
     }
   } catch {
     /* fallthrough */

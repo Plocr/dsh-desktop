@@ -9,7 +9,8 @@
  * 解压决策 shouldExtractBundled：
  *  - 无本地标记 → 解压；
  *  - 本地标记与随包标记完全一致 → 就绪（不解压）；
- *  - 本地是「用户自更新」标记 → 仅当随包内嵌的 dsh 比本地新才解压覆盖
+ *  - 本地是「用户自更新」标记 → 本地整树不一致（混血/残缺）→ 回退内置；
+ *    否则仅当随包内嵌的 dsh 比本地新才解压覆盖
  *    （用户自跑新框架优先，安装包内嵌更新换代时才回切）；
  *  - 其他不匹配 → 解压刷新。
  */
@@ -32,16 +33,27 @@ export function isUserMarker(text: string): boolean {
   return m
 }
 
+export interface ExtractDecisionOptions {
+  /**
+   * 本地运行时的整树一致性（@deepseek-ai/* 锁步包是否同版本线）。
+   * 仅当本地标记为用户自更新时参与判定：树不一致（混血，如 dsh 已升、
+   * 兄弟包仍旧）视为残缺 → 回退内置一致运行时；缺省 undefined 时不参与。
+   */
+  localTreeConsistent?: boolean
+}
+
 /**
  * 决定是否需要用随包内嵌运行时重新解压/覆盖本地运行时。
  * @param bundledText resources/runtime.version 内容
  * @param localText   %LOCALAPPDATA%/DSH Desktop/runtime.version 内容
  * @param compare     (a, b) => a<b 负数 / a=b 0 / a>b 正数（semver 风格，注入 compareDots 便于测试）
+ * @param opts        可选：本地整树一致性（用户标记下，混血树回退内置）。
  */
 export function shouldExtractBundled(
   bundledText: string,
   localText: string | null,
   compare: (a: string, b: string) => number,
+  opts?: ExtractDecisionOptions,
 ): boolean {
   const b = parseMarker(bundledText)
   if (!b.dsh) return false // 随包标记损坏：交给调用方做存在性兜底
@@ -50,7 +62,9 @@ export function shouldExtractBundled(
   if (!l.dsh) return true
   if (b.tar === l.tar) return false // 与随包一致 → 就绪
   if (isUserMarker(localText)) {
-    // 用户自更新：仅当随包内嵌 dsh 比本地新才覆盖
+    // 用户自更新：本地树不一致（混血/残缺）→ 回退内置一致运行时；
+    // 否则仅当随包内嵌 dsh 比本地新才覆盖（一致的较新用户树优先保留）
+    if (opts?.localTreeConsistent === false) return true
     return compare(b.dsh, l.dsh) > 0
   }
   return true // 其他不匹配 → 解压刷新

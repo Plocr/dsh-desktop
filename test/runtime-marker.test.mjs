@@ -37,6 +37,26 @@ test('runtimeMarker: shouldExtractBundled 决策', () => {
   assert.equal(shouldExtractBundled('tar=only\n', null, compareDots), false)
 })
 
+test('runtimeMarker: shouldExtractBundled 混血树回退（localTreeConsistent=false）', () => {
+  // 用户自更新但本地整树不一致（如 dsh 已升、兄弟包仍旧）→ 回退内置一致运行时
+  assert.equal(
+    shouldExtractBundled(BUNDLED, buildUserMarker('0.1.0-rc.8', 'u1'), compareDots, { localTreeConsistent: false }),
+    true,
+  )
+  // 用户自更新且树一致、内嵌 dsh 不更新 → 保留用户运行时
+  assert.equal(
+    shouldExtractBundled(BUNDLED, buildUserMarker('0.1.0-rc.8', 'u1'), compareDots, { localTreeConsistent: true }),
+    false,
+  )
+  // 用户自更新且树一致、内嵌 dsh 更新 → 解压覆盖
+  assert.equal(
+    shouldExtractBundled(BUNDLED, buildUserMarker('0.1.0-rc.6', 'u2'), compareDots, { localTreeConsistent: true }),
+    true,
+  )
+  // 非用户标记：localTreeConsistent 不参与（缺省 undefined 等价旧行为）
+  assert.equal(shouldExtractBundled(BUNDLED, 'dsh=9.9.9\ntar=whatever\n', compareDots, { localTreeConsistent: false }), true)
+})
+
 test('runtimeMarker: buildUserMarker 格式', () => {
   const m = buildUserMarker('0.1.0-rc.9', 'aabbccdd')
   assert.equal(isUserMarker(m), true)
