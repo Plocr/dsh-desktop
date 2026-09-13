@@ -40,6 +40,13 @@ export interface ExtractDecisionOptions {
    * 兄弟包仍旧）视为残缺 → 回退内置一致运行时；缺省 undefined 时不参与。
    */
   localTreeConsistent?: boolean
+  /**
+   * 本地运行时能否用本壳 profile（dsh-workbench）启动（真实探测结果）。
+   * false 时无条件回退随包运行时——被应用内更新到「CLI 拒绝 desktop profile」
+   * 的版本（如 0.1.5-alpha.1+）即使更新、树一致，也必须换回可用运行时，
+   * 否则应用每次启动都崩溃重启。缺省 undefined 时不参与。
+   */
+  localBootable?: boolean
 }
 
 /**
@@ -47,7 +54,7 @@ export interface ExtractDecisionOptions {
  * @param bundledText resources/runtime.version 内容
  * @param localText   %LOCALAPPDATA%/DSH Desktop/runtime.version 内容
  * @param compare     (a, b) => a<b 负数 / a=b 0 / a>b 正数（semver 风格，注入 compareDots 便于测试）
- * @param opts        可选：本地整树一致性（用户标记下，混血树回退内置）。
+ * @param opts        可选：本地整树一致性、本地启动兼容性（用户标记下参与判定）。
  */
 export function shouldExtractBundled(
   bundledText: string,
@@ -61,6 +68,7 @@ export function shouldExtractBundled(
   const l = parseMarker(localText)
   if (!l.dsh) return true
   if (b.tar === l.tar) return false // 与随包一致 → 就绪
+  if (opts?.localBootable === false) return true // 本地运行时无法启动本壳 profile → 回退随包
   if (isUserMarker(localText)) {
     // 用户自更新：本地树不一致（混血/残缺）→ 回退内置一致运行时；
     // 否则仅当随包内嵌 dsh 比本地新才覆盖（一致的较新用户树优先保留）

@@ -2,8 +2,9 @@
  * 壳设置：userData/settings.json。仅存壳层偏好；harness 侧设置留在 harness，
  * 插件偏好（仪表盘/终端/主题）由插件自身持久化（profile 目录）。
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
 import path from 'node:path'
+import { readTextNoBom } from './pluginfs.ts'
 
 export interface AppSettings {
   /** 关闭窗口时最小化到托盘（false = 直接退出） */
@@ -46,7 +47,7 @@ export function loadSettings(file: string): AppSettings {
   const out: AppSettings = { ...DEFAULT_SETTINGS }
   try {
     if (existsSync(file)) {
-      const raw = JSON.parse(readFileSync(file, 'utf8')) as Partial<AppSettings>
+      const raw = JSON.parse(readTextNoBom(file)) as Partial<AppSettings>
       if (typeof raw.trayOnClose === 'boolean') out.trayOnClose = raw.trayOnClose
       if (typeof raw.notifications === 'boolean') out.notifications = raw.notifications
       if (typeof raw.autoStart === 'boolean') out.autoStart = raw.autoStart
@@ -71,7 +72,11 @@ export function loadSettings(file: string): AppSettings {
 export function saveSettings(file: string, s: AppSettings): void {
   try {
     mkdirSync(path.dirname(file), { recursive: true })
-    writeFileSync(file, JSON.stringify(s, null, 2), 'utf8')
+    // 原子写：先写临时文件再 rename——写入中途崩溃/断电不会留下损坏 JSON
+    // （损坏会让 loadSettings 静默回退默认值，用户偏好/待装更新标记全丢）
+    const tmp = `${file}.tmp`
+    writeFileSync(tmp, JSON.stringify(s, null, 2), 'utf8')
+    renameSync(tmp, file)
   } catch {
     /* ignore */
   }

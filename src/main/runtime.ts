@@ -22,13 +22,35 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { log } from './logger'
 import { isUserMarker, parseMarker, shouldExtractBundled } from './runtimeMarker'
 import { isTreeConsistent, readRuntimeTreeState, treeVersions } from './runtimeTree'
 import { compareDots } from './version'
+import { incompatibleVersionsFile as compatFile, markIncompatibleVersion as markCompatVersion } from './harnessCompat'
+import {
+  readProfileBundles,
+  readProfileDependencyNames,
+  isReservedPluginName,
+  listDesktopPlugins as listPluginSources,
+  pluginProfileTarget,
+  readTextNoBom,
+  type DesktopPlugin,
+} from './pluginfs.ts'
+import { DESKTOP_PROFILE } from './desktopProfile.ts'
+
+export type { DesktopPlugin }
+
+/**
+ * 汇总全部桌面插件（打包内置 + 用户安装）。
+ * 发现/汇总逻辑在 pluginfs（纯 Node，可单测）；这里包一层把被拒条目写进壳日志。
+ */
+export function listDesktopPlugins(bundledDir: string | undefined, userDir: string | undefined): DesktopPlugin[] {
+  // 被拒插件（占用 bridge 保留名 / 非法包名）记日志，便于用户排查「插件为何不出现」
+  return listPluginSources(bundledDir, userDir, (m) => log('error', m))
+}
 
 /** 清理上次中断解压/更新遗留的临时目录（runtime.tmp-* 与 .harness-update-*）。 */
 function cleanStaleTempDirs(localRoot: string, runtimeDir: string): void {
@@ -58,6 +80,19 @@ function cleanStaleTempDirs(localRoot: string, runtimeDir: string): void {
       }
     }
   }
+}
+
+/**
+ * 选择 tar 可执行文件：Windows 显式使用 System32 的 bsdtar。
+ * （PATH 里的 Git GNU tar 会把 `E:\…` 盘符路径误判为远程主机 host:file，
+ *  报 "Cannot connect to E: resolve failed" 退出码 128；System32 bsdtar 正常处理本地路径。）
+ */
+function tarExe(): string {
+  if (process.platform === 'win32') {
+    const sys32Tar = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe')
+    if (existsSync(sys32Tar)) return sys32Tar
+  }
+  return 'tar'
 }
 
 /** 以继承 stdio 的方式运行命令并等待退出（不捕获输出，兼容受限环境）。 */
@@ -125,12 +160,85 @@ function candidateGlobalRoots(): string[] {
 }
 
 /**
+ * 启动兼容性探测：用指定 node + dsh bin 组装 desktop profile 配置树并退出
+ * （`--dump-config`，不启动服务、不写会话）。
+ *
+ * 用途：识别「CLI 拒绝本壳 profile」的 harness 版本（0.1.5-alpha.1 起硬编码
+ * 拒绝官方保留名）——本地运行时被更新到这类版本时必须回退随包运行时。
+ * @returns ok=false 时 message 为退出码与错误摘要。
+ */
+export async function probeDesktopProfileBoot(
+  nodeExe: string,
+  binJs: string,
+  dshHome: string,
+  timeoutMs = 30_000,
+): Promise<{ ok: boolean; message: string }> {
+  if (!existsSync(nodeExe) || !existsSync(binJs)) {
+    return { ok: false, message: `运行时文件缺失（node/bin 不存在）` }
+  }
+  return new Promise((resolve) => {
+    let out = ''
+    let child: ChildProcess
+    try {
+      child = spawn(nodeExe, [binJs, '--profile', DESKTOP_PROFILE, '--dump-config'], {
+        env: { ...process.env, DSH_HOME: dshHome, DSH_DESKTOP: '1' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      })
+    } catch (err) {
+      resolve({ ok: false, message: err instanceof Error ? err.message : String(err) })
+      return
+    }
+    let done = false
+    const finish = (r: { ok: boolean; message: string }): void => {
+      if (done) return
+      done = true
+      clearTimeout(t)
+      resolve(r)
+    }
+    const t = setTimeout(() => {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        /* ignore */
+      }
+      finish({ ok: false, message: '兼容性探测超时' })
+    }, timeoutMs)
+    child.stdout?.on('data', (c: Buffer) => {
+      out += c.toString('utf8')
+    })
+    child.stderr?.on('data', (c: Buffer) => {
+      out += c.toString('utf8')
+    })
+    child.on('error', (err) => finish({ ok: false, message: err.message }))
+    child.on('exit', (code) => {
+      if (code === 0) return finish({ ok: true, message: '' })
+      const tail = out.trim().split(/\r?\n/).filter(Boolean).slice(-3).join(' ')
+      finish({ ok: false, message: tail.slice(0, 300) || `退出码 ${String(code)}` })
+    })
+  })
+}
+
+/** 读取运行时树内 dsh 版本（解析失败 → null）。 */
+function readRuntimeDshVersion(runtimeDir: string): string | null {
+  try {
+    const p = JSON.parse(
+      readTextNoBom(path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')),
+    ) as { version?: unknown }
+    return typeof p.version === 'string' ? p.version : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * 打包模式：按需把运行时 tar.gz 解压到用户本地目录，返回就绪的 RuntimeSpec（异步，避免阻塞 UI）。
  * onExtract：解压即将开始时回调（用于在加载页提示"正在解压运行时"）。
  */
 async function extractPackagedRuntime(
   tarPath: string,
   markerPath: string,
+  dshHome: string,
   onExtract?: () => void,
 ): Promise<RuntimeSpec | null> {
   if (!existsSync(tarPath) || !existsSync(markerPath)) {
@@ -161,7 +269,7 @@ async function extractPackagedRuntime(
   const localTreeConsistent = isUserMarker(localText ?? '')
     ? isTreeConsistent(treeVersions(readRuntimeTreeState(runtimeDir)))
     : undefined
-  const needsExtract = shouldExtractBundled(marker, localText, compareDots, { localTreeConsistent })
+  const baseDecision = shouldExtractBundled(marker, localText, compareDots, { localTreeConsistent })
   const binVersion = (() => {
     try {
       return parseMarker(marker).dsh
@@ -169,8 +277,33 @@ async function extractPackagedRuntime(
       return null
     }
   })()
+
+  // 启动兼容性探测：仅当「本地是用户自更新树、随包又不打算覆盖」时才做
+  // （被应用内更新到 0.1.5-alpha.1+ 的树无法启动 desktop profile，必须回退随包运行时；
+  //   其他情况跳过探测，避免每次启动多花 1~3s）
+  let localBootable: boolean | undefined
+  if (!baseDecision && existsSync(nodeExe) && existsSync(bin) && isUserMarker(localText ?? '')) {
+    const probe = await probeDesktopProfileBoot(nodeExe, bin, dshHome)
+    localBootable = probe.ok
+    if (!probe.ok) {
+      const localVersion = readRuntimeDshVersion(runtimeDir)
+      if (localVersion) {
+        // 记入不兼容清单：后续 harness 选版不再挑它（harnessCheck 会跳过）
+        if (markCompatVersion(compatFile(appDataRoot()), localVersion)) {
+          log('error', `runtime: 记录不兼容 harness 版本 ${localVersion}`)
+        }
+      }
+      log('error', `runtime: 本地运行时无法启动 desktop profile（${probe.message}），回退随包运行时`)
+    } else {
+      log('info', 'runtime: 本地用户运行时启动探测通过，继续使用')
+    }
+  }
+  const needsExtract = baseDecision || localBootable === false
   if (existsSync(nodeExe) && existsSync(bin) && !needsExtract) {
-    return { node: nodeExe, bin, dshVersion: binVersion ?? undefined }
+    // 本地树可能是用户自更新的较新版本：版本以本地 package.json 为准，
+    // 随包 marker 只是「是否需要重新解压」的判据（否则托盘会短暂显示旧版本）
+    const localVersion = readRuntimeDshVersion(runtimeDir)
+    return { node: nodeExe, bin, dshVersion: localVersion ?? binVersion ?? undefined }
   }
 
   log('info', `extracting packaged runtime -> ${runtimeDir}`)
@@ -180,7 +313,7 @@ async function extractPackagedRuntime(
   rmSync(tmp, { recursive: true, force: true })
   mkdirSync(tmp, { recursive: true })
   try {
-    await runInherit('tar', ['-xf', tarPath, '-C', tmp], 600_000)
+    await runInherit(tarExe(), ['-xf', tarPath, '-C', tmp], 600_000)
   } catch (err) {
     rmSync(tmp, { recursive: true, force: true })
     throw new Error(`运行时解压失败：${err instanceof Error ? err.message : String(err)}`)
@@ -195,12 +328,13 @@ async function extractPackagedRuntime(
   return { node: nodeExe, bin, dshVersion: binVersion ?? undefined }
 }
 
-export async function resolveRuntime(onExtract?: () => void): Promise<RuntimeSpec> {
+export async function resolveRuntime(dshHome: string, onExtract?: () => void): Promise<RuntimeSpec> {
   if (app.isPackaged) {
     const resources = process.resourcesPath
     const spec = await extractPackagedRuntime(
       path.join(resources, 'dsh-runtime.tar.gz'),
       path.join(resources, 'runtime.version'),
+      dshHome,
       onExtract,
     )
     if (spec) return spec
@@ -231,6 +365,53 @@ function copyDir(src: string, dest: string): void {
 }
 
 /**
+ * 删除目录树，但先解除沿途全部 junction/symlink 再删除：
+ * Node 的 rmSync(recursive) 在 Windows 上会穿透 junction 删除链接指向的
+ * 真实目录——dev-link 会把仓库 packages/ 以 junction 链接进 profile
+ * node_modules，必须避免重建时误删仓库源码。
+ */
+function removeTreeWithJunctions(dir: string): void {
+  const soften = (d: string): void => {
+    let entries: string[] = []
+    try {
+      entries = readdirSync(d)
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const p = path.join(d, entry)
+      let isLink = false
+      try {
+        isLink = lstatSync(p).isSymbolicLink()
+      } catch {
+        continue
+      }
+      if (isLink) {
+        try {
+          rmSync(p, { force: true }) // 只删链接本身
+        } catch {
+          /* ignore */
+        }
+      } else {
+        let isDir = false
+        try {
+          isDir = statSync(p).isDirectory()
+        } catch {
+          continue
+        }
+        if (isDir) soften(p)
+      }
+    }
+  }
+  try {
+    soften(dir)
+    rmSync(dir, { recursive: true, force: true })
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
  * 插件同步与 overlay 生成（桌面端自带 Cordis 插件）。
  *
  * 插件来源（两类目录，都必须是「目录含 package.json」的 Cordis 插件包）：
@@ -241,56 +422,6 @@ function copyDir(src: string, dest: string): void {
  * writeOverlay 为每个启用插件生成 `- insert:` 行 → harness 以 --patch 加载。
  * bridge（dsh-desktop-bridge）是壳↔harness 通信通道，永远启用、不可禁用。
  */
-
-/** 发现某目录下的插件包（子目录且含 package.json）。 */
-function discoverPluginsIn(
-  dir: string | undefined,
-): { name: string; version: string | null; dir: string }[] {
-  if (!dir || !existsSync(dir)) return []
-  const out: { name: string; version: string | null; dir: string }[] = []
-  for (const entry of readdirSync(dir)) {
-    const pkgDir = path.join(dir, entry)
-    try {
-      if (!statSync(pkgDir).isDirectory()) continue
-      const pkgPath = path.join(pkgDir, 'package.json')
-      if (!existsSync(pkgPath)) continue
-      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: unknown; version?: unknown }
-      if (typeof pkg.name !== 'string' || !pkg.name) continue
-      out.push({ name: pkg.name, version: typeof pkg.version === 'string' ? pkg.version : null, dir: pkgDir })
-    } catch {
-      /* 跳过无法解析的目录 */
-    }
-  }
-  return out
-}
-
-export interface DesktopPlugin {
-  /** package.json 的 name（harness 按此解析加载） */
-  name: string
-  /** 插件目录名（resources/plugins/<dir> 或 userData/plugins/<dir>） */
-  dir: string
-  version: string | null
-  source: 'bundled' | 'user'
-}
-
-/** 汇总全部桌面插件（打包内置 + 用户安装），含来源标记。 */
-export function listDesktopPlugins(bundledDir: string | undefined, userDir: string | undefined): DesktopPlugin[] {
-  const bundled = discoverPluginsIn(bundledDir).map((p) => ({
-    name: p.name,
-    dir: path.basename(p.dir),
-    version: p.version,
-    source: 'bundled' as const,
-  }))
-  const user = discoverPluginsIn(userDir).map((p) => ({
-    name: p.name,
-    dir: path.basename(p.dir),
-    version: p.version,
-    source: 'user' as const,
-  }))
-  // 同名时用户目录优先（可覆盖/更新内置同名插件）
-  const userNames = new Set(user.map((p) => p.name))
-  return [...user, ...bundled.filter((p) => !userNames.has(p.name))]
-}
 
 /**
  * 确保 desktop profile 存在；同步「启用」的插件到 profile node_modules。
@@ -303,10 +434,20 @@ export function ensureProfile(
   userPluginsDir?: string,
   disabledPlugins: string[] = [],
 ): string {
-  const profileDir = path.join(dshHome, 'profiles', 'desktop')
-  if (!existsSync(profileDir)) {
+  const profileDir = path.join(dshHome, 'profiles', DESKTOP_PROFILE)
+  // 完整性校验：目录存在 ≠ profile 可用——dev-link 等工具会预创建只含
+  // node_modules 的空目录；官方新版 loadProfile 对「无 package.json 的
+  // profile」fail-loud（desktop 非官方模板 → 直接报错），残缺目录必须重建。
+  if (!existsSync(path.join(profileDir, 'package.json'))) {
     if (!existsSync(templateDir)) {
       throw new Error(`desktop profile 模板缺失: ${templateDir}`)
+    }
+    if (existsSync(profileDir)) {
+      // 先解除全部 junction/symlink 再删整树：rmSync(recursive) 会穿透
+      // junction 删除目标真实目录（dev-link 的 node_modules 指向仓库
+      // packages/，曾被误删 packages/ui-dashboard 与 packages/bridge）
+      removeTreeWithJunctions(profileDir)
+      log('info', `desktop profile 残缺（无 package.json），已重建 ${profileDir}`)
     }
     copyDir(templateDir, profileDir)
     log('info', `created desktop profile at ${profileDir}`)
@@ -314,13 +455,23 @@ export function ensureProfile(
   // 收集启用插件：bridge 永远启用；其余按 disabledPlugins 过滤
   const disabled = new Set(disabledPlugins)
   const plugins = listDesktopPlugins(bundledPluginsDir, userPluginsDir).filter(
-    (p) => p.name === 'dsh-desktop-bridge' || !disabled.has(p.name),
+    (p) => isReservedPluginName(p.name) || !disabled.has(p.name),
   )
   for (const p of plugins) {
+    // 防御：用户插件不得占用 bridge 保留名（发现层已剔除，这里再拦一道）
+    if (p.source === 'user' && isReservedPluginName(p.name)) {
+      log('error', `plugin skipped in profile sync (reserved name): "${p.name}"`)
+      continue
+    }
+    // 目标路径由 pluginfs 统一计算：包名非法/越界返回 null，绝不拼进 copyDir 目标
+    const target = pluginProfileTarget(profileDir, p.name)
+    if (target === null) {
+      log('error', `plugin skipped in profile sync (unsafe name): ${JSON.stringify(p.name)}`)
+      continue
+    }
     // 注意：用目录名（dir）定位源，包名（name）作为 profile 内的安装名
     const src = p.source === 'user' ? path.join(userPluginsDir ?? '', p.dir) : path.join(bundledPluginsDir ?? '', p.dir)
     if (!existsSync(src)) continue
-    const target = path.join(profileDir, 'node_modules', p.name)
     const srcVersion = readVersion(src)
     const currentVersion = readVersion(target)
     // bundled（随包内置）是权威源：始终覆盖 profile 副本，保证代码更新随包生效
@@ -340,12 +491,34 @@ export function ensureProfile(
       log('info', `plugin synced to profile: ${p.name} (${String(currentVersion)} -> ${String(srcVersion)})`)
     }
   }
-  // 清理已禁用/已移除插件在 profile 中的残留（bridge 除外）
+  // 清理已禁用/已移除插件在 profile 中的残留（bridge 除外）。
+  // 保护：官方 `dsh plugin add` 安装的组合包（dsh.profile.bundles）由 pnpm 管理，
+  // 不在本函数维护的 bundled/user 列表内——不能被当成残留删除。
   const activeNames = new Set(plugins.map((p) => p.name))
+  // 保护名单支持 scope 包：pnpm 在 node_modules 顶层按 `@scope` 目录存放，
+  // 仅按完整包名保护会漏掉目录本身。对每个名字把其 scope 段也加入保护。
+  const protectNames = (name: string): void => {
+    activeNames.add(name)
+    if (name.startsWith('@')) {
+      const scope = name.split('/')[0]
+      if (scope) activeNames.add(scope)
+    }
+  }
+  plugins.forEach((p) => protectNames(p.name))
+  try {
+    for (const b of readProfileBundles(profileDir)) protectNames(b)
+    // dependencies 声明的包也要保护：取消挂载只移出 bundles、代码与依赖必须保留，
+    // 否则 ensureProfile 会把它们当残留删掉，用户便无法重新挂载。
+    for (const d of readProfileDependencyNames(profileDir)) protectNames(d)
+  } catch {
+    /* 读取失败则按原逻辑，不额外保护 */
+  }
   const nmDir = path.join(profileDir, 'node_modules')
   if (existsSync(nmDir)) {
     for (const entry of readdirSync(nmDir)) {
-      if (entry.startsWith('.') || entry === 'dsh-desktop-bridge' || activeNames.has(entry)) continue
+      // 大小写不敏感地保护 bridge 目录：Windows 上 `DSH-Desktop-Bridge` 就是 bridge
+      // 的安装目录（activeNames 是精确匹配，漏掉大小写变体会误删刚同步的真 bridge）
+      if (entry.startsWith('.') || isReservedPluginName(entry) || activeNames.has(entry)) continue
       const target = path.join(nmDir, entry)
       try {
         // junction/symlink：unlink 只删链接本身（rmSync recursive 会穿透删目标）
@@ -368,12 +541,20 @@ export function ensureProfile(
 
 function readVersion(pkgDir: string): string | null {
   try {
-    const p = JSON.parse(readFileSync(path.join(pkgDir, 'package.json'), 'utf8')) as { version?: unknown }
+    const p = JSON.parse(readTextNoBom(path.join(pkgDir, 'package.json'))) as { version?: unknown }
     return typeof p.version === 'string' ? p.version : null
   } catch {
     return null
   }
 }
+
+/**
+ * 解析 cordis.patch.yml（用户持久化插件层）中 `- insert:` 块已注册的 loader entry id。
+ * 应用 overlay 生成时需跳过这些 id：同一插件 id 若同时在用户持久层与应用 overlay 层
+ * 各 insert 一次，harness 启动会报 `duplicate loader entry id` 并直接退出（应用打不开）。
+ * 实现见 pluginfs.ts（纯 Node，可单测）。
+ */
+export { readPatchInsertedIds } from './pluginfs.ts'
 
 /** 生成并写入本次启动的 overlay patch（每个启用插件一行 insert），返回文件路径。 */
 export function writeOverlay(
@@ -386,12 +567,14 @@ export function writeOverlay(
   const rows = [
     `    - id: dsh-desktop-bridge\n      name: dsh-desktop-bridge\n      config:\n        token: ${token}`,
     ...plugins
-      .filter((p) => p.name !== 'dsh-desktop-bridge')
+      .filter((p) => !isReservedPluginName(p.name))
       .map((p) => {
+        // 包名引号化：`@scope/pkg` 等以 YAML 保留指示符开头的名字不能作裸标量
+        const id = yamlScalar(p.name)
         const cfg = p.config
-        if (!cfg || Object.keys(cfg).length === 0) return `    - id: ${p.name}\n      name: ${p.name}`
+        if (!cfg || Object.keys(cfg).length === 0) return `    - id: ${id}\n      name: ${id}`
         const lines = Object.entries(cfg).map(([k, v]) => `        ${k}: ${yamlScalar(v)}`)
-        return `    - id: ${p.name}\n      name: ${p.name}\n      config:\n${lines.join('\n')}`
+        return `    - id: ${id}\n      name: ${id}\n      config:\n${lines.join('\n')}`
       }),
   ]
   const content = `# generated by DSH Desktop shell; do not edit

@@ -27,6 +27,20 @@ export function cleanLogs(): void {
   }
 }
 
+/**
+ * 解析注册表 UninstallString：带引号时取引号内路径（忽略后续参数）；
+ * 无引号时取第一个空白前的内容。electron-builder 写入的是带引号路径，带参数值也能正确处理。
+ */
+function parseUninstallCommand(raw: string): string {
+  const s = raw.trim()
+  if (s.startsWith('"')) {
+    const end = s.indexOf('"', 1)
+    return end > 0 ? s.slice(1, end) : s.slice(1)
+  }
+  const sp = s.indexOf(' ')
+  return sp > 0 ? s.slice(0, sp) : s
+}
+
 /** 从注册表读取 NSIS 卸载命令（HKCU 优先，回退 HKLM）。 */
 function findUninstallCommand(appId: string): Promise<string | null> {
   const roots = ['HKCU', 'HKLM']
@@ -42,10 +56,10 @@ function findUninstallCommand(appId: string): Promise<string | null> {
         { windowsHide: true, timeout: 10_000 },
         (err, stdout) => {
           if (err || !stdout) return tryNext()
-          // reg 输出形如：  UninstallString    REG_SZ    "C:\...\Uninstall DSH Desktop.exe"
+          // reg 输出形如：  UninstallString    REG_SZ    "C:\...\Uninstall DSH Desktop.exe" /currentuser
           const m = /UninstallString\s+REG_SZ\s+(.+)/.exec(stdout)
           if (!m) return tryNext()
-          resolve(m[1].trim().replace(/^"|"$/g, ''))
+          resolve(parseUninstallCommand(m[1]))
         },
       )
     }
@@ -90,10 +104,20 @@ export async function uninstallApp(): Promise<void> {
   try {
     // 卸载器独立进程运行（不捕获输出），随后退出本应用释放文件占用
     const child = spawn(uninstaller, [], { detached: true, stdio: 'ignore', windowsHide: false })
+    let spawnFailed = false
+    // spawn 失败走 'error' 事件（异步）：必须监听，否则是未捕获异常，且不能让应用白退
+    child.on('error', (err) => {
+      spawnFailed = true
+      log('error', `maintenance: uninstaller failed to start: ${err.message}`)
+      notify('卸载失败', '无法启动卸载程序，请通过系统「设置 → 应用」卸载 DSH Desktop')
+    })
     child.unref()
-    setTimeout(() => app.quit(), 800)
+    setTimeout(() => {
+      if (!spawnFailed) app.quit()
+    }, 800)
   } catch (err) {
     log('error', `maintenance: spawn uninstaller failed: ${err instanceof Error ? err.message : String(err)}`)
+    notify('卸载失败', '无法启动卸载程序，请通过系统「设置 → 应用」卸载 DSH Desktop')
   }
 }
 

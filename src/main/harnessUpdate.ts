@@ -27,13 +27,20 @@
 import { app } from 'electron'
 import { copyFileSync, statSync } from 'node:fs'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { log } from './logger'
-import { checkHarnessUpdateResult, readLocalDshVersion, updateAvailable } from './harnessCheck'
+import {
+  checkHarnessUpdateResult,
+  markIncompatibleVersion,
+  readLocalDshVersion,
+  runtimeDirPath,
+  updateAvailable,
+} from './harnessCheck'
 import { buildUserMarker } from './runtimeMarker'
-import { appDataRoot } from './runtime'
+import { appDataRoot, probeDesktopProfileBoot } from './runtime'
 import { readRuntimeTreeState, treeFingerprint } from './runtimeTree'
+import { readTextNoBom } from './pluginfs.ts'
 import { compareDots } from './version'
 
 const REG_NPMJS = 'https://registry.npmjs.org/'
@@ -148,7 +155,7 @@ async function runNpmInstall(runtimeDir: string, args: string[], cwd: string): P
 function installedVersionFromDir(runtimeDir: string): string | null {
   try {
     const pkg = JSON.parse(
-      readFileSync(path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8'),
+      readTextNoBom(path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')),
     ) as { version?: unknown }
     return typeof pkg.version === 'string' ? pkg.version : null
   } catch {
@@ -174,27 +181,37 @@ function copyDir(src: string, dest: string): void {
 }
 
 /** 打包已安装的 bridge 插件（零依赖，随壳发版），返回 tgz 绝对路径。 */
-function packBridge(runtimeDir: string, packDir: string): string {
+async function packBridge(runtimeDir: string, packDir: string): Promise<string> {
   const bridgeSrc = path.join(runtimeDir, 'node_modules', 'dsh-desktop-bridge')
   if (!existsSync(path.join(bridgeSrc, 'package.json'))) {
     throw new Error(`bridge 插件缺失：${bridgeSrc}`)
   }
   mkdirSync(packDir, { recursive: true })
-  const result = spawnSync(
+  // 异步 spawn：npm pack 在慢磁盘/杀软扫描下可能耗时数十秒，
+  // spawnSync 会冻结整个主进程（窗口/托盘/IPC 全部无响应）
+  await spawnOk(
     nodeBin(runtimeDir),
     [npmCli(runtimeDir), 'pack', '--pack-destination', packDir, '--silent', bridgeSrc],
-    { stdio: 'ignore', windowsHide: true, timeout: NPM_PACK_TIMEOUT_MS },
+    NPM_PACK_TIMEOUT_MS,
   )
-  if (result.status !== 0) {
-    throw new Error(`npm pack bridge 失败（退出码 ${String(result.status)}）`)
-  }
   const tgz = readdirSync(packDir).find((f) => f.endsWith('.tgz'))
   if (!tgz) throw new Error('bridge pack 未产出 tgz')
   return path.join(packDir, tgz)
 }
 
+/**
+ * 兼容性探测（原子替换前执行）：目标版本必须能用**本壳的 profile** 启动。
+ * 用 `--dump-config`（只组装配置树并退出，不启动服务）做快速验证；
+ * 探测失败 → 记录该版本为不兼容并中止本次更新，保留旧树。
+ * 实现见 runtime.probeDesktopProfileBoot（与启动期运行时自愈共用同一探测）。
+ */
+
 /** 整树刷新官方 Harness 到版本 version（暂存构建 + 原子替换），返回安装结果。 */
-async function installHarness(version: string, hooks: HarnessUpdateHooks): Promise<{ ok: boolean; message: string }> {
+async function installHarness(
+  version: string,
+  hooks: HarnessUpdateHooks,
+  dshHome: string,
+): Promise<{ ok: boolean; message: string }> {
   const { localRoot, runtimeDir } = runtimePaths()
   if (!existsSync(runtimeDir)) {
     return { ok: false, message: '运行时目录不存在（尚未解压）' }
@@ -213,7 +230,7 @@ async function installHarness(version: string, hooks: HarnessUpdateHooks): Promi
     // 2. 打包 bridge + npm install @deepseek-ai/dsh@<v>（整树解析到同一 rc 线）
     //    以相对路径传 bridge tgz（相对暂存目录），npm 会写入 package.json 的
     //    file:_pack/... 引用；随后 _pack 整体同步进 runtime，引用不悬空。
-    const bridgeTgz = packBridge(runtimeDir, path.join(work, '_pack'))
+    const bridgeTgz = await packBridge(runtimeDir, path.join(work, '_pack'))
     const bridgeTgzRel = path.relative(work, bridgeTgz)
     hooks.onProgress({ pct: null, detail: `正在安装官方 Harness v${version}（含全部依赖，约数分钟）…`, url: MANUAL_URL })
     await runNpmInstall(runtimeDir, [`@deepseek-ai/dsh@${version}`, bridgeTgzRel], work)
@@ -230,6 +247,18 @@ async function installHarness(version: string, hooks: HarnessUpdateHooks): Promi
       throw new Error('安装后校验失败（缺少 dsh-desktop-bridge）')
     }
     const fingerprint = treeFingerprint(readRuntimeTreeState(work))
+
+    // 3.5 启动兼容性探测：不兼容的版本绝不替换（否则应用直接打不开）
+    hooks.onProgress({ pct: null, detail: `正在验证 Harness v${version} 与桌面壳的兼容性…`, url: MANUAL_URL })
+    const probe = await probeDesktopProfileBoot(
+      nodeBin(runtimeDirPath()),
+      path.join(work, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+      dshHome,
+    )
+    if (!probe.ok) {
+      markIncompatibleVersion(version)
+      throw new Error(`v${version} 与桌面壳不兼容，已跳过该版本（保留当前运行时）：${probe.message}`)
+    }
 
     // 4. 原子替换：先停 harness（onBeforeSwap），再整目录替换，失败回滚
     hooks.onProgress({ pct: null, detail: '正在替换本地运行时…', url: MANUAL_URL })
@@ -292,6 +321,7 @@ export interface HarnessUpdateResult {
 export async function runHarnessUpdate(
   manual: boolean,
   hooks: HarnessUpdateHooks,
+  dshHome: string,
 ): Promise<HarnessUpdateResult> {
   if (!app.isPackaged) {
     log('info', 'harnessUpdate: dev mode, skipped')
@@ -322,7 +352,7 @@ export async function runHarnessUpdate(
         : `检测到官方 Harness 运行时不完整（依赖树不一致），正在重建到 v${res.latest}…`,
       url: MANUAL_URL,
     })
-    const r = await installHarness(res.latest, hooks)
+    const r = await installHarness(res.latest, hooks, dshHome)
     return { ok: r.ok, updated: r.ok, message: r.message }
   } finally {
     updating = false

@@ -13,6 +13,7 @@
  * 全部 npm 操作通过便携 Node 自带的 npm-cli.js 执行（不依赖 PATH 中的 npm/cmd）。
  */
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -21,14 +22,25 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const runtimeDir = path.join(root, 'resources', 'dsh-runtime')
 const NODE_VERSION = process.env.DSH_RUNTIME_NODE_VERSION ?? 'v24.15.0'
-const DSH_VERSION = process.env.DSH_RUNTIME_DSH_VERSION ?? '0.1.1-rc.2'
-const TAR = process.env.DSH_RUNTIME_TAR ?? 'tar'
+/**
+ * 随包 harness 版本：官方最新发布版（npm 全量版本里的最大 semver）。
+ * 本壳 profile 用自有名 `dsh-workbench`（src/main/desktopProfile.ts），不受官方
+ * 「CLI 拒绝 desktop profile」守卫影响（该守卫自 0.1.5-alpha.1 起存在，只针对
+ * 官方保留名 desktop）；应用内更新还会在替换前做启动探测兜底（不兼容则回滚）。
+ */
+const DSH_VERSION = process.env.DSH_RUNTIME_DSH_VERSION ?? '0.1.5-rc.2'
 /**
  * 目标 Node 架构：默认宿主架构；交叉构建（如在 x64 runner 上打 arm64 dmg）时
  * 用 DSH_RUNTIME_NODE_ARCH 显式指定（nodejs.org 包名：x64 / arm64）。
  * 运行时打进哪个架构的安装包，便携 Node 就必须是哪个架构。
  */
 const NODE_ARCH = process.env.DSH_RUNTIME_NODE_ARCH ?? process.arch
+/**
+ * tar 可执行文件：Windows 显式用 System32 的 bsdtar（PATH 里的 Git GNU tar
+ * 会把 `E:\…` 盘符参数误判为远程主机 host:file 而失败），可经 DSH_RUNTIME_TAR 覆盖。
+ */
+const systemTar = process.platform === 'win32' ? path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe') : ''
+const TAR = process.env.DSH_RUNTIME_TAR ?? (systemTar && existsSync(systemTar) ? systemTar : 'tar')
 /**
  * 工具 Node：npm 操作用宿主 Node（process.execPath）执行 npm-cli.js——
  * 交叉构建时目标架构 Node 无法在宿主架构上运行，而 npm-cli.js 是纯 JS，
@@ -100,6 +112,28 @@ async function downloadNode() {
   const buf = Buffer.from(await res.arrayBuffer())
   writeFileSync(tmp, buf)
   console.log(`[runtime] downloaded ${(buf.length / 1024 / 1024).toFixed(1)} MB`)
+  // 供应链校验：对照官方 SHASUMS256.txt（获取失败时仅告警，不阻断构建）
+  const fileName = `node-${NODE_VERSION}-${plat}-${arch}.${ext}`
+  let expectedSha = null
+  try {
+    const sumRes = await fetch(`https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt`)
+    if (sumRes.ok) {
+      const line = (await sumRes.text()).split(/\r?\n/).find((l) => l.trim().endsWith(fileName))
+      if (line) expectedSha = line.trim().split(/\s+/)[0] ?? null
+    }
+  } catch {
+    /* 校验和获取失败不阻断（离线镜像等场景） */
+  }
+  const actualSha = createHash('sha256').update(buf).digest('hex')
+  if (expectedSha) {
+    if (actualSha !== expectedSha) {
+      rmSync(tmp, { force: true })
+      throw new Error(`node 校验和不匹配：${actualSha} != ${expectedSha}（下载可能被篡改，已中止）`)
+    }
+    console.log('[runtime] node 校验和已验证（SHASUMS256）')
+  } else {
+    console.log('[runtime] WARN: 未取到 SHASUMS256，跳过校验')
+  }
   const tmpDir = path.join(runtimeDir, '_tmp')
   rmSync(tmpDir, { recursive: true, force: true })
   mkdirSync(tmpDir, { recursive: true })
@@ -241,8 +275,43 @@ function treeSize(dir) {
   return total
 }
 
-// 增量：运行时已就绪、dsh 版本匹配、且 Node 架构与目标一致时才跳过下载/安装
-// （交叉构建时缓存里的旧架构 Node 不能复用，必须重建）
+// 增量：运行时已就绪、dsh 版本匹配、Node 架构与目标一致、且 bridge 插件内容未变时才跳过
+// （交叉构建时缓存里的旧架构 Node 不能复用，必须重建；
+//   bridge 随仓库改动，若缓存键不含它，改了 packages/bridge 后 setup:runtime 会静默用旧 tgz）
+const BRIDGE_HASH_MARKER = path.join(runtimeDir, '.dsh-bridge-hash')
+/** bridge 源码树内容哈希（相对路径 + 文件内容；排除 node_modules/.git）。 */
+function bridgeSourceHash(srcDir) {
+  const files = []
+  const walk = (dir, rel) => {
+    let entries = []
+    try {
+      entries = readdirSync(dir).sort()
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      if (e === 'node_modules' || e === '.git') continue
+      const full = path.join(dir, e)
+      const r = rel === '' ? e : `${rel}/${e}`
+      let isDir = false
+      try {
+        isDir = statSync(full).isDirectory()
+      } catch {
+        continue
+      }
+      if (isDir) walk(full, r)
+      else files.push(r)
+    }
+  }
+  walk(srcDir, '')
+  const h = createHash('sha256')
+  for (const f of files) {
+    h.update(f)
+    h.update(readFileSync(path.join(srcDir, f)))
+  }
+  return h.digest('hex').slice(0, 16)
+}
+const bridgeHash = bridgeSourceHash(path.join(root, 'packages', 'bridge'))
 const dshPkg = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
 const archMarkerPath = path.join(runtimeDir, 'node', '.dsh-node-arch')
 let fresh = false
@@ -250,11 +319,14 @@ if (existsSync(dshPkg) && existsSync(archMarkerPath)) {
   try {
     const v = JSON.parse(readFileSync(dshPkg, 'utf8')).version
     const nodeArch = readFileSync(archMarkerPath, 'utf8').trim()
-    if (v === DSH_VERSION && nodeArch === NODE_ARCH) {
-      console.log(`[runtime] incremental: dsh@${v} node=${nodeArch} already installed`)
+    const cachedBridge = readFileSync(BRIDGE_HASH_MARKER, 'utf8').trim()
+    if (v === DSH_VERSION && nodeArch === NODE_ARCH && cachedBridge === bridgeHash) {
+      console.log(`[runtime] incremental: dsh@${v} node=${nodeArch} bridge=${cachedBridge} already installed`)
       fresh = true
     } else {
-      console.log(`[runtime] cache mismatch: dsh=${v} node=${nodeArch} vs target dsh=${DSH_VERSION} node=${NODE_ARCH} -> rebuild`)
+      console.log(
+        `[runtime] cache mismatch: dsh=${v} node=${nodeArch} bridge=${cachedBridge} vs target dsh=${DSH_VERSION} node=${NODE_ARCH} bridge=${bridgeHash} -> rebuild`,
+      )
     }
   } catch {
     /* fallthrough */
@@ -266,6 +338,7 @@ if (!fresh) {
   await downloadNode()
   await installDsh()
   verifyDist()
+  writeFileSync(BRIDGE_HASH_MARKER, `${bridgeHash}\n`, 'utf8')
 }
 // 裁剪（幂等）：全新安装与增量复用都会执行，删 .d.ts/docs/tests
 pruneRuntime()
@@ -275,13 +348,14 @@ pruneRuntime()
 // （Windows 10+ 自带 bsdtar；展开速度约为 PowerShell Expand-Archive 的 4 倍以上）
 const tarPath = path.join(root, 'resources', 'dsh-runtime.tar.gz')
 rmSync(tarPath, { force: true })
-run(TAR, ['-czf', tarPath, '-C', runtimeDir, '.'])
+// Windows 的 bsdtar（System32）会把「带盘符且尚不存在的 -f 目标」（E:\…）误判为
+// 远程主机 URL 而报 "Cannot connect to E: resolve failed"；用相对文件名 + cwd 规避。
+run(TAR, ['-czf', path.basename(tarPath), '-C', runtimeDir, '.'], { cwd: path.dirname(tarPath) })
 const stat = (await import('node:fs')).statSync(tarPath)
 console.log(`[runtime] tar.gz created: ${tarPath} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`)
 
 // 版本标记：随包分发，壳据此判断是否需要重新解压
-const { createHash } = await import('node:crypto')
-const buf = (await import('node:fs')).readFileSync(tarPath)
+const buf = readFileSync(tarPath)
 const hash = createHash('sha256').update(buf).digest('hex').slice(0, 16)
 writeFileSync(path.join(root, 'resources', 'runtime.version'), `dsh=${DSH_VERSION}\ntar=${hash}\n`)
 console.log(`[runtime] version marker: dsh=${DSH_VERSION} tar=${hash}`)

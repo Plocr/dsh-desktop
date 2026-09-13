@@ -47,12 +47,29 @@ export class BridgeClient {
       clearTimeout(this.timer)
       this.timer = null
     }
+    this.disposeSocket()
+    if (this.connected) {
+      this.connected = false
+      this.handlers.onConnected(false)
+    }
+    // 停机时在途 RPC 直接失败——旧 socket 的 close 事件已被世代守卫忽略，不会替我们 reject
+    for (const [, p] of this.pending) p.reject(new Error('bridge 已停止'))
+    this.pending.clear()
+  }
+
+  /**
+   * 丢弃当前 socket：先断开引用再 close，使它的 onclose 判定为「非当前世代」而
+   * 不会触发重连/误杀后续连接的在途 RPC。
+   */
+  private disposeSocket(): void {
+    const ws = this.ws
+    this.ws = null
+    if (!ws) return
     try {
-      this.ws?.close()
+      ws.close()
     } catch {
       /* ignore */
     }
-    this.ws = null
   }
 
   /** shell -> harness RPC；未连接时 reject。 */
@@ -90,7 +107,9 @@ export class BridgeClient {
   private open(): void {
     if (this.stopped) return
     const target = this.getTarget()
-    if (!target) return
+    if (!target) return // 无目标（harness 未就绪）：由 ready 后的 connect() 重新驱动
+    // 关掉旧连接再建新的：避免 this.ws 被覆盖后旧连接变孤儿（重复推送事件）
+    this.disposeSocket()
     let ws: WebSocket
     try {
       ws = new WebSocket(`ws://127.0.0.1:${target.port}`)
@@ -100,7 +119,11 @@ export class BridgeClient {
       return
     }
     this.ws = ws
+    // 世代守卫：只有当前 socket 的事件才允许改状态/重连/结算 pending；
+    // 旧 socket 迟到的 close 不得重连（否则每次启停累积并行连接）也不得误杀新连接的在途 RPC
+    const isCurrent = (): boolean => this.ws === ws
     ws.onopen = () => {
+      if (!isCurrent()) return
       try {
         ws.send(JSON.stringify({ type: 'auth', token: target.token }))
       } catch {
@@ -108,6 +131,7 @@ export class BridgeClient {
       }
     }
     ws.onmessage = (ev) => {
+      if (!isCurrent()) return
       let msg: { type?: string; payload?: unknown; id?: number; result?: unknown; error?: string }
       try {
         msg = JSON.parse(String(ev.data))
@@ -132,6 +156,8 @@ export class BridgeClient {
       }
     }
     ws.onclose = () => {
+      if (!isCurrent()) return // 旧世代的关闭事件：忽略
+      this.ws = null
       this.connected = false
       this.handlers.onConnected(false)
       for (const [, p] of this.pending) p.reject(new Error('bridge 连接断开'))

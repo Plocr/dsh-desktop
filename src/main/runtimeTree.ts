@@ -14,6 +14,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
+import { readTextNoBom } from './pluginfs.ts'
 
 /** 一棵运行时树里的一个锁步包（作用域名 + 版本）。 */
 export interface RuntimeTreeEntry {
@@ -45,7 +46,7 @@ export function readRuntimeTreeState(runtimeDir: string): RuntimeTreeEntry[] {
     if (name.startsWith('.')) continue
     const pkgPath = path.join(scopeDir, name, 'package.json')
     try {
-      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: unknown }
+      const pkg = JSON.parse(readTextNoBom(pkgPath)) as { version?: unknown }
       if (typeof pkg.version === 'string' && isLockstepVersion(pkg.version)) {
         out.push({ name: `@deepseek-ai/${name}`, version: pkg.version })
       }

@@ -9,8 +9,14 @@ import type { AppSettings } from './settings'
 
 export interface DesktopPluginToggle {
   name: string
+  /** 插件目录名（user 插件卸载按目录名定位，避免目录名 ≠ 包名时删错/删不到） */
+  dir?: string
+  /** 插件版本（bundled/user 读自身 package.json；bundle 读 profile node_modules） */
+  version?: string
   enabled: boolean
   locked: boolean
+  /** 插件来源：bundled=随包内置，user=用户安装（本地复制），bundle=官方 dsh plugin add 组合包 */
+  source: 'bundled' | 'user' | 'bundle'
 }
 
 export interface TrayDeps {
@@ -26,6 +32,11 @@ export interface TrayDeps {
     harnessVersion: string | null
     lanShare: boolean
     lanUrl: string | null
+    safeMode: boolean
+    /** 最近一次 harness 启动失败摘要（ready 后清空） */
+    lastHarnessError: string | null
+    /** DeepSeek API Key 自检结果（null=检测中/未检测） */
+    apiKey: { ok: boolean; detail: string } | null
   }
   getPlugins: () => DesktopPluginToggle[]
   showWindow: () => void
@@ -37,6 +48,16 @@ export interface TrayDeps {
   cleanLogs: () => void
   uninstall: () => void
   togglePlugin: (name: string, enabled: boolean) => void
+  /** 组合包（bundle）插件快捷挂载开关：取消勾选=取消挂载（保留代码，可再勾选恢复） */
+  toggleBundleMount: (name: string, mounted: boolean) => void
+  /** 托盘「安装插件…」：输入官方 spec（npm/github/路径/tgz）→ dsh plugin add → 重启生效 */
+  installPlugin: () => void
+  /** 托盘「卸载插件」：bundle=官方 remove，user=删除目录；确认 + 重启生效 */
+  uninstallPlugin: (name: string, kind: 'bundle' | 'user', dir?: string) => void
+  /** 托盘「退出安全模式」：恢复全部插件 */
+  exitSafeMode: () => void
+  /** 托盘「进入安全模式」：停用全部插件（仅系统必需） */
+  enterSafeMode: () => void
   setAutoStart: (v: boolean) => void
   setNotifications: (v: boolean) => void
   setAutoUpdate: (v: boolean) => void
@@ -69,14 +90,81 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
       },
       { label: '重启 Harness', click: () => deps.restartHarness() },
       {
+        // DeepSeek API Key 自检状态（只读）：防止「key 失效/未落盘」被误判为配置错误
+        label: s.apiKey
+          ? s.apiKey.ok
+            ? 'DeepSeek API Key：有效'
+            : 'DeepSeek API Key：无效（请到设置→模型更新）'
+          : 'DeepSeek API Key：检测中…',
+        enabled: false,
+      },
+      {
         label: '桌面插件',
-        submenu: deps.getPlugins().map((p) => ({
-          label: p.locked ? `${p.name}（必需）` : p.name,
-          type: 'checkbox' as const,
-          checked: p.enabled,
-          enabled: !p.locked,
-          click: (item) => deps.togglePlugin(p.name, item.checked),
-        })),
+        submenu: [
+          // 安全模式：状态 + 恢复入口（置于最前）
+          ...(s.safeMode
+            ? ([
+                {
+                  label: '⚠ 安全模式：仅系统必需插件运行',
+                  enabled: false,
+                },
+                ...(s.lastHarnessError
+                  ? [
+                      {
+                        label: `最近失败：${s.lastHarnessError}`,
+                        enabled: false,
+                      },
+                    ]
+                  : []),
+                {
+                  label: '退出安全模式（恢复全部插件）',
+                  click: () => deps.exitSafeMode(),
+                },
+                { type: 'separator' as const },
+              ] as const)
+            : ([
+                {
+                  label: '进入安全模式（停用全部插件）',
+                  click: () => deps.enterSafeMode(),
+                },
+              ] as const)),
+          // 启停/挂载开关（bundle 组合包同样可勾选 = 快速挂载/取消挂载；内置必需锁定）
+          ...deps.getPlugins().map((p) => ({
+            label:
+              p.source === 'bundle'
+                ? `${p.name}（组合包 · v${p.version ?? '—'}）`
+                : p.source === 'user'
+                  ? `${p.name}（用户 · v${p.version ?? '—'}）`
+                  : p.locked
+                    ? `${p.name}（必需 · v${p.version ?? '—'}）`
+                    : `${p.name} · v${p.version ?? '—'}`,
+            type: 'checkbox' as const,
+            checked: p.enabled,
+            enabled: !p.locked,
+            click: (item: Electron.MenuItem) =>
+              p.source === 'bundle' ? deps.toggleBundleMount(p.name, item.checked) : deps.togglePlugin(p.name, item.checked),
+          })),
+          { type: 'separator' as const },
+          {
+            label: '安装插件…',
+            click: () => deps.installPlugin(),
+          },
+          {
+            label: '卸载插件',
+            submenu: deps
+              .getPlugins()
+              .map((p) => ({
+                label:
+                  p.source === 'bundle'
+                    ? `${p.name}（组合包）`
+                    : p.source === 'user'
+                      ? p.name
+                      : `${p.name}（内置，不可卸载）`,
+                enabled: p.source === 'bundle' || p.source === 'user',
+                click: () => deps.uninstallPlugin(p.name, p.source === 'bundle' ? 'bundle' : 'user', p.dir),
+              })),
+          },
+        ],
       },
       { type: 'separator' },
       {

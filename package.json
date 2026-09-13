@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop",
   "productName": "DSH Desktop",
-  "version": "0.7.3",
+  "version": "0.7.17",
   "private": true,
   "description": "DeepSeek Harness 桌面工作台：Electron 原生壳（仅桌面原生能力）+ bridge 桥接插件",
   "main": "dist/main/index.cjs",
@@ -12,7 +12,6 @@
     "test": "node --test",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",
-    "link:dev": "node scripts/dev-link.mjs",
     "setup:runtime": "node scripts/setup-runtime.mjs",
     "make:icons": "node scripts/make-icons.mjs",
     "dist:win": "node scripts/build.mjs && node scripts/make-icons.mjs && node scripts/setup-runtime.mjs && electron-builder --win nsis --config.electronDist=node_modules/electron/dist",

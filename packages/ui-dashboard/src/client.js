@@ -43,12 +43,26 @@ return {
       'usage.cacheWrite': '缓存写入',
       'usage.cacheHit': '缓存命中',
       'cost.model': '模型',
-      'cost.input': '输入（未缓存+写入）',
-      'cost.cacheRead': '缓存读取',
+      'cost.inputMiss': '输入（未命中缓存）',
+      'cost.inputHit': '输入（命中缓存）',
       'cost.output': '输出',
       'cost.total': '合计（估算）',
-      'cost.note': '官方公开价估算，可能与实际账单不符',
+      'cost.note': '按官方定价页价格估算（高峰时段；空闲时段约为一半）',
       'cost.unknown': '未知',
+      'offline.title': '官方 tokenizer 离线统计',
+      'offline.loading': '离线计算中…',
+      'offline.error': '离线不可用（需本机 Python + 官方 tokenizer）',
+      'offline.meta': '{messages} 条消息 · 输入 {user} · 输出 {assistant}',
+      'offline.note': '本会话消息文本经官方 deepseek_tokenizer 计算；不含缓存，与账单口径不同',
+      'tab.dashboard': '仪表盘',
+      'tab.files': '文件树',
+      'files.title': '文件树',
+      'files.loading': '加载中…',
+      'files.empty': '空目录',
+      'files.error': '加载失败',
+      'files.noWorkspace': '未关联工作区',
+      'files.hidden': '显示隐藏',
+      'files.root': '工作区根目录',
       'balance.title': '余额',
       'balance.loading': '查询中…',
       'balance.noKey': '未配置 {keyRef}（请到设置中填写）',
@@ -122,12 +136,26 @@ return {
       'usage.cacheWrite': 'Cache write',
       'usage.cacheHit': 'Cache hit',
       'cost.model': 'Model',
-      'cost.input': 'Input (miss+write)',
-      'cost.cacheRead': 'Cache read',
+      'cost.inputMiss': 'Input (cache miss)',
+      'cost.inputHit': 'Input (cache hit)',
       'cost.output': 'Output',
       'cost.total': 'Total (estimate)',
-      'cost.note': 'est. at public list prices; may differ from actual billing',
+      'cost.note': 'est. at official pricing (peak hours; off-peak is about half)',
       'cost.unknown': 'Unknown',
+      'offline.title': 'Official tokenizer (offline)',
+      'offline.loading': 'Tokenizing offline…',
+      'offline.error': 'Offline unavailable (local Python + official tokenizer required)',
+      'offline.meta': '{messages} messages · input {user} · output {assistant}',
+      'offline.note': 'Session message texts counted by the official deepseek_tokenizer; cache-free, not the billing scope',
+      'tab.dashboard': 'Dashboard',
+      'tab.files': 'Files',
+      'files.title': 'File tree',
+      'files.loading': 'Loading…',
+      'files.empty': 'Empty directory',
+      'files.error': 'Failed to load',
+      'files.noWorkspace': 'Not linked to a workspace',
+      'files.hidden': 'Show hidden',
+      'files.root': 'Workspace root',
       'balance.title': 'Balance',
       'balance.loading': 'Loading…',
       'balance.noKey': 'Balance key "{keyRef}" not configured (set it in Settings)',
@@ -197,12 +225,20 @@ return {
     const fmtTps = (tps) => `${Math.round(tps * 10) / 10} tok/s`
     const fmtMoney = (cny) => (cny >= 1 ? `¥${cny.toFixed(2)}` : `¥${cny.toFixed(4)}`)
 
-    // 公开价表（人民币 / 1M tokens；DeepSeek 官方价，未知模型按默认价估算）
+    // 官方定价（人民币 / 1M tokens；高峰时段；空闲时段约为一半）
+    // https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
     const PRICES = {
-      'deepseek-chat': { miss: 2, hit: 0.5, output: 8 },
-      'deepseek-reasoner': { miss: 4, hit: 1, output: 16 }
+      'deepseek-v4-flash': { miss: 3, hit: 0.1, output: 9 },
+      'deepseek-v4-pro': { miss: 9, hit: 0.3, output: 27 },
+      'deepseek-v4-flash-vision': { miss: 3, hit: 0.1, output: 9 }
     }
-    const DEFAULT_PRICE = PRICES['deepseek-chat']
+    const DEFAULT_PRICE = PRICES['deepseek-v4-flash']
+    const priceFor = (model) => {
+      const m = model ?? ''
+      if (m.includes('v4-pro')) return PRICES['deepseek-v4-pro']
+      if (m.includes('v4-flash')) return PRICES['deepseek-v4-flash']
+      return DEFAULT_PRICE
+    }
 
     // 环图几何：120 viewBox，r=46，stroke 14（粗壮圆环）
     const R = 46
@@ -218,6 +254,7 @@ return {
       'check': ['M2.5 4h6M2.5 8h6M2.5 12h3.5', 'M9.5 12l2 2 3.5-4'],
       'term': ['M2.5 4a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1z', 'M5.5 6l2 2-2 2', 'M9.5 10.5h3'],
       'folder': ['M2 4.5a1 1 0 0 1 1-1h3l1.5 2H13a1 1 0 0 1 1 1v5.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z'],
+      'file': ['M3 2.5a1 1 0 0 1 1-1h5l4 4v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z', 'M9 1.5V6h4'],
       'refresh': ['M13.5 8a5.5 5.5 0 1 1-1.6-3.9', 'M11.9 1.5V5h3.5']
     }
     const svgIcon = (name, cls, size) => React.createElement(
@@ -237,9 +274,9 @@ return {
       [React.createElement('span', { className: 'udash-rowLabel' }, [colorCls === void 0 ? null : swatch(colorCls), label]),
        React.createElement('span', { className: 'udash-rowValue' }, value)]
     )
-    const kpi = (key, label, value) => React.createElement('div', { className: 'udash-kpi', key }, [
+    const kpi = (key, label, value, hot) => React.createElement('div', { className: 'udash-kpi', key }, [
       React.createElement('div', { className: 'udash-kpiLabel' }, label),
-      React.createElement('div', { className: 'udash-kpiValue' }, value)
+      React.createElement('div', { className: 'udash-kpiValue', 'data-hot': hot || void 0 }, value)
     ])
     const chip = (key, text) => React.createElement('span', { className: 'udash-chip2', key }, text)
     // 堆叠条形图（parts: {key, cls, width}，宽度为百分比）
@@ -252,23 +289,31 @@ return {
           style: { width: `${p.width}%` }
         })))
     }
-    // 细进度条
-    const progress = (pct, key) => React.createElement('div', { className: 'udash-progress', key }, [
-      React.createElement('div', { className: 'udash-progressFill', style: { width: `${pct}%` } })
+    // 细进度条（hot=Reasonix accent 强调）
+    const progress = (pct, key, hot) => React.createElement('div', { className: 'udash-progress', key }, [
+      React.createElement('div', { className: 'udash-progressFill', 'data-hot': hot || void 0, style: { width: `${pct}%` } })
     ])
+
+    // 数值化容错：投影字段可能局部缺失，NaN 会渲染成 "NaNM" 并让占比条错乱
+    const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
 
     // 上下文卡片：左圆环（按系统/工具/消息三色分段）+ 右组成列表
     function ContextCard({ pressure, breakdown, t }) {
       const usedTokens = pressure === void 0 ? void 0 : (pressure.projectedTokens ?? pressure.pressureTokens)
       const windowTokens = pressure === void 0 ? void 0 : pressure.contextWindow
-      const occupancy = (usedTokens !== void 0 && windowTokens !== void 0 && windowTokens > 0)
+      const occupancy = (typeof usedTokens === 'number' && Number.isFinite(usedTokens) && typeof windowTokens === 'number' && windowTokens > 0)
         ? { percent: Math.min(100, Math.round((usedTokens / windowTokens) * 100)), usedTokens, windowTokens }
         : null
-      const total = breakdown === void 0 ? 0 : breakdown.systemTokens + breakdown.toolsTokens + breakdown.messageTokens
+      const breakdownValid = breakdown !== void 0 && breakdown !== null
+        && typeof breakdown === 'object'
+        && Number.isFinite(breakdown.systemTokens)
+        && Number.isFinite(breakdown.toolsTokens)
+        && Number.isFinite(breakdown.messageTokens)
+      const total = breakdownValid ? breakdown.systemTokens + breakdown.toolsTokens + breakdown.messageTokens : 0
       const base = occupancy === null ? 0 : occupancy.percent
       // 圆环分段：按组成比例切分已用部分（无组成数据时整段蓝色）
       const arcs = []
-      if (breakdown !== void 0 && total > 0) {
+      if (breakdownValid && total > 0) {
         const defs = [
           { key: 'system', cls: 'udash-ringSystem', len: base * breakdown.systemTokens / total },
           { key: 'tools', cls: 'udash-ringTools', len: base * breakdown.toolsTokens / total },
@@ -292,7 +337,7 @@ return {
           transform: 'rotate(-90 60 60)'
         }))
       }
-      const segments = (breakdown === void 0 || total === 0)
+      const segments = (!breakdownValid || total === 0)
         ? (occupancy === null ? [] : [{ key: 'total', cls: '', width: base }])
         : [
             { key: 'system', cls: 'udash-colorSystem', width: base * breakdown.systemTokens / total },
@@ -316,7 +361,7 @@ return {
               `~${fmtTokens(occupancy.usedTokens)} / ${fmtTokens(occupancy.windowTokens)}`)
           ]),
           React.createElement('div', { className: 'udash-contextRight', key: 'right' },
-            breakdown === void 0
+            !breakdownValid
               ? React.createElement('div', { className: 'udash-empty' }, t('context.empty'))
               : [
                   React.createElement('div', { className: 'udash-rows', key: 'legend' }, [
@@ -335,70 +380,112 @@ return {
       return React.createElement('section', { className: 'udash-card' }, children)
     }
 
-    // 融合版块：用量 / 费用 / 统计 一张卡片（KPI 汇总 + 金额占比单条图 + 行内 token·金额 + 统计徽章）
-    function MetricsCard({ usage, model, stats, t }) {
-      const billed = usage === void 0 ? 0 : usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
-      const hasUsage = usage !== void 0 && (billed > 0 || usage.outputTokens > 0)
-      const hasStats = stats !== void 0 && stats.steps > 0
+    // 融合版块：用量 / 费用 / 统计 一张卡片（KPI 汇总 + 三段金额占比条 + 行内 token·金额 + 统计徽章）
+    function MetricsCard({ usage, model, stats, sessionId, t }) {
+      const billed = usage === void 0 ? 0 : num(usage.uncachedInputTokens) + num(usage.cacheReadTokens) + num(usage.cacheWriteTokens)
+      const hasUsage = usage !== void 0 && usage !== null && (billed > 0 || num(usage.outputTokens) > 0)
+      const hasStats = stats !== void 0 && stats !== null && num(stats.steps) > 0
       if (!hasUsage && !hasStats) return null
-      const p = PRICES[model] ?? DEFAULT_PRICE
-      const costInput = hasUsage ? ((usage.uncachedInputTokens + usage.cacheWriteTokens) / 1e6) * p.miss : 0
-      const costHit = hasUsage ? (usage.cacheReadTokens / 1e6) * p.hit : 0
-      const costOutput = hasUsage ? (usage.outputTokens / 1e6) * p.output : 0
-      const costTotal = costInput + costHit + costOutput
+      const p = priceFor(model)
+      // 三段口径：未命中（含缓存写入，按未命中价计费）/ 命中缓存 / 输出
+      const missTokens = hasUsage ? num(usage.uncachedInputTokens) + num(usage.cacheWriteTokens) : 0
+      const hitTokens = hasUsage ? num(usage.cacheReadTokens) : 0
+      const outTokens = hasUsage ? num(usage.outputTokens) : 0
+      const costMiss = missTokens / 1e6 * p.miss
+      const costHit = hitTokens / 1e6 * p.hit
+      const costOutput = outTokens / 1e6 * p.output
+      const costTotal = costMiss + costHit + costOutput
       const kids = [cardHead('bars', t('metrics.title'))]
       // KPI 汇总行
       const kpis = []
       if (hasStats) {
-        kpis.push(kpi('turns', t('stats.turns'), String(stats.turns)))
-        kpis.push(kpi('steps', t('stats.steps'), String(stats.steps)))
+        kpis.push(kpi('turns', t('stats.turns'), String(num(stats.turns))))
+        kpis.push(kpi('steps', t('stats.steps'), String(num(stats.steps))))
       }
       if (hasUsage) {
-        kpis.push(kpi('tokens', t('metrics.tokens'), fmtTokens(billed + usage.outputTokens)))
-        kpis.push(kpi('cost', t('metrics.cost'), fmtMoney(costTotal)))
+        kpis.push(kpi('tokens', t('metrics.tokens'), fmtTokens(billed + outTokens), true))
+        kpis.push(kpi('cost', t('metrics.cost'), fmtMoney(costTotal), true))
       }
       kids.push(React.createElement('div', { className: 'udash-kpis', key: 'kpis' }, kpis))
-      // 统一金额占比条 + 行内 token·金额
+      // 三段金额占比条 + 行内 token·金额
       if (hasUsage) {
-        const hit = billed === 0 ? null : Math.round((usage.cacheReadTokens / billed) * 100)
+        const hitPct = billed === 0 ? null : Math.round((hitTokens / billed) * 100)
+        const segTotal = costTotal > 0 ? costTotal : 1
         kids.push(mbar('cost', [
-          { key: 'input', cls: 'udash-colorMessages', width: costTotal > 0 ? costInput / costTotal * 100 : 0 },
-          { key: 'cacheRead', cls: 'udash-colorSystem', width: costTotal > 0 ? costHit / costTotal * 100 : 0 },
-          { key: 'output', cls: 'udash-colorTools', width: costTotal > 0 ? costOutput / costTotal * 100 : 0 }
+          { key: 'miss', cls: 'udash-colorMessages', width: costMiss / segTotal * 100 },
+          { key: 'hit', cls: 'udash-colorSystem', width: costHit / segTotal * 100 },
+          { key: 'output', cls: 'udash-colorTools', width: costOutput / segTotal * 100 }
         ]))
         const rows = [
-          row('input', t('cost.input'), `${fmtTokens(usage.uncachedInputTokens + usage.cacheWriteTokens)} · ${fmtMoney(costInput)}`, 'udash-colorMessages'),
-          row('cacheRead', t('cost.cacheRead'), `${fmtTokens(usage.cacheReadTokens)} · ${fmtMoney(costHit)}`, 'udash-colorSystem'),
-          row('output', t('cost.output'), `${fmtTokens(usage.outputTokens)} · ${fmtMoney(costOutput)}`, 'udash-colorTools')
+          row('miss', t('cost.inputMiss'), `${fmtTokens(missTokens)} · ${fmtMoney(costMiss)}`, 'udash-colorMessages'),
+          row('hit', t('cost.inputHit'), `${fmtTokens(hitTokens)} · ${fmtMoney(costHit)}`, 'udash-colorSystem'),
+          row('output', t('cost.output'), `${fmtTokens(outTokens)} · ${fmtMoney(costOutput)}`, 'udash-colorTools')
         ]
-        if (hit !== null) rows.push(row('hit', t('usage.cacheHit'), `${hit}%`))
         kids.push(React.createElement('div', { className: 'udash-rows', key: 'rows' }, rows))
         kids.push(React.createElement('div', { className: 'udash-rows', key: 'total' }, row('total', t('cost.total'), fmtMoney(costTotal), void 0, 'udash-rowStrong')))
-        kids.push(React.createElement('div', { className: 'udash-modelLine', key: 'model' },
-          `${t('cost.model')}：${model ?? t('cost.unknown')} · ${t('cost.note')}`))
+        kids.push(React.createElement('div', { className: 'udash-chips', key: 'chips' }, [
+          hitPct === null ? null : chip('hit', `${t('usage.cacheHit')} ${hitPct}%`),
+          chip('model', `${t('cost.model')}：${model ?? t('cost.unknown')}`)
+        ]))
+        kids.push(React.createElement('div', { className: 'udash-modelLine', key: 'note' }, t('cost.note')))
+        // 官方 tokenizer 离线统计
+        kids.push(React.createElement(OfflineTokens, { sessionId, t, key: 'offline' }))
       }
       // 统计徽章（耗时 / 速度，与上方 KPI 互补）
       if (hasStats) {
         const chips = []
-        if (stats.llmMs > 0) chips.push(chip('llm', `${t('stats.llm')} ${fmtDuration(stats.llmMs)}`))
-        if (stats.toolMs > 0) chips.push(chip('tool', `${t('stats.tool')} ${fmtDuration(stats.toolMs)}`))
-        if (stats.ttftSteps > 0) chips.push(chip('ttft', `${t('stats.ttft')} ${fmtDuration(stats.ttftMs / stats.ttftSteps)}`))
-        if (stats.decodeMs > 0) chips.push(chip('tps', `${t('stats.tps')} ${fmtTps(stats.decodeTokens / (stats.decodeMs / 1000))}`))
+        if (num(stats.llmMs) > 0) chips.push(chip('llm', `${t('stats.llm')} ${fmtDuration(num(stats.llmMs))}`))
+        if (num(stats.toolMs) > 0) chips.push(chip('tool', `${t('stats.tool')} ${fmtDuration(num(stats.toolMs))}`))
+        if (num(stats.ttftSteps) > 0) chips.push(chip('ttft', `${t('stats.ttft')} ${fmtDuration(num(stats.ttftMs) / num(stats.ttftSteps))}`))
+        if (num(stats.decodeMs) > 0) chips.push(chip('tps', `${t('stats.tps')} ${fmtTps(num(stats.decodeTokens) / (num(stats.decodeMs) / 1000))}`))
         kids.push(React.createElement('div', { className: 'udash-chips', key: 'chips' }, chips))
       }
       return React.createElement('section', { className: 'udash-card' }, kids)
+    }
+
+    // 官方 tokenizer 离线统计（Host 读会话日志 → 官方 tokenizer 计算消息文本 token）
+    function OfflineTokens({ sessionId, t }) {
+      const [state, setState] = React.useState({ status: 'loading', data: null, error: null })
+      React.useEffect(() => {
+        if (sessionId === void 0 || sessionId === null) return
+        let alive = true
+        host.call('offline-messages', { sessionId }).then((r) => {
+          if (!alive) return
+          if (r === null || typeof r !== 'object' || r.status !== 'ok') throw new Error(r !== null && r.message ? String(r.message) : 'bad offline response')
+          setState({ status: 'ok', data: r, error: null })
+        }).catch((e) => {
+          if (alive) setState({ status: 'error', data: null, error: e instanceof Error ? e.message : String(e) })
+        })
+        return () => { alive = false }
+      }, [sessionId])
+      const meta = state.status === 'ok' && state.data !== null
+        ? t('offline.meta', {
+            messages: String(state.data.messages ?? 0),
+            user: fmtTokens(state.data.userTokens ?? 0),
+            assistant: fmtTokens(state.data.assistantTokens ?? 0)
+          })
+        : state.status === 'loading' ? t('offline.loading') : t('offline.error')
+      return React.createElement('div', { className: 'udash-rows' }, [
+        row('offline', t('offline.title'), meta),
+        React.createElement('div', { className: 'udash-empty' }, t('offline.note'))
+      ])
     }
 
     // 余额卡片：DeepSeek 账户余额（Host 经 /rpc balance 查询，API key 不离开 harness 进程）
     const BALANCE_SYMBOL = { 'CNY': '¥', 'USD': '$', 'EUR': '€' }
     function BalanceCard({ t }) {
       const [state, setState] = React.useState({ status: 'loading', data: null, error: null })
+      // 卸载守卫：卡片移除后迟到的响应不得再 setState
+      const aliveRef = React.useRef(true)
+      React.useEffect(() => () => { aliveRef.current = false }, [])
       const load = React.useCallback(() => {
         setState((s) => ({ ...s, status: 'loading' }))
         host.call('balance', {}).then((r) => {
+          if (!aliveRef.current) return
           if (r === null || typeof r !== 'object' || typeof r.status !== 'string') throw new Error('bad balance response')
           setState({ status: r.status, data: r, error: null })
         }).catch((e) => {
+          if (!aliveRef.current) return
           setState({ status: 'error', data: null, error: e instanceof Error ? e.message : String(e) })
         })
       }, [])
@@ -457,7 +544,7 @@ return {
         kids.push(React.createElement('div', { className: 'udash-empty', key: 'note' }, t('usage.note')))
       } else if (kind === 'credits') {
         // 预付费 credits（OpenRouter 等）：总量 / 已用 / 剩余
-        const d = state.data !== null && state.data !== null && typeof state.data === 'object' ? state.data : {}
+        const d = state.data !== null && typeof state.data === 'object' ? state.data : {}
         const total = typeof d.total === 'number' ? d.total : void 0
         const used = typeof d.used === 'number' ? d.used : void 0
         if (total === void 0 && used === void 0) {
@@ -479,12 +566,14 @@ return {
           kids.push(React.createElement('div', { className: 'udash-empty', key: 'body' }, '—'))
         } else {
           kids.push(React.createElement('div', { className: 'udash-rows', key: 'rows' },
-            infos.map((i) => {
+            infos.map((i, idx) => {
               const chips = []
               if (i.toppedUpBalance !== void 0 && i.toppedUpBalance !== null && i.toppedUpBalance !== '') chips.push(chip('top', `${t('balance.toppedUp')} ${money(i.currency, i.toppedUpBalance)}`))
               if (i.grantedBalance !== void 0 && i.grantedBalance !== null && i.grantedBalance !== '') chips.push(chip('grant', `${t('balance.granted')} ${money(i.currency, i.grantedBalance)}`))
-              return React.createElement('div', { className: 'udash-balanceRow', key: i.currency ?? 'x' }, [
-                row(i.currency ?? 'x', i.currency ?? '—', money(i.currency, i.totalBalance), void 0, 'udash-rowStrong'),
+              // 同币种多条目时 currency 会重复 → 用下标保证 key 唯一
+              const rowKey = `${i.currency ?? 'x'}-${idx}`
+              return React.createElement('div', { className: 'udash-balanceRow', key: rowKey }, [
+                row(rowKey, i.currency ?? '—', money(i.currency, i.totalBalance), void 0, 'udash-rowStrong'),
                 chips.length > 0 ? React.createElement('div', { className: 'udash-chips', key: 'chips' }, chips) : null
               ])
             })))
@@ -498,11 +587,16 @@ return {
     }
 
     // 目标卡片：目标 + 轮次进度条
+    const GOAL_PHASES = ['active', 'paused', 'blocked', 'complete']
     function GoalCard({ goal, t }) {
       if (goal === null || goal === void 0) return null
       const g = goal.goal
-      const max = g.maxGoalRounds > 0 ? g.maxGoalRounds : 0
-      const pct = max > 0 ? Math.min(100, Math.round(goal.roundsStarted / max * 100)) : 0
+      // 投影可能只给了外层（goal.goal 缺失）：不要继续取字段，否则整棵面板崩掉
+      if (g === null || g === void 0 || typeof g !== 'object') return null
+      const max = num(g.maxGoalRounds) > 0 ? num(g.maxGoalRounds) : 0
+      const started = num(goal.roundsStarted)
+      const pct = max > 0 ? Math.min(100, Math.round(started / max * 100)) : 0
+      const phase = GOAL_PHASES.indexOf(g.phase) >= 0 ? g.phase : 'active'
       return React.createElement('section', { className: 'udash-card' }, [
         cardHead('target', t('goal.title')),
         React.createElement('div', { className: 'udash-item', key: 'obj' }, [
@@ -511,8 +605,8 @@ return {
         ]),
         max > 0 ? progress(pct, 'progress') : null,
         React.createElement('div', { className: 'udash-rows', key: 'meta' }, [
-          row('phase', t('goal.phaseLabel'), t('goal.phase.' + g.phase)),
-          row('rounds', t('goal.roundsLabel'), t('goal.rounds', { count: goal.roundsStarted, max }))
+          row('phase', t('goal.phaseLabel'), t('goal.phase.' + phase)),
+          row('rounds', t('goal.roundsLabel'), t('goal.rounds', { count: started, max }))
         ])
       ])
     }
@@ -525,7 +619,7 @@ return {
       const pct = Math.round(done / todos.length * 100)
       return React.createElement('section', { className: 'udash-card' }, [
         cardHead('check', t('todo.title')),
-        progress(pct, 'progress'),
+        progress(pct, 'progress', true),
         React.createElement('div', { className: 'udash-rows', key: 'items' },
           todos.slice(0, 5).map((x, i) => React.createElement('div', { className: 'udash-item', key: i }, [
             React.createElement('span', { className: `udash-itemDot ${TODO_DOT[x.status] ?? 'udash-dot-muted'}`, 'aria-hidden': true }),
@@ -583,9 +677,10 @@ return {
       return model
     }
 
-    // 右栏主体：仪表盘
+    // 右栏主体：仪表盘（双页：仪表盘 / 文件树）
     function DashboardPanel({ useSessions, useSession, useWorkspaces, sessionId, useProjection, t, closeDetails, tab }) {
       const rootCls = tab === true ? 'udash-root udash-rootTab' : 'udash-root'
+      const [page, setPage] = React.useState('dashboard')
       const summary = useSessions((list) => (sessionId === void 0 ? null : (list.byId[sessionId] ?? null)))
       const jobs = useSessions((list) => (sessionId === void 0 ? [] : (list.jobsBySession[sessionId] ?? [])))
       const running = useSession((s) => s.running) === true
@@ -598,7 +693,19 @@ return {
       const workspace = useWorkspaces((list) => (sessionId === void 0 ? null : (list.items.find((w) => w.sessionIds.indexOf(sessionId) >= 0) ?? null)))
       const model = useCurrentModel()
       const title = summary === null || summary.displayTitle === '' ? t('title') : summary.displayTitle
-      return React.createElement('div', { className: rootCls }, [
+      const pageBody = page === 'files'
+        ? React.createElement(FileTreePage, { workspace, t, key: 'files' })
+        : [
+            React.createElement(ContextCard, { pressure, breakdown, t, key: 'context' }),
+            React.createElement(MetricsCard, { usage, model, stats, sessionId, t, key: 'metrics' }),
+            React.createElement(BalanceCard, { t, key: 'balance' }),
+            React.createElement(GoalCard, { goal, t, key: 'goal' }),
+            React.createElement(TodosCard, { todos, t, key: 'todos' }),
+            React.createElement(JobsCard, { jobs, t, key: 'jobs' }),
+            React.createElement(WorkspaceCard, { workspace, t, key: 'ws' }),
+            React.createElement('div', { className: 'udash-note', key: 'note' }, t('note'))
+          ]
+      return React.createElement('div', { className: rootCls, 'data-active': running || void 0 }, [
         React.createElement('header', { className: 'udash-header', key: 'header' }, [
           svgIcon('gauge', 'udash-headerIcon', 16),
           React.createElement('div', { className: 'udash-title', title: title, key: 'title' }, title),
@@ -611,14 +718,127 @@ return {
           }, React.createElement('svg', { viewBox: '0 0 16 16', width: 14, height: 14, 'aria-hidden': true },
             React.createElement('path', { d: 'M4 4l8 8M12 4l-8 8', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round' })))
         ]),
-        React.createElement(ContextCard, { pressure, breakdown, t, key: 'context' }),
-        React.createElement(MetricsCard, { usage, model, stats, t, key: 'metrics' }),
-        React.createElement(BalanceCard, { t, key: 'balance' }),
-        React.createElement(GoalCard, { goal, t, key: 'goal' }),
-        React.createElement(TodosCard, { todos, t, key: 'todos' }),
-        React.createElement(JobsCard, { jobs, t, key: 'jobs' }),
-        React.createElement(WorkspaceCard, { workspace, t, key: 'ws' }),
-        React.createElement('div', { className: 'udash-note', key: 'note' }, t('note'))
+        React.createElement('div', { className: 'udash-tabs', key: 'tabs' }, [
+          React.createElement('button', {
+            type: 'button', className: `udash-tab${page === 'dashboard' ? ' udash-tabActive' : ''}`, key: 'tabDash',
+            onClick: () => setPage('dashboard')
+          }, t('tab.dashboard')),
+          React.createElement('button', {
+            type: 'button', className: `udash-tab${page === 'files' ? ' udash-tabActive' : ''}`, key: 'tabFiles',
+            onClick: () => setPage('files')
+          }, t('tab.files'))
+        ]),
+        pageBody
+      ])
+    }
+
+    // 文件树页：懒加载当前工作区目录树（Host 经 fs 服务列出文件与目录）
+    const fmtBytes = (n) => {
+      if (n === void 0 || n === null) return ''
+      if (n < 1024) return `${n} B`
+      if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`
+      if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`
+      return `${(n / 1073741824).toFixed(2)} GB`
+    }
+    function FileTreePage({ workspace, t }) {
+      const rootPath = workspace === null ? null : workspace.path
+      const [children, setChildren] = React.useState({})
+      const [expanded, setExpanded] = React.useState({})
+      const [showHidden, setShowHidden] = React.useState(false)
+      const load = React.useCallback((path) => {
+        if (path === void 0 || path === null) return
+        setChildren((c) => {
+          if (c[path] !== void 0) return c
+          return Object.assign({}, c, { [path]: { status: 'loading', entries: [], message: null } })
+        })
+        host.call('dir', { path }).then((r) => {
+          if (r === null || typeof r !== 'object' || r.status !== 'ok') throw new Error(r !== null && r.message ? String(r.message) : 'bad dir response')
+          setChildren((c) => ({ ...c, [path]: { status: 'ok', entries: Array.isArray(r.entries) ? r.entries : [], message: null } }))
+        }).catch((e) => {
+          setChildren((c) => ({ ...c, [path]: { status: 'error', entries: [], message: e instanceof Error ? e.message : String(e) } }))
+        })
+      }, [])
+      React.useEffect(() => {
+        if (rootPath === null) return
+        setChildren({})
+        setExpanded({})
+        load(rootPath)
+        setExpanded({ [rootPath]: true })
+      }, [rootPath, load])
+      const toggle = (path) => {
+        const next = expanded[path] === true ? false : true
+        setExpanded((e) => ({ ...e, [path]: next }))
+        if (next) load(path)
+      }
+      const sortList = (list) => {
+        const dirs = list.filter((e) => e.type === 'directory').sort((a, b) => a.name.localeCompare(b.name))
+        const files = list.filter((e) => e.type !== 'directory').sort((a, b) => a.name.localeCompare(b.name))
+        return dirs.concat(files)
+      }
+      const renderChildren = (path, depth) => {
+        const st = children[path]
+        if (st === void 0) return []
+        if (st.status === 'loading') {
+          return [React.createElement('div', { className: 'udash-treeRow', style: { paddingLeft: depth * 16 + 8 }, key: path + ':loading' }, [
+            React.createElement('span', { className: 'udash-treeGutter', 'aria-hidden': true }),
+            React.createElement('span', { className: 'udash-empty' }, t('files.loading'))
+          ])]
+        }
+        if (st.status === 'error') {
+          return [React.createElement('div', { className: 'udash-treeRow', style: { paddingLeft: depth * 16 + 8 }, key: path + ':error' }, [
+            React.createElement('span', { className: 'udash-treeGutter', 'aria-hidden': true }),
+            React.createElement('span', { className: 'udash-empty' }, `${t('files.error')}${st.message !== null ? `：${st.message}` : ''}`)
+          ])]
+        }
+        const list = sortList(st.entries.filter((e) => showHidden || !e.name.startsWith('.')))
+        if (list.length === 0) {
+          return [React.createElement('div', { className: 'udash-treeRow', style: { paddingLeft: depth * 16 + 8 }, key: path + ':empty' }, [
+            React.createElement('span', { className: 'udash-treeGutter', 'aria-hidden': true }),
+            React.createElement('span', { className: 'udash-empty' }, t('files.empty'))
+          ])]
+        }
+        const rows = []
+        list.forEach((e) => {
+          if (e.type === 'directory') {
+            const open = expanded[e.path] === true
+            rows.push(React.createElement('div', {
+              className: 'udash-treeRow udash-treeDir', key: e.path,
+              style: { paddingLeft: depth * 16 + 8 }, onClick: () => toggle(e.path)
+            }, [
+              React.createElement('span', { className: 'udash-treeGutter', 'aria-hidden': true }, open ? '▾' : '▸'),
+              svgIcon('folder', 'udash-treeIcon'),
+              React.createElement('span', { className: 'udash-treeName', title: e.path }, e.name)
+            ]))
+            if (open) rows.push(...renderChildren(e.path, depth + 1))
+          } else {
+            rows.push(React.createElement('div', {
+              className: 'udash-treeRow', key: e.path, style: { paddingLeft: depth * 16 + 8 }
+            }, [
+              React.createElement('span', { className: 'udash-treeGutter', 'aria-hidden': true }),
+              svgIcon('file', 'udash-treeIcon'),
+              React.createElement('span', { className: 'udash-treeName', title: e.path }, e.name),
+              e.size !== void 0 && e.size !== null ? React.createElement('span', { className: 'udash-treeSize' }, fmtBytes(e.size)) : null
+            ]))
+          }
+        })
+        return rows
+      }
+      if (workspace === null) {
+        return React.createElement('section', { className: 'udash-card' }, [
+          cardHead('folder', t('files.title')),
+          React.createElement('div', { className: 'udash-empty' }, t('files.noWorkspace'))
+        ])
+      }
+      return React.createElement('section', { className: 'udash-card' }, [
+        React.createElement('div', { className: 'udash-cardHeadRow' }, [
+          cardHead('folder', t('files.title')),
+          React.createElement('button', {
+            type: 'button', className: 'udash-refresh', 'aria-label': t('files.hidden'), title: t('files.hidden'),
+            onClick: () => setShowHidden(!showHidden)
+          }, React.createElement('span', { className: 'udash-hiddenToggle', 'data-on': showHidden || void 0 }, '·'))
+        ]),
+        React.createElement('div', { className: 'udash-pathRow' }, `${workspace.title} · ${workspace.path}`),
+        React.createElement('div', { className: 'udash-tree', key: 'tree' }, renderChildren(rootPath, 0))
       ])
     }
 
@@ -710,6 +930,21 @@ return {
 .udash-empty{color:var(--dsw-alias-label-tertiary);font-size:12px}
 .udash-note{flex:none;color:var(--dsw-alias-label-tertiary);font-size:11px}
 .udash-modelLine{color:var(--dsw-alias-label-tertiary);font-size:12px}
+/* ── Reasonix 侧边栏风格层（规格见 docs/sidebar-reasonix-spec.md）──
+   基调：栏底暗一档内凹、accent 橙强调关键数字/进度/激活条、
+   hover 淡染、弱文字三级灰阶、密度收紧 */
+.udash-root{--uxs-accent:#d97757;--uxs-hover:#181c24;--uxs-fg-dim:#c0c4cc;--uxs-fg-faint:#858b96;--uxs-border-soft:#252a34;gap:10px;padding:10px;position:relative}
+.udash-rootTab{--uxs-border-soft:#343945}
+/* 激活会话：栏左侧 accent 竖条（对应 --sidebar-active 语义） */
+.udash-root[data-active='true']::before{content:'';position:absolute;left:0;top:10px;bottom:10px;width:3px;border-radius:999px;background:var(--uxs-accent)}
+.udash-card{position:relative;gap:8px;padding:10px;border-radius:10px;border-color:var(--uxs-border-soft);transition:background .12s ease}
+.udash-card:hover{background:var(--uxs-hover)}
+.udash-cardHead{gap:8px}
+.udash-title{font-size:14px;letter-spacing:.01em}
+.udash-kpiValue[data-hot]{color:var(--uxs-accent);font-weight:600}
+.udash-progressFill[data-hot]{background:var(--uxs-accent)}
+.udash-meta{flex:none;color:var(--uxs-fg-faint);font-size:11px;line-height:16px}
+.udash-groupTitle{color:var(--uxs-fg-faint);font-size:11px;letter-spacing:.05em;text-transform:uppercase;margin:2px 0 -2px}
 .udash-goalObjective{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-width:0}
 .udash-item{display:flex;align-items:center;gap:8px;min-width:0;padding:1px 0}
 .udash-itemDot{flex:none;width:8px;height:8px;border-radius:50%}
@@ -725,6 +960,20 @@ return {
 .udash-toggle:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .udash-toggle span,.udash-toggle svg{flex:none}
 .udash-toggle span{white-space:nowrap}
+.udash-tabs{flex:none;display:flex;gap:4px;border-bottom:1px solid var(--dsw-alias-border-l1);padding-bottom:8px}
+.udash-tab{flex:none;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:none;border:none;border-radius:8px;padding:4px 10px;font-size:12px;line-height:18px}
+.udash-tab:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.udash-tabActive{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);font-weight:500}
+.udash-tree{display:flex;flex-direction:column;gap:0;font-size:12px;line-height:20px}
+.udash-treeRow{display:flex;align-items:center;gap:6px;min-width:0;padding:1px 4px;border-radius:6px;cursor:default}
+.udash-treeDir{cursor:pointer}
+.udash-treeDir:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.udash-treeGutter{flex:none;width:12px;text-align:center;color:var(--dsw-alias-label-tertiary);font-size:10px}
+.udash-treeIcon{flex:none;color:var(--dsw-alias-label-tertiary)}
+.udash-treeName{flex:1;min-width:0;color:var(--dsw-alias-label-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.udash-treeSize{flex:none;color:var(--dsw-alias-label-tertiary);font-size:11px;font-variant-numeric:tabular-nums;margin-left:8px}
+.udash-hiddenToggle{display:inline-block;width:14px;height:14px;line-height:12px;text-align:center;border:1px solid var(--dsw-alias-border-l2);border-radius:4px;color:var(--dsw-alias-label-tertiary);font-size:12px}
+.udash-hiddenToggle[data-on]{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l3)}
 `), 'ui-dashboard: styles')
   }
 }

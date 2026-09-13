@@ -13,9 +13,15 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { log } from './logger'
-import { compareDots } from './version'
+import { compareDots, maxVersion } from './version'
 import { appDataRoot } from './runtime'
 import { isTreeConsistent, readRuntimeTreeState, treeVersions } from './runtimeTree'
+import { readTextNoBom } from './pluginfs'
+import {
+  incompatibleVersionsFile as compatFile,
+  markIncompatibleVersion as markCompatVersion,
+  readIncompatibleVersions as readCompatVersions,
+} from './harnessCompat'
 
 /** packument 元数据（含全部 versions / dist-tags）。 */
 export const REGISTRY_META_URL = 'https://registry.npmjs.org/@deepseek-ai%2Fdsh'
@@ -48,10 +54,33 @@ export async function readLocalDshVersion(): Promise<string | null> {
   }
 }
 
+/** 已知与本壳不兼容的 harness 版本清单文件（探测失败时记录）。 */
+export function incompatibleVersionsFile(): string {
+  return compatFile(appDataRoot())
+}
+
+/**
+ * 读取已知不兼容版本集合。
+ * 由启动探测写入（harnessUpdate 的替换前探测 / 启动期运行时自愈探测）：某个版本
+ * 无法用本壳 profile 启动时记入，本层选「最新可用版本」时直接跳过，避免反复
+ * 「装几分钟再回滚」。详见 harnessCompat.ts。
+ */
+export function readIncompatibleVersions(): Set<string> {
+  return readCompatVersions(incompatibleVersionsFile())
+}
+
+/** 记录一个不兼容版本（后续检查选版时跳过）。 */
+export function markIncompatibleVersion(version: string): void {
+  if (markCompatVersion(incompatibleVersionsFile(), version)) {
+    log('error', `harnessCheck: 记录不兼容版本 ${version}（后续更新将跳过该版本）`)
+  }
+}
+
 /** 从 npm registry 拉取官方 dsh 最新已发布版本（官方失败回退 npmmirror 镜像）。 */
 export async function fetchLatestDshVersion(): Promise<string | null> {
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS)
+  const excluded = readIncompatibleVersions()
   const get = async (url: string): Promise<string | null> => {
     const res = await fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/vnd.npm.install-v1+json' } })
     if (!res.ok) throw new Error(`npm registry ${res.status}`)
@@ -59,17 +88,13 @@ export async function fetchLatestDshVersion(): Promise<string | null> {
       versions?: Record<string, unknown>
       'dist-tags'?: Record<string, string>
     }
-    const semverish = Object.keys(data.versions ?? {}).filter((v) => /^\d+\.\d+\.\d+/.test(v))
-    if (semverish.length > 0) {
-      let best = semverish[0]
-      for (const v of semverish) if (compareDots(v, best) > 0) best = v
-      return best
-    }
-    const tagVals = Object.values(data['dist-tags'] ?? {}).filter((t): t is string => typeof t === 'string')
+    const best = maxVersion(Object.keys(data.versions ?? {}), excluded)
+    if (best !== null) return best
+    const tagVals = Object.values(data['dist-tags'] ?? {}).filter((t): t is string => typeof t === 'string' && !excluded.has(t))
     if (tagVals.length > 0) {
-      let best = tagVals[0]
-      for (const v of tagVals) if (compareDots(v, best) > 0) best = v
-      return best
+      let fallback = tagVals[0]
+      for (const v of tagVals) if (compareDots(v, fallback) > 0) fallback = v
+      return fallback
     }
     return null
   }

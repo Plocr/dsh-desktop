@@ -1,12 +1,32 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { createLanProxy, clientIpOf } from '../src/main/lanServer.ts'
 
 function startFakeHarness(handler) {
   return new Promise((resolve) => {
     const s = createServer(handler)
     s.listen(0, '127.0.0.1', () => resolve({ server: s, port: s.address().port }))
+  })
+}
+
+/**
+ * 原始 http.request（fetch/undici 不允许自定义 Host 头，无法模拟手机侧的
+ * 局域网 Host/Origin 组合）。
+ */
+function rawRequest(port, path, { method = 'GET', headers = {}, body = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port, path, method, headers }, (res) => {
+      let text = ''
+      res.setEncoding('utf8')
+      res.on('data', (c) => {
+        text += c
+      })
+      res.on('end', () => resolve({ status: res.statusCode, text }))
+    })
+    req.on('error', reject)
+    if (body !== null) req.write(body)
+    req.end()
   })
 }
 
@@ -184,20 +204,119 @@ test('lanProxy: /api/host.* 转发 Host+Origin 改回环（解锁原生能力）
     requestApproval: APPROVE,
   })
   try {
-    // 手机侧以局域网 Host/Origin 访问
-    await fetch(`http://127.0.0.1:${proxy.port}/api/host.pickDirectory`, {
+    // 手机侧以局域网 Host/Origin 访问（同源 → 放行）
+    const r = await rawRequest(proxy.port, '/api/host.pickDirectory', {
       method: 'POST',
       headers: {
         host: `192.168.30.41:${proxy.port}`,
         origin: `http://192.168.30.41:${proxy.port}`,
         'sec-fetch-site': 'same-origin',
         'content-type': 'application/json',
-        connection: 'close',
+        'content-length': Buffer.byteLength('{}'),
       },
       body: '{}',
     })
+    assert.equal(r.status, 200)
     assert.equal(seenHost, `127.0.0.1:${harness.port}`, 'host.* 的 Host 应改回环')
     assert.equal(seenOrigin, `http://127.0.0.1:${harness.port}`, 'host.* 的 Origin 应改回环')
+  } finally {
+    await proxy.stop()
+    await new Promise((r) => harness.server.close(r))
+  }
+})
+
+test('lanProxy: 跨站 Origin 被拒（CSRF 防护），同源放行', async () => {
+  let forwarded = 0
+  const harness = await startFakeHarness((req, res) => {
+    forwarded += 1
+    res.end('harness-ok')
+  })
+  const proxy = await createLanProxy({
+    targetHost: '127.0.0.1',
+    targetPort: harness.port,
+    port: 0,
+    requestApproval: APPROVE,
+  })
+  try {
+    // 本机/局域网内恶意网页：Origin 指向外部站点 → 403 且不转发
+    const bad = await rawRequest(proxy.port, '/api/workspace.list', {
+      headers: { origin: 'https://evil.example' },
+    })
+    assert.equal(bad.status, 403)
+    assert.equal(forwarded, 0, '跨站请求不得转发到 harness')
+
+    // 带 Referer 但非外部站点 → 同样拒绝
+    const badRef = await rawRequest(proxy.port, '/api/workspace.list', {
+      headers: { referer: 'https://evil.example/page' },
+    })
+    assert.equal(badRef.status, 403)
+    assert.equal(forwarded, 0)
+
+    // 无 Origin/Referer（curl 等非浏览器请求）→ 由 IP 授权把关，放行
+    const plain = await rawRequest(proxy.port, '/api/workspace.list')
+    assert.equal(plain.status, 200)
+    assert.equal(forwarded, 1)
+
+    // 同源（Host 与 Origin 一致）→ 放行
+    const good = await rawRequest(proxy.port, '/api/workspace.list', {
+      headers: { host: `127.0.0.1:${proxy.port}`, origin: `http://127.0.0.1:${proxy.port}` },
+    })
+    assert.equal(good.status, 200)
+    assert.equal(forwarded, 2)
+  } finally {
+    await proxy.stop()
+    await new Promise((r) => harness.server.close(r))
+  }
+})
+
+test('lanProxy: 无鉴权 cookie 时补一次 harness token（稳定 URL 换 cookie，不产生 303 循环）', async () => {
+  const seen = []
+  const harness = await startFakeHarness((req, res) => {
+    seen.push(req.url)
+    res.setHeader('content-type', 'text/plain')
+    res.end('ok')
+  })
+  const proxy = await createLanProxy({
+    targetHost: '127.0.0.1',
+    targetPort: harness.port,
+    port: 0,
+    requestApproval: APPROVE,
+    webToken: 'tok-123',
+  })
+  try {
+    // ① 外部设备首次访问（无 cookie）→ 代理补 token（harness 据此换 HttpOnly cookie）
+    await rawRequest(proxy.port, '/')
+    assert.equal(seen.at(-1), '/?token=tok-123')
+    // ② 已持有鉴权 cookie → 不再补 token（harness 见到 token 就会 303，会与代理形成死循环）
+    await rawRequest(proxy.port, '/', { headers: { cookie: 'dsh-auth-abc=xyz' } })
+    assert.equal(seen.at(-1), '/')
+    // ③ URL 已带 token → 不重复追加
+    await rawRequest(proxy.port, '/?token=other')
+    assert.equal(seen.at(-1), '/?token=other')
+    // ④ 带查询串 → 用 & 追加
+    await rawRequest(proxy.port, '/index.html?x=1')
+    assert.equal(seen.at(-1), '/index.html?x=1&token=tok-123')
+  } finally {
+    await proxy.stop()
+    await new Promise((r) => harness.server.close(r))
+  }
+})
+
+test('lanProxy: 未配置 webToken（旧版 harness 无 token 鉴权）时原样转发', async () => {
+  const seen = []
+  const harness = await startFakeHarness((req, res) => {
+    seen.push(req.url)
+    res.end('ok')
+  })
+  const proxy = await createLanProxy({
+    targetHost: '127.0.0.1',
+    targetPort: harness.port,
+    port: 0,
+    requestApproval: APPROVE,
+  })
+  try {
+    await rawRequest(proxy.port, '/')
+    assert.equal(seen.at(-1), '/')
   } finally {
     await proxy.stop()
     await new Promise((r) => harness.server.close(r))

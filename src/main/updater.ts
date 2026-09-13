@@ -149,12 +149,18 @@ export function initUpdater(initHooks: UpdaterHooks, opts: { autoCheck: boolean 
     })
     au.on('update-not-available', () => {
       log('info', 'updater: no update')
-      if (lastCheckWasManual) hooks.onManualResult('已是最新版本')
+      if (lastCheckWasManual) {
+        hooks.onManualResult('已是最新版本')
+        lastCheckWasManual = false // 本次手动检查已回报，避免后续事件二次提示
+      }
     })
     au.on('error', (err) => {
       const msg = err instanceof Error ? err.message : String(err)
       log('error', `updater: ${msg}`)
-      if (lastCheckWasManual) hooks.onManualResult(`检查更新失败：${msg}`)
+      if (lastCheckWasManual) {
+        hooks.onManualResult(`检查更新失败：${msg}`)
+        lastCheckWasManual = false
+      }
     })
 
     initialized = true
@@ -178,17 +184,22 @@ export async function checkNow(manual: boolean): Promise<void> {
     return
   }
   lastCheckWasManual = manual
+  let timer: NodeJS.Timeout | undefined
   const timeout = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error('检查超时（更新源不可达？）')), CHECK_TIMEOUT_MS)
+    timer = setTimeout(() => reject(new Error('检查超时（更新源不可达？）')), CHECK_TIMEOUT_MS)
   })
   try {
     await Promise.race([autoUpdater.checkForUpdates(), timeout])
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     log('error', `updater check failed: ${msg}`)
+    // 本次检查到此结束：底层请求可能仍在跑，其迟到的 error 事件不应再二次弹提示
+    lastCheckWasManual = false
     if (manual) {
       // 手动检查失败：提示 + 给出加速下载地址作为兜底
       hooks.onManualResult(`检查更新失败：${msg}`)
     }
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 }

@@ -57,6 +57,26 @@ test('runtimeMarker: shouldExtractBundled 混血树回退（localTreeConsistent=
   assert.equal(shouldExtractBundled(BUNDLED, 'dsh=9.9.9\ntar=whatever\n', compareDots, { localTreeConsistent: false }), true)
 })
 
+test('runtimeMarker: shouldExtractBundled 本地无法启动 desktop profile 时强制回退内置', () => {
+  // 随包 0.1.3，本地被应用内更新到 0.1.5（CLI 硬拒 desktop profile）且整树一致
+  const bundled = 'dsh=0.1.3-alpha.2\ntar=bundled-hash\n'
+  const local = buildUserMarker('0.1.5-rc.2', 'u9')
+  // 无探测结果：一致的较新用户树优先保留（旧行为）
+  assert.equal(shouldExtractBundled(bundled, local, compareDots, { localTreeConsistent: true }), false)
+  // 探测失败（本地运行时无法启动本壳 profile）→ 无条件回退随包运行时
+  assert.equal(
+    shouldExtractBundled(bundled, local, compareDots, { localTreeConsistent: true, localBootable: false }),
+    true,
+  )
+  // 探测通过 → 继续使用较新的本地树
+  assert.equal(
+    shouldExtractBundled(bundled, local, compareDots, { localTreeConsistent: true, localBootable: true }),
+    false,
+  )
+  // 与随包完全一致（tar 相同）→ 早退就绪，不因探测结果重复解压
+  assert.equal(shouldExtractBundled(bundled, bundled, compareDots, { localBootable: false }), false)
+})
+
 test('runtimeMarker: buildUserMarker 格式', () => {
   const m = buildUserMarker('0.1.0-rc.9', 'aabbccdd')
   assert.equal(isUserMarker(m), true)

@@ -4,7 +4,7 @@
  *
  * 用法（在仓库根目录执行）：
  *   node scripts/install.mjs                     # 默认安装到 desktop profile
- *   node scripts/install.mjs --profile=web       # 指定 profile
+ *   node scripts/install.mjs --profile=web       # 指定 profile（桌面壳默认 dsh-workbench）
  *   DSH_HOME=/path/to/.dsh node scripts/install.mjs
  *
  * 步骤：
@@ -26,7 +26,7 @@ const ENTRY_ID = 'ui-dashboard'
 
 // ---- 参数 ----
 const args = process.argv.slice(2)
-const profileArg = (args.find((a) => a.startsWith('--profile=')) ?? '--profile=desktop').split('=')[1] ?? 'desktop'
+const profileArg = (args.find((a) => a.startsWith('--profile=')) ?? '--profile=dsh-workbench').split('=')[1] ?? 'dsh-workbench'
 const envHome = process.env.DSH_HOME
 const home = envHome !== void 0 && envHome.trim() !== '' ? envHome : join(homedir(), '.dsh')
 const profileDir = join(home, 'profiles', profileArg)
@@ -43,9 +43,11 @@ const dest = join(profileDir, 'node_modules', PACKAGE_NAME)
 try {
   rmSync(dest, { recursive: true, force: true })
   mkdirSync(join(dest, 'lib'), { recursive: true })
+  mkdirSync(join(dest, 'scripts'), { recursive: true })
   cpSync(join(repoRoot, 'package.json'), join(dest, 'package.json'))
   cpSync(join(repoRoot, 'lib', 'index.js'), join(dest, 'lib', 'index.js'))
   cpSync(join(repoRoot, 'lib', 'client.js'), join(dest, 'lib', 'client.js'))
+  cpSync(join(repoRoot, 'scripts', 'deepseek_tokenize.py'), join(dest, 'scripts', 'deepseek_tokenize.py'))
 } catch (error) {
   fail(`failed to install into ${dest}: ${error.message}`)
 }
@@ -55,7 +57,9 @@ console.log(`[ui-dashboard] package files -> ${dest}`)
 const patchPath = join(profileDir, 'cordis.patch.yml')
 const insertBlock = `- insert:\n    - id: ${ENTRY_ID}\n      name: ${PACKAGE_NAME}\n`
 let content = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : ''
-if (content.includes(ENTRY_ID)) {
+// 幂等判定按真实条目行匹配：注释里出现插件名不影响注册
+const hasEntry = /^\s*-\s*id:\s*ui-dashboard\s*$/m.test(content)
+if (hasEntry) {
   console.log(`[ui-dashboard] ${patchPath} already lists ${ENTRY_ID} — entry kept`)
 } else {
   const stripped = content.replace(/^\s*#.*$/gm, '').trim()

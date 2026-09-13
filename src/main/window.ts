@@ -11,16 +11,22 @@ export interface WindowHandle {
   loadApp: (url: string) => void
   showLoading: (state?: string, theme?: 'light' | 'dark' | 'system') => void
   showError: (msg: string, theme?: 'light' | 'dark' | 'system') => void
-  /** 更新进度小卡片：在当前页面右上角注入一个非阻塞卡片（可关闭、不导航、不影响使用/最小化）。 */
-  showUpdateOverlay: (init: { pct?: number | null; detail: string; url?: string | null }) => (p: {
+  /**
+   * 更新进度小卡片：在当前页面右上角注入一个非阻塞卡片（可关闭、不导航、不影响使用/最小化）。
+   * id 区分不同来源的卡片（外壳更新 / 官方 Harness 更新），互不覆盖与移除。
+   */
+  showUpdateOverlay: (
+    init: { pct?: number | null; detail: string; url?: string | null },
+    id?: string,
+  ) => (p: {
     pct: number | null
     detail: string
     url?: string | null
   }) => void
-  /** 移除更新小卡片并清除任务栏进度。 */
-  hideUpdateOverlay: () => void
+  /** 移除更新小卡片并清除任务栏进度（id 指定要移除的卡片）。 */
+  hideUpdateOverlay: (id?: string) => void
   /** 显示/隐藏「安装更新并重启」按钮（下载完成后调用）。 */
-  setUpdateInstallButton: (show: boolean) => void
+  setUpdateInstallButton: (show: boolean, id?: string) => void
   updateTaskbarProgress: (fraction: number | null) => void
 }
 
@@ -173,10 +179,11 @@ export function createWindow(
    * 不挡操作、可最小化到托盘）。返回一个 setter 供逐帧推送 { pct, detail, url }，
    * setter 同步更新任务栏进度。页面不可用（还没加载）时静默降级为任务栏进度。
    */
-  // 注入到页面里的卡片引导脚本：创建固定 div + 定义 window.__dshUpdate(pct,detail,url)
+  // 注入到页面里的卡片引导脚本：创建固定 div + 更新卡片内容
   // 下载完成时显示「安装更新并重启」按钮 → 调 window.dshDesktop.installUpdate()（壳 IPC 触发安装）
-  const UPDATE_TOAST = `function(){
-  var ID='dsh-update-toast';
+  // id 由调用方传入：外壳更新卡与官方 Harness 更新卡使用不同 id，互不覆盖/移除
+  const UPDATE_TOAST = `function(id,pct,detail,url){
+  var ID=id;
   var el=document.getElementById(ID);
   if(!el){
     el=document.createElement('div');
@@ -192,24 +199,28 @@ export function createWindow(
     el.querySelector('.dshut-close').onclick=function(){var e=document.getElementById(ID); if(e) e.remove();};
     var ib=el.querySelector('.dshut-install');
     ib.onclick=function(){var d=window.dshDesktop; if(d&&typeof d.installUpdate==='function') d.installUpdate();};
-    window.__dshUpdate=function(p,d,u){
-      var de=el.querySelector('.dshut-detail'); if(typeof d==='string'&&d) de.textContent=d;
-      var ue=el.querySelector('.dshut-url'); if(typeof u==='string'&&u){ ue.textContent='下载地址：'+u; ue.style.display='block'; }
-      var bar=el.querySelector('.dshut-bar'); var n=typeof p==='number'&&Number.isFinite(p);
-      if(n) bar.style.width=Math.max(0,Math.min(100,p))+'%';
-    };
   }
-  window.__dshUpdate(pct,detail,url);
+  // 闭包绑定到本卡片元素：两张卡片同时存在时不会互相写错
+  var apply=function(p,d,u){
+    var de=el.querySelector('.dshut-detail'); if(typeof d==='string'&&d) de.textContent=d;
+    var ue=el.querySelector('.dshut-url'); if(typeof u==='string'&&u){ ue.textContent='下载地址：'+u; ue.style.display='block'; }
+    var bar=el.querySelector('.dshut-bar'); var n=typeof p==='number'&&Number.isFinite(p);
+    if(n) bar.style.width=Math.max(0,Math.min(100,p))+'%';
+  };
+  window.__dshUpdate=apply;
+  apply(pct,detail,url);
 }`
 
-  const sendToast = (pct: number | null, detail: string, url?: string | null): void => {
+  const DEFAULT_TOAST_ID = 'dsh-update-toast'
+  const sendToast = (id: string, pct: number | null, detail: string, url?: string | null): void => {
     if (win.isDestroyed()) return
-    const code = `(${UPDATE_TOAST})(...${JSON.stringify([pct, detail, url ?? null])})`
+    const code = `(${UPDATE_TOAST})(...${JSON.stringify([id, pct, detail, url ?? null])})`
     void win.webContents.executeJavaScript(code).catch(() => {})
   }
 
   const showUpdateOverlay = (
     init: { pct?: number | null; detail: string; url?: string | null },
+    id: string = DEFAULT_TOAST_ID,
   ): ((p: { pct: number | null; detail: string; url?: string | null }) => void) => {
     if (win.isDestroyed()) return () => undefined
     const setTaskbar = (pct: number | null): void => {
@@ -221,27 +232,27 @@ export function createWindow(
       }
     }
     setTaskbar(typeof init.pct === 'number' ? init.pct : null)
-    sendToast(init.pct ?? null, init.detail, init.url)
+    sendToast(id, init.pct ?? null, init.detail, init.url)
     const setter = (p: { pct: number | null; detail: string; url?: string | null }): void => {
       if (win.isDestroyed()) return
       setTaskbar(p.pct)
-      sendToast(p.pct, p.detail, p.url)
+      sendToast(id, p.pct, p.detail, p.url)
     }
     return setter
   }
 
   /** 显示/隐藏「安装更新并重启」按钮（下载完成后调用）。 */
-  const setUpdateInstallButton = (show: boolean): void => {
+  const setUpdateInstallButton = (show: boolean, id: string = DEFAULT_TOAST_ID): void => {
     if (win.isDestroyed()) return
-    const code = `(()=>{var b=document.getElementById('dsh-update-toast'); if(b){var s=b.querySelector('.dshut-install'); if(s) s.style.display='${show ? 'block' : 'none'}';}})()`
+    const code = `(()=>{var b=document.getElementById(${JSON.stringify(id)}); if(b){var s=b.querySelector('.dshut-install'); if(s) s.style.display='${show ? 'block' : 'none'}';}})()`
     void win.webContents.executeJavaScript(code).catch(() => {})
   }
 
   /** 移除更新卡片 + 清除任务栏进度。 */
-  const hideUpdateOverlay = (): void => {
+  const hideUpdateOverlay = (id: string = DEFAULT_TOAST_ID): void => {
     if (win.isDestroyed()) return
     void win.webContents
-      .executeJavaScript(`(()=>{var e=document.getElementById('dsh-update-toast'); if(e) e.remove();})()`)
+      .executeJavaScript(`(()=>{var e=document.getElementById(${JSON.stringify(id)}); if(e) e.remove();})()`)
       .catch(() => {})
     try {
       win.setProgressBar(-1)

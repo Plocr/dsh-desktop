@@ -11,7 +11,7 @@
 **壳只保留桌面原生能力**（窗口、托盘、启动 harness、加载 Web UI、深链、全局快捷键、自动更新、系统通知/任务栏徽标），加载官方 Web UI（会话、工作区、插件、设置）。壳与 harness 之间仅通过一个桥接插件通信——不注入任何 UI、不持有任何面板代码。
 
 ```
-Electron 壳 ──spawn──▶ dsh --profile desktop --patch <overlay> --port 0
+Electron 壳 ──spawn──▶ dsh --profile dsh-workbench --patch <overlay> --port 0
     │  ▲                     │  ▲
     │  │ stdout 行解析        │  │ dsh-desktop-bridge 插件（通知/徽标/深链/工作区注册）
     │  └── dsh web: http://127.0.0.1:<port>
@@ -19,7 +19,9 @@ Electron 壳 ──spawn──▶ dsh --profile desktop --patch <overlay> --port
 ```
 
 - 🪟 原生窗口加载官方 Web UI（`--port 0`，无端口冲突）
-- 🧩 专用 `desktop` profile（`$DSH_HOME/profiles/desktop`），会话与 Web/CLI 共享
+- 🧩 专用 `dsh-workbench` profile（`$DSH_HOME/profiles/dsh-workbench`），会话与 Web/CLI 共享
+  - 为何不用 `desktop`：官方自 `0.1.5-alpha.1` 起在 CLI 硬编码拒绝 `--profile desktop`（留给官方 Electron 应用）。改用自有名后本壳可随官方更新到 0.1.5+；老用户的 `profiles/desktop` 首次启动自动改名迁移（保留已装组合包与补丁层，见 `src/main/desktopProfile.ts`）
+- 🩹 历史会话修复：早期版本写的 v0 会话日志里 `subagent/descriptor` 版本为 2，会让新版 harness 的格式迁移整条拒绝（会话打不开）。启动时做**最小改写**（仅该字段 2→3，其余字节不动，原文件留 `.v0-original.bak` 备份），由官方迁移链完成后续转换（见 `src/main/sessionRepair.ts`）
 - 🔌 `dsh-desktop-bridge` 桥接插件：后台任务/审批事件 → 系统通知与任务栏徽标
 - ⌨️ 全局快捷键唤出（默认 `Ctrl+Shift+Space`）
 - 🔗 `dsh://` 深链：`dsh://`（聚焦）、`dsh://new`（新建会话）、`dsh://session/<id>`（打开会话）
@@ -141,13 +143,15 @@ Electron 壳 ──spawn──▶ dsh --profile desktop --patch <overlay> --port
    - **混血树自愈**：检测与解压决策均基于整树一致性（`@deepseek-ai/*` 锁步包是否同版本线）。本地树不一致（如旧版单包更新残留：dsh 已升、兄弟包仍旧）时——
      - 在线：更新流程判定「需要修复」，自动整树重建到最新版；
      - 离线：启动期解压决策回退到安装包内置的一致运行时
+   - **启动兼容性闸门（防变砖）**：原子替换前先停 harness，再用 `@deepseek-ai/dsh --profile dsh-workbench --dump-config` 探测暂存树能否以本壳 profile 启动；不兼容则中止替换、保留旧树，并把该版本记入 `%LOCALAPPDATA%/DSH Desktop/harness-incompatible.json`（后续选版直接跳过，详见 `harnessCompat.ts`）
+   - **运行时自愈**：启动时若本地用户运行时探测失败（无法用本壳 profile 启动），自动回退随包运行时并记录不兼容版本，避免「应用反复崩溃重启」的死循环
    - 用户自更新后**一致且较新**的运行时不会被安装包重复覆盖，除非安装包内嵌的 dsh 版本更新
 
 **入口只有两个（托盘 → 设置）：**
 - `自动更新（框架 v… · 官方 Harness v…）`（开关，默认开）：冷启动自动检查一次（框架 15s 下载 + 官方 Harness 30s 本地替换）；关闭则仅手动
 - `检查并更新…`（动作）：同时查框架 + 官方 Harness，有新版自动本地下载/替换；**外壳下载完成后需点「安装更新」按钮确认安装**
 
-> Why npm not GitHub tags：deepseek-harness 通过 npm 分发（GitHub 只有源码 tags，无构建产物），所以「官方 Harness 最新」为 npm 已发布版本的最大 semver。
+> Why npm not GitHub tags：deepseek-harness 通过 npm 分发（GitHub 只有源码 tags，无构建产物），所以「官方 Harness 最新」为 npm 已发布版本中**可用**的最大 semver（被兼容性闸门判定不兼容的版本会跳过）。
 
 ---
 
@@ -173,7 +177,7 @@ npm run dist:mac          # macOS dmg（需在 macOS 上执行，arm64/x64）
 - `scripts/build.mjs`：esbuild 打包 main/preload + 复制桌面插件
 - `scripts/make-icons.mjs`：生成应用图标（png / ico / icns）
 - `scripts/setup-runtime.mjs`：构建自包含运行时（下载便携 Node + `npm install @deepseek-ai/dsh` + bridge，输出 `resources/dsh-runtime.tar.gz` 与 `resources/runtime.version`）
-  - 可用环境变量：`DSH_RUNTIME_DSH_VERSION`（默认 `0.1.1-rc.2`）、`DSH_RUNTIME_NODE_VERSION`（默认 `v24.15.0`）、`DSH_RUNTIME_NODE_ARCH`（目标便携 Node 架构，交叉构建时显式指定）
+  - 可用环境变量：`DSH_RUNTIME_DSH_VERSION`（默认 `0.1.5-rc.2`，即 npm 已发布版本里的最新版；本壳 profile 为自有名 `dsh-workbench`，不受官方 desktop 守卫影响）、`DSH_RUNTIME_NODE_VERSION`（默认 `v24.15.0`）、`DSH_RUNTIME_NODE_ARCH`（目标便携 Node 架构，交叉构建时显式指定）
 - `scripts/merge-mac-manifest.mjs`：合并 macOS arm64/x64 两个 `latest-mac.yml` 为一份（多架构自动更新）
 
 CI（`.github/workflows/build-release.yml`）：master/PR 跑 `check`（typecheck + 单测）；打 `v*` tag 或手动触发时跑三平台安装包构建并上传到对应 Release。mac 的 arm64 构建在 x64 runner 上交叉进行，便携 Node 目标架构经 `DSH_RUNTIME_NODE_ARCH` 显式指定。

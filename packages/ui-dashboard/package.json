@@ -28,7 +28,6 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-connection",
@@ -38,10 +37,9 @@
   },
   "files": [
     "lib",
-    "src/client.js",
+    "src",
     "scripts",
-    "README.md",
-    "!src/host.js"
+    "README.md"
   ],
   "scripts": {
     "build": "node build-client.js",

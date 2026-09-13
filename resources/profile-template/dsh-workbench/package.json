@@ -1,5 +1,5 @@
 {
-  "name": "dsh-profile-desktop",
+  "name": "dsh-profile-workbench",
   "private": true,
   "dependencies": {},
   "dsh": {
@@ -7,7 +7,8 @@
       "bundles": [
         "@deepseek-ai/dsh-base",
         "@deepseek-ai/dsh-web-app"
-      ]
+      ],
+      "patchReload": "live"
     }
   }
 }

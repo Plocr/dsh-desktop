@@ -34,6 +34,80 @@ function encode(type, payload) {
   return JSON.stringify({ type, payload })
 }
 
+/* ── 宿主 API 兼容层（纯函数/仅依赖传入的 persistence，可单测） ─────────── */
+/**
+ * 读取会话事件（兼容两代宿主 API）：
+ *  - 新版（dsh ≥ 0.1.2-rc.1 起）：`Session.snapshotEvents()`（`Session.events` 已移除）
+ *  - 旧版：`Session.events`
+ * 读不到返回 null（调用方按「无事件」降级，绝不让宿主 API 差异把插件打挂）。
+ */
+export function sessionEventsOf(session) {
+  return safe(() => {
+    if (typeof session.snapshotEvents === 'function') {
+      const ev = session.snapshotEvents()
+      return Array.isArray(ev) ? ev : null
+    }
+    return Array.isArray(session.events) ? session.events : null
+  }, null)
+}
+
+/** 会话标题：取最近一条 session/title 事件。 */
+export function titleOfEvents(events) {
+  if (!Array.isArray(events)) return null
+  const found = [...events].reverse().find((e) => e && e.type === 'session/title')
+  return found && typeof found.data?.title === 'string' ? found.data.title : null
+}
+
+/**
+ * 已存会话头（兼容两代形状）：
+ *  - 新版（dsh ≥ 0.1.3）：`[{ header: { id, createdAt, ... }, revision, sizeBytes }]`
+ *  - 旧版：`[{ id, createdAt, ... }]`
+ */
+export function storedSessionHeads(headers) {
+  const out = []
+  if (!Array.isArray(headers)) return out
+  for (const h of headers) {
+    const id = safe(() => h.id ?? h.header?.id ?? null, null)
+    if (typeof id !== 'string' || id === '') continue
+    out.push({ id, createdAt: safe(() => h.createdAt ?? h.header?.createdAt ?? null, null) })
+  }
+  return out
+}
+
+/**
+ * 读取一个已存会话的事件视图（兼容两代宿主 API）：
+ *  - 新版（dsh ≥ 0.1.3）：`open(id,'read')` → `handle.read(0)` → `handle.close()`
+ *  - 旧版：`inspect(id)` → `{ events, meta }`
+ * 读不到返回 null。
+ */
+export async function inspectStoredSession(persistence, id) {
+  if (typeof persistence.inspect === 'function') {
+    const view = await persistence.inspect(id)
+    return {
+      events: safe(() => (Array.isArray(view?.events) ? view.events : null), null),
+      createdAt: safe(() => view?.meta?.createdAt ?? null, null),
+    }
+  }
+  if (typeof persistence.open === 'function') {
+    const handle = await persistence.open(id, 'read')
+    try {
+      const res = typeof handle.read === 'function' ? await handle.read(0) : null
+      return {
+        events: safe(() => (Array.isArray(res?.events) ? res.events : null), null),
+        createdAt: safe(() => handle.header?.createdAt ?? null, null),
+      }
+    } finally {
+      try {
+        if (typeof handle.close === 'function') await handle.close()
+      } catch {
+        /* 释放失败不影响结果 */
+      }
+    }
+  }
+  return null
+}
+
+
 export function apply(ctx, config = {}) {
   const token = typeof config.token === 'string' ? config.token : ''
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
@@ -80,13 +154,7 @@ export function apply(ctx, config = {}) {
     const out = []
     if (sessions) {
       for (const session of safe(() => sessions.list(), [])) {
-        const title = safe(() => {
-          const events = session.events
-          const found = Array.isArray(events)
-            ? [...events].reverse().find((e) => e && e.type === 'session/title')
-            : undefined
-          return found && typeof found.data?.title === 'string' ? found.data.title : null
-        }, null)
+        const title = safe(() => titleOfEvents(sessionEventsOf(session)), null)
         out.push({ id: safe(() => session.id, null), title, live: true, createdAt: safe(() => session.header?.createdAt, null) })
       }
     }
@@ -95,9 +163,9 @@ export function apply(ctx, config = {}) {
       const liveIds = new Set(out.map((s) => s.id))
       try {
         const headers = await persistence.list()
-        for (const h of safe(() => headers, [])) {
-          if (!liveIds.has(safe(() => h.id, null))) {
-            out.push({ id: safe(() => h.id, null), title: null, live: false, createdAt: safe(() => h.createdAt, null) })
+        for (const h of storedSessionHeads(headers)) {
+          if (!liveIds.has(h.id)) {
+            out.push({ id: h.id, title: null, live: false, createdAt: h.createdAt })
           }
         }
       } catch (err) {
@@ -230,26 +298,25 @@ export function apply(ctx, config = {}) {
         }
 
         case 'session.resolve': {
-          // 深链用：按会话 id 解析标题（live 优先，持久化 inspect 兜底）。
+          // 深链用：按会话 id 解析标题（live 优先，持久化读取兜底）。
           const id = typeof msg.params?.id === 'string' ? msg.params.id : ''
           if (!id) return fail('missing params.id')
-          const titleOf = (events) => {
-            const found = Array.isArray(events)
-              ? [...events].reverse().find((e) => e && e.type === 'session/title')
-              : undefined
-            return found && typeof found.data?.title === 'string' ? found.data.title : null
-          }
           const sessions = ctx.get('sessions')
           const live = sessions ? safe(() => sessions.get(id), undefined) : undefined
           if (live) {
-            reply({ id, live: true, title: titleOf(safe(() => live.events, null)), createdAt: safe(() => live.header?.createdAt, null) })
+            reply({
+              id,
+              live: true,
+              title: titleOfEvents(sessionEventsOf(live)),
+              createdAt: safe(() => live.header?.createdAt, null),
+            })
             break
           }
           const persistence = ctx.get('sessionPersistence')
-          if (persistence && typeof persistence.inspect === 'function') {
+          if (persistence) {
             try {
-              const view = await persistence.inspect(id)
-              reply({ id, live: false, title: titleOf(view?.events), createdAt: safe(() => view?.meta?.createdAt, null) })
+              const view = await inspectStoredSession(persistence, id)
+              reply({ id, live: false, title: titleOfEvents(view?.events), createdAt: view?.createdAt ?? null })
             } catch (err) {
               reply({ id, live: false, title: null, error: err instanceof Error ? err.message : String(err) })
             }

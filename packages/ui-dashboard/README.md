@@ -2,6 +2,12 @@
 
 DeepSeek Harness（DSH）仪表盘 UI 插件。
 
+> **维护说明**：本仓库是 ui-dashboard 插件的主源（git 历史所在）。
+> `dsh-desktop` 内 `packages/ui-dashboard` 是其同步副本——同步内容为
+> `src/ lib/ scripts/ docs/ README.md build-client.js bundle.patch.yml`；
+> 两处 `package.json` 需保持一致（官方 client 依赖适配后 `dsh.client.inject`
+> 不含已移除的 `@deepseek-ai/dsh-client-runtime`）。改造先提交本仓库，再复制到副本。
+
 以可视化方式展示当前会话的**上下文占用、Token 用量与费用估算、DeepSeek 账户余额、会话统计、目标、待办、后台任务与工作区信息**，支持两种展示形态：
 
 - **右侧栏**：占据 shell 内置的 `details` 槽位（右侧第三栏，同官方 `ui-sidebar` 占据 `sidebar` 的方式），通过会话头部工具区的「仪表盘」按钮打开；
@@ -19,8 +25,24 @@ DeepSeek Harness（DSH）仪表盘 UI 插件。
 | 后台任务 | 状态计数徽章 + 任务列表 | `useSessions().jobsBySession` |
 | 工作区 | 标题 + 路径 | `useWorkspaces` 反查 |
 
-费用估算：按 DeepSeek 官方人民币公开价（deepseek-chat：未缓存输入 ¥2 / 缓存命中 ¥0.5 / 输出 ¥8 每百万 tokens；deepseek-reasoner：¥4 / ¥1 / ¥16），
-基于 `tokenUsage` 投影分桶计算；当前模型由 Host 半边通过 RPC `current-model` 读取默认模型选择。仅为估算，可能与实际账单不符。
+费用估算：按 [官方定价页](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/) 的 **V4 系列高峰时段价**（deepseek-v4-flash：未命中 ¥3 / 命中 ¥0.1 / 输出 ¥9 每百万 tokens；deepseek-v4-pro：¥9 / ¥0.3 / ¥27；空闲时段约为一半），
+基于 `tokenUsage` 投影分三桶计算：**输入（未命中缓存）**（含缓存写入，按未命中价）/ **输入（命中缓存）** / **输出**；当前模型由 Host 半边通过 RPC `current-model` 读取默认模型选择。仅为估算，可能与实际账单不符。
+
+### 右栏第二页：文件树
+
+右栏顶部提供「仪表盘 / 文件树」两个标签页。文件树页懒加载**当前工作区**（`WorkspaceView.path` 根目录）
+的完整目录树（含文件，Host 经 `fs` 服务列出；目录点击展开、子目录按需加载），可切换显示隐藏项。
+
+### 离线 token 统计（官方 tokenizer）
+
+费用版块底部展示**官方 tokenizer 离线统计**：Host 读取会话日志全部 user/assistant 消息文本，用官方
+[deepseek_tokenizer](https://api-docs.deepseek.com/zh-cn/quick_start/token_usage)（本机 Python + `tokenizers` 库）批量编码，
+汇总输入/输出 token（LRU 缓存避免重复计算）。不含缓存命中，与账单口径不同，仅供参考。
+
+- 默认 tokenizer 目录：`E:\Dsh\deepseek_v3_tokenizer\deepseek_v3_tokenizer`（官方 zip 解压处）
+- 配套脚本：`scripts/deepseek_tokenize.py`（stdin 收 `{"texts":[…]}`，stdout 输出 `[count,…]`）
+- 本机需安装：`python -m pip install tokenizers`
+- 目录/脚本可用插件配置覆盖：`config.tokenizer.dir` / `config.tokenizer.script`
 
 ### 余额/用量：跟随 provider，按各服务商官方 API 计算
 
@@ -107,11 +129,11 @@ node scripts/install.mjs --profile=web    # 指定 profile
 
 ```bash
 # 需要 pnpm（dsh plugin 会在 profile 目录转发给 pnpm）
-dsh plugin --profile desktop add git+https://github.com/Plocr/ui-dashboard.git
+dsh plugin --profile dsh-workbench add git+https://github.com/Plocr/ui-dashboard.git
 ```
 
 `lib/` 已随仓库提交、安装无需构建（无需 allowBuilds）。完成后**重启 app**（bundle 层在启动时解析），
-插件会作为 profile 层自动加载。卸载：`dsh plugin --profile desktop remove ui-dashboard`。
+插件会作为 profile 层自动加载。卸载：`dsh plugin --profile dsh-workbench remove ui-dashboard`。
 
 ### 方式三：动态插件（内存态，重启即失）
 

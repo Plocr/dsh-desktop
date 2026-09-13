@@ -20,8 +20,13 @@ import { Socket } from 'node:net'
 // 显式 .ts：既满足 esbuild 打包，也便于 Node 直跑单测
 import { log } from './logger.ts'
 
-/** 局域网代理默认固定端口（被占用时回退随机端口）。可用 DSH_LAN_PROXY_PORT 覆盖。 */
-export const DSH_LAN_PORT = Number(process.env.DSH_LAN_PROXY_PORT) || 46123
+/** 局域网代理默认固定端口（被占用时回退随机端口）。可用 DSH_LAN_PROXY_PORT 覆盖（0 = 每次随机）。 */
+export const DSH_LAN_PORT = (() => {
+  const raw = process.env.DSH_LAN_PROXY_PORT
+  if (raw === undefined || raw.trim() === '') return 46123
+  const n = Number(raw)
+  return Number.isInteger(n) && n >= 0 && n <= 65535 ? n : 46123
+})()
 
 export interface LanProxyOptions {
   /** 转发目标 host（固定 127.0.0.1）。 */
@@ -32,6 +37,14 @@ export interface LanProxyOptions {
   requestApproval: (ip: string) => Promise<boolean>
   /** 代理监听端口；缺省 DSH_LAN_PORT（占用自动回退随机）。传 0 = 随机。 */
   port?: number
+  /**
+   * harness Web UI 的本次启动 token（`dsh web:` 行 URL 里的 `token=`）。
+   * harness ≥ 0.1.2-rc.1 对 Web UI 启用了「URL token 一次性换取 HttpOnly cookie」鉴权：
+   * 外部设备首发访问不带 token 会 401。代理在**客户端尚无鉴权 cookie** 时补一次 token，
+   * 让手机用稳定 URL 打开并在浏览器侧完成换 cookie；已有 cookie 时不得再带 token
+   * （harness 见到 token 就 303 重定向，会与代理补 token 形成死循环）。
+   */
+  webToken?: string
 }
 
 export interface LanProxyHandle {
@@ -55,6 +68,23 @@ function deny(res: import('node:http').ServerResponse): void {
   res.statusCode = 403
   res.setHeader('content-type', 'text/plain; charset=utf-8')
   res.end('denied: 未获得本机授权访问 DSH Desktop')
+}
+
+/** 把上游响应行 + 全部响应头原样写入原始 socket（101 握手 / 非升级响应共用）。 */
+function writeRawResponseHead(
+  socket: { write: (chunk: string | Buffer) => unknown },
+  upRes: import('node:http').IncomingMessage,
+): boolean {
+  const lines = [`HTTP/1.1 ${upRes.statusCode ?? 502} ${upRes.statusMessage ?? ''}`.trimEnd()]
+  for (let i = 0; i + 1 < upRes.rawHeaders.length; i += 2) {
+    lines.push(`${upRes.rawHeaders[i]}: ${upRes.rawHeaders[i + 1]}`)
+  }
+  try {
+    socket.write(lines.join('\r\n') + '\r\n\r\n')
+    return true
+  } catch {
+    return false
+  }
 }
 
 export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
@@ -112,6 +142,44 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
     })
 
     /**
+     * 计算转发路径：客户端还没有 harness 鉴权 cookie 时补一次 `token=`，
+     * 让外部设备用稳定 URL（http://<lan-ip>:<port>/）完成「token → HttpOnly cookie」换取。
+     * 已有 cookie 或 URL 已带 token 时原样转发（否则 harness 会反复 303 重定向）。
+     */
+    const forwardPath = (req: { url?: string; headers: import('node:http').IncomingHttpHeaders }): string => {
+      const p = typeof req.url === 'string' && req.url !== '' ? req.url : '/'
+      if (!opts.webToken) return p
+      const cookie = typeof req.headers.cookie === 'string' ? req.headers.cookie : ''
+      if (/(^|;\s*)dsh-auth-/.test(cookie)) return p
+      if (/([?&])token=/.test(p)) return p
+      return p + (p.includes('?') ? '&' : '?') + `token=${encodeURIComponent(opts.webToken)}`
+    }
+
+    /**
+     * 同源校验（浏览器 CSRF 防护）：来自浏览器的请求若携带 Origin/Referer，
+     * 其主机必须是本代理自身（请求的 Host 头）或回环；否则拒绝。
+     * 仅凭源 IP 授权无法区分「同一 IP 下的不同来源」——本机恶意网页 / 局域网内
+     * 其它站点都能借用已授权 IP，故必须额外做同源检查。
+     */
+    const sameOriginOk = (headers: import('node:http').IncomingHttpHeaders): boolean => {
+      const origin = typeof headers.origin === 'string' ? headers.origin : ''
+      const referer = typeof headers.referer === 'string' ? headers.referer : ''
+      const raw = origin !== '' ? origin : referer
+      if (raw === '') return true // 非浏览器请求（curl 等）：由 IP 授权把关
+      let host = ''
+      try {
+        host = new URL(raw).host.toLowerCase()
+      } catch {
+        return false // Origin: null / 非法值
+      }
+      if (host === '') return false
+      const self = typeof headers.host === 'string' ? headers.host.toLowerCase() : ''
+      if (self !== '' && host === self) return true
+      const hostname = host.replace(/:\d+$/, '')
+      return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]' || hostname === '::1'
+    }
+
+    /**
      * 计算转发请求头。
      * 已授权的设备视为「等同本地」：对 `/api/*` 把 Host/Origin/Referer 改写为回环权威
      * `127.0.0.1:<harness端口>`，绕过 harness 的 trusted/loopback 分级（免得诸如
@@ -119,6 +187,8 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
      */
     const forwardHeaders = (req: { url?: string; headers: import('node:http').IncomingHttpHeaders }): Record<string, unknown> => {
       const headers: Record<string, unknown> = { ...req.headers }
+      // 去掉 accept-encoding：HTML 响应需要缓冲后注入垫片（明文），压缩体会破坏注入
+      delete headers['accept-encoding']
       if (typeof req.url === 'string' && req.url.startsWith('/api/')) {
         const loopAuthority = `127.0.0.1:${opts.targetPort}`
         headers.host = loopAuthority
@@ -149,6 +219,11 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
         try {
           const ip = clientIpOf(req.socket)
           log('info', `lanProxy: ${req.method} ${req.url} from ${ip}`)
+          if (!sameOriginOk(req.headers)) {
+            log('error', `lanProxy: blocked cross-origin request ${req.method} ${req.url} (origin=${String(req.headers.origin ?? req.headers.referer ?? '')})`)
+            deny(res)
+            return
+          }
           if (!(await gate(ip))) {
             deny(res)
             return
@@ -157,7 +232,7 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
             host: opts.targetHost,
             port: opts.targetPort,
             method: req.method,
-            path: req.url,
+            path: forwardPath(req),
             headers: forwardHeaders(req) as import('node:http').OutgoingHttpHeaders,
           })
           // 客户端在响应完成前断开 → 立即销毁上游，避免连接泄漏/残留
@@ -181,7 +256,11 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
           })
           proxyReq.on('response', (upRes) => {
             const isHtml = /text\/html/i.test(String(upRes.headers['content-type'] ?? ''))
-            if (!isHtml) {
+            // 上游若仍压缩（无视我们剔除了 accept-encoding）：明文垫片注入会破坏响应体，
+            // 此时按流式直通转发（垫片缺失不影响页面主体）
+            const enc = String(upRes.headers['content-encoding'] ?? '').trim().toLowerCase()
+            const compressed = enc !== '' && enc !== 'identity'
+            if (!isHtml || compressed) {
               upRes.on('error', () => {})
               res.writeHead(upRes.statusCode ?? 502, upRes.headers)
               upRes.pipe(res)
@@ -230,6 +309,12 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
       try {
         const ip = clientIpOf(socket)
         log('info', `lanProxy: upgrade ${req.url} from ${ip}`)
+        if (!sameOriginOk(req.headers)) {
+          log('error', `lanProxy: blocked cross-origin upgrade ${String(req.url)} (origin=${String(req.headers.origin ?? req.headers.referer ?? '')})`)
+          socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+          socket.destroy()
+          return
+        }
         if (!(await gate(ip))) {
           socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
           socket.destroy()
@@ -239,7 +324,7 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
           host: opts.targetHost,
           port: opts.targetPort,
           method: req.method ?? 'GET',
-          path: req.url,
+          path: forwardPath(req),
           headers: forwardHeaders(req) as import('node:http').OutgoingHttpHeaders,
         })
         proxyReq.on('error', (err) => {
@@ -248,10 +333,54 @@ export function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHandle> {
         })
         proxyReq.on('upgrade', (upRes, upSock, upHead) => {
           upSock.on('error', () => {})
-          socket.write('HTTP/1.1 101 Switching Protocols\r\n\r\n')
-          upSock.write(upHead as Buffer)
+          // 任一端关闭时销毁另一端，避免半开连接泄漏
+          socket.on('close', () => {
+            try {
+              upSock.destroy()
+            } catch {
+              /* ignore */
+            }
+          })
+          upSock.on('close', () => {
+            try {
+              socket.destroy()
+            } catch {
+              /* ignore */
+            }
+          })
+          // 101 必须原样转发上游响应头（含 Sec-WebSocket-Accept 等握手必需头），
+          // 否则浏览器/客户端校验失败 → 局域网下所有流式与事件通道不可用
+          if (!writeRawResponseHead(socket, upRes)) {
+            try {
+              upSock.destroy()
+            } catch {
+              /* ignore */
+            }
+            return
+          }
+          // upHead 是上游 101 之后紧跟的首帧（服务端 → 客户端方向），必须写给客户端
+          if (upHead && upHead.length > 0) {
+            try {
+              socket.write(upHead)
+            } catch {
+              /* ignore */
+            }
+          }
           upSock.pipe(socket)
           socket.pipe(upSock)
+        })
+        // 上游拒绝升级（返回普通 HTTP 响应）：转发响应后关闭，避免客户端悬挂到超时
+        proxyReq.on('response', (upRes) => {
+          upRes.on('error', () => {})
+          if (!writeRawResponseHead(socket, upRes)) {
+            try {
+              socket.destroy()
+            } catch {
+              /* ignore */
+            }
+            return
+          }
+          upRes.pipe(socket)
         })
         proxyReq.end(head)
       } catch (err) {
