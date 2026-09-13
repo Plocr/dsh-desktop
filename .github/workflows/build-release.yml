@@ -114,6 +114,11 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
+          # 若 release 尚不存在（并发时 Windows 任务还没创建）则先创建，
+          # 否则 gh release upload 会报 release not found（mac 任务跑得更快）
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes
+          fi
           gh release upload "$RELEASE_TAG" release/*arm64*.dmg release/*arm64*.dmg.blockmap --clobber
 
   # macOS x64：原生 x64 构建。
@@ -152,6 +157,11 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
+          # 若 release 尚不存在（并发时 Windows 任务还没创建）则先创建，
+          # 否则 gh release upload 会报 release not found（mac 任务跑得更快）
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes
+          fi
           gh release upload "$RELEASE_TAG" release/*x64*.dmg release/*x64*.dmg.blockmap --clobber
 
   # macOS 多架构更新的关键：把两个架构各自生成的 latest-mac.yml 合并为一份
