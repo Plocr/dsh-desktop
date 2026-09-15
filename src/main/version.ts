@@ -74,7 +74,7 @@ export function compareDots(a: string, b: string): number {
 
 /**
  * 在已发布版本列表中取最大者（可排除已知不兼容版本）；无可用版本返回 null。
- * 纯函数，便于单测（harnessCheck 用它从 registry 全量版本里挑「最新可用」）。
+ * 纯函数，便于单测（打包期 setup-runtime 用它从 npm 全量版本里挑「最新可用」的 dsh）。
  */
 export function maxVersion(versions: string[], excluded?: ReadonlySet<string>): string | null {
   let best: string | null = null

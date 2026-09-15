@@ -1,86 +1,256 @@
 /**
- * 运行时依赖树状态（纯逻辑 + 少量 fs，无 Electron 依赖，可单测）。
+ * 移植自 `deepseek-ai/deepseek-harness` `apps/desktop/src/runtime-tree.ts`（MIT）。
  *
- * 一致性定义：官方 @deepseek-ai/* 包为锁步发布（同一 rc 线所有包同版本），
- * 因此「一致树」= 所有带 -rc. 预发布段的 @deepseek-ai 包版本完全相同。
- * cordis / cosmokit / schemastery 等稳定版（无预发布段）scoped 包，以及
- * node-addon-* 等非 @deepseek-ai 锁步包，天然被排除在判定之外。
+ * [ported] 与上游的差异（发行身份适配；算法、校验分支与错误文案均保持）：
+ *  1. release 解析走本仓 `./release`：`version` = 本壳版本、`dshVersion` = 随包 dsh 版本；
+ *  2. readDesktopRuntime 的共享包约束：
+ *     - `@deepseek-ai/dsh` 版本必须等于 `release.dshVersion`；
+ *     - Host 包为本壳的非作用域名 `dsh-desktop-host`（上游为作用域包，常量来自
+ *       core-package-set），只要求它存在于 sharedPackages——其版本与 dsh 的一致性
+ *       由构建脚本 scripts/setup-runtime.mjs 强制（一个签名更新单元）；
+ *  3. verifyDesktopRuntime 的第二个参数是本壳版本（对应上游的 Electron 版本）。
  *
- * 用途：
- *  - shouldExtractBundled：用户自更新标记下，树不一致（混血）视为残缺 → 回退内置运行时；
- *  - harnessCheck：版本检测同时报告树一致性，混血树即使 dsh 版本相同也触发重建；
- *  - harnessUpdate：整树刷新后把新树指纹写进用户标记。
+ * 注意：本文件是运行时树的完整性/身份层，不负责解压或复制任何运行时文件
+ * （extraResources 里的树不可变，只读校验）。
  */
-import { createHash } from 'node:crypto'
-import { readFileSync, readdirSync } from 'node:fs'
-import path from 'node:path'
-import { readTextNoBom } from './pluginfs.ts'
 
-/** 一棵运行时树里的一个锁步包（作用域名 + 版本）。 */
-export interface RuntimeTreeEntry {
-  name: string
-  version: string
+/** Relocatable, integrity-recorded production packages carried by one Desktop release. */
+
+import { createHash } from 'node:crypto'
+import { lstatSync, readdirSync, readFile, readFileSync, writeFileSync } from 'node:fs'
+import { isAbsolute, join, relative, sep } from 'node:path'
+import { promisify } from 'node:util'
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore semver 7 无自带类型声明（同 release.ts 的说明）
+import { valid } from 'semver'
+import { parseDesktopRelease, type DesktopRelease } from './release.ts'
+
+/** Descriptor at the root of the immutable Desktop resource tree. */
+export const DESKTOP_RUNTIME_FILE = 'desktop-runtime.json'
+
+/** Harness package shared with every profile through a directory link. */
+const DESKTOP_DSH_PACKAGE = '@deepseek-ai/dsh'
+
+/** Desktop Host package shared with every profile through a directory link. */
+const DESKTOP_HOST_PACKAGE = 'dsh-desktop-host'
+
+/**
+ * 第一方桥接插件（壳 ↔ harness 唯一通道）。
+ * 随包树里缺了它，桌面能力（徽标/通知/深链解析/工作区注册）会整体静默失效——
+ * 构建期校验必须把它当硬前提，而不是让壳带着"哑"桥接启动。
+ */
+const DESKTOP_BRIDGE_PACKAGE = 'dsh-desktop-bridge'
+
+/** Host-owned package available to external plugins through a directory link. */
+export interface DesktopSharedPackage {
+  readonly name: string
+  readonly version: string
+  readonly path: string
 }
 
-/** 仅关注带预发布段的锁步包（@deepseek-ai/* 且版本含 -rc.）。 */
-function isLockstepVersion(version: string): boolean {
-  return /-rc\./.test(version)
+/** Final bytes and executable permissions of a runtime file. */
+export interface DesktopRuntimeFile {
+  readonly path: string
+  readonly bytes: number
+  readonly sha256: string
+  readonly executable: boolean
+}
+
+/** One signed application's production dependency tree. */
+export interface DesktopRuntimeDescriptor {
+  readonly schemaVersion: 1
+  readonly release: DesktopRelease
+  readonly platform: NodeJS.Platform
+  readonly arch: string
+  readonly sharedPackages: readonly DesktopSharedPackage[]
+  readonly files: readonly DesktopRuntimeFile[]
+}
+
+const PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/[a-z0-9][a-z0-9._~-]*|[a-z0-9][a-z0-9._~-]*)$/u
+const readRuntimeFile = promisify(readFile)
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /**
- * 扫描运行时目录下的 @deepseek-ai/* 包版本（仅锁步包，按包名排序）。
- * 目录不存在 / 包损坏时跳过；返回空数组表示「无树可查」。
- * @param runtimeDir - %LOCALAPPDATA%/DSH Desktop/runtime。
- * @returns 排序后的锁步包条目。
+ * Resolve one portable resource path without permitting traversal or absolute paths.
+ * @param root - Runtime root.
+ * @param path - Slash-separated relative path from durable metadata.
+ * @returns Absolute resource path.
  */
-export function readRuntimeTreeState(runtimeDir: string): RuntimeTreeEntry[] {
-  const scopeDir = path.join(runtimeDir, 'node_modules', '@deepseek-ai')
-  const out: RuntimeTreeEntry[] = []
-  let names: string[] = []
-  try {
-    names = readdirSync(scopeDir)
-  } catch {
-    return out
+export function runtimePath(root: string, path: string): string {
+  if (path === '' || isAbsolute(path) || path.includes('\\') || path.includes(':')
+    || path.split('/').some(part => part === '' || part === '.' || part === '..')) {
+    throw new Error(`desktop runtime: invalid relative path ${JSON.stringify(path)}`)
   }
-  for (const name of names) {
-    if (name.startsWith('.')) continue
-    const pkgPath = path.join(scopeDir, name, 'package.json')
-    try {
-      const pkg = JSON.parse(readTextNoBom(pkgPath)) as { version?: unknown }
-      if (typeof pkg.version === 'string' && isLockstepVersion(pkg.version)) {
-        out.push({ name: `@deepseek-ai/${name}`, version: pkg.version })
-      }
-    } catch {
-      /* 跳过无法解析的包 */
+  return join(root, ...path.split('/'))
+}
+
+function runtimeFiles(root: string): { path: string; name: string }[] {
+  const files: { path: string; name: string }[] = []
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      const name = relative(root, path).split(sep).join('/')
+      if (name === DESKTOP_RUNTIME_FILE) continue
+      if (entry.isDirectory()) visit(path)
+      else if (entry.isFile()) files.push({ path, name })
+      else throw new Error(`desktop runtime: unsupported filesystem entry ${name}`)
     }
   }
-  out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-  return out
+  visit(root)
+  return files
 }
 
-/** 提取版本数组（供一致性判定）。 */
-export function treeVersions(state: RuntimeTreeEntry[]): string[] {
-  return state.map((entry) => entry.version)
-}
-
-/**
- * 树一致性：非空且所有锁步包版本完全相同 → 一致。
- * 空数组（无树可查）视为一致，避免误判为残缺。
- */
-export function isTreeConsistent(versions: string[]): boolean {
-  if (versions.length === 0) return true
-  const first = versions[0]
-  return versions.every((version) => version === first)
+function runtimeFile(path: string, name: string, body: Buffer): DesktopRuntimeFile {
+  return { path: name, bytes: body.byteLength, sha256: createHash('sha256').update(body).digest('hex'),
+    // Windows has no portable Unix executable permission bits.
+    executable: process.platform !== 'win32' && (lstatSync(path).mode & 0o111) !== 0 }
 }
 
 /**
- * 整树指纹：排序后 name@version 逐行 sha256 前 16 位。
- * 内部先按 name 排序，调用方传序无关；用于用户自更新标记记录
- * 「这份树长什么样」，供后续一致性比对。
+ * Inventory a materialized runtime without following links or including its descriptor.
+ * @param root - Self-contained runtime directory.
+ * @returns Sorted final-file inventory; executable permissions are false on Windows.
  */
-export function treeFingerprint(state: RuntimeTreeEntry[]): string {
-  const sorted = [...state].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-  const hash = createHash('sha256')
-  for (const entry of sorted) hash.update(`${entry.name}@${entry.version}\n`)
-  return hash.digest('hex').slice(0, 16)
+export function inventoryDesktopRuntime(root: string): DesktopRuntimeFile[] {
+  return runtimeFiles(root).map(({ path, name }) => runtimeFile(path, name, readFileSync(path)))
+    .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+}
+
+async function inventoryRuntimeForVerification(root: string): Promise<DesktopRuntimeFile[]> {
+  const entries = runtimeFiles(root)
+  const files: DesktopRuntimeFile[] = []
+  const remaining = entries.values()
+  let failed = false
+  const workers = Array.from({ length: Math.min(8, entries.length) }, async () => {
+    while (!failed) {
+      const next = remaining.next()
+      if (next.done) return
+      const { path, name } = next.value
+      try {
+        files.push(runtimeFile(path, name, await readRuntimeFile(path)))
+      } catch (error) {
+        failed = true
+        throw error
+      }
+    }
+  })
+  // Failure returns only after every outstanding file read has closed its descriptor.
+  const results = await Promise.allSettled(workers)
+  for (const result of results) if (result.status === 'rejected') throw result.reason
+  return files.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+}
+
+/**
+ * Seal the final runtime tree after materialization and native signing.
+ * @param root - Runtime output directory.
+ * @param release - Matching shell, dsh, Host, and executable versions.
+ * @param sharedNames - Release-owned packages supplied to plugins.
+ * @param target - Platform and architecture selected by runtime preparation.
+ * @returns Descriptor written beside the production packages.
+ */
+export function writeDesktopRuntime(
+  root: string, release: DesktopRelease, sharedNames: readonly string[],
+  target: { platform: NodeJS.Platform; arch: string } = process,
+): DesktopRuntimeDescriptor {
+  const sharedPackages = [...new Set(sharedNames)].sort().map((name) => {
+    if (!PACKAGE_NAME.test(name)) throw new Error(`desktop runtime: invalid shared package ${name}`)
+    const path = `node_modules/${name}`
+    const manifest = JSON.parse(readFileSync(join(runtimePath(root, path), 'package.json'), 'utf8')) as unknown
+    if (!record(manifest) || manifest.name !== name || typeof manifest.version !== 'string' || valid(manifest.version) === null) {
+      throw new Error(`desktop runtime: invalid shared package manifest ${name}`)
+    }
+    return { name, version: manifest.version, path }
+  })
+  const descriptor: DesktopRuntimeDescriptor = {
+    schemaVersion: 1, release, platform: target.platform, arch: target.arch,
+    sharedPackages, files: inventoryDesktopRuntime(root),
+  }
+  writeFileSync(join(root, DESKTOP_RUNTIME_FILE), `${JSON.stringify(descriptor, undefined, 2)}\n`)
+  return descriptor
+}
+
+/**
+ * Read packaged metadata and check shared package records.
+ * @param root - Current application's runtime resources.
+ * @returns Runtime metadata whose release compatibility is verified during packaging.
+ */
+export function readDesktopRuntime(root: string): DesktopRuntimeDescriptor {
+  const value: unknown = JSON.parse(readFileSync(join(root, DESKTOP_RUNTIME_FILE), 'utf8'))
+  if (!record(value) || typeof value.platform !== 'string' || typeof value.arch !== 'string'
+    || !Array.isArray(value.sharedPackages) || !Array.isArray(value.files)) {
+    throw new Error('desktop runtime: invalid descriptor')
+  }
+  if (!record(value.release) || typeof value.release.version !== 'string'
+    || typeof value.release.nodeVersion !== 'string' || typeof value.release.pnpmVersion !== 'string') {
+    throw new Error('desktop runtime: invalid release fields')
+  }
+  const release = value.release as unknown as DesktopRelease
+  const sharedPackages = value.sharedPackages.map((entry: unknown): DesktopSharedPackage => {
+    if (!record(entry) || typeof entry.name !== 'string' || !PACKAGE_NAME.test(entry.name)
+      || typeof entry.version !== 'string' || valid(entry.version) === null || entry.path !== `node_modules/${entry.name}`) {
+      throw new Error('desktop runtime: invalid shared package record')
+    }
+    return { name: entry.name, version: entry.version, path: entry.path }
+  })
+  if (new Set(sharedPackages.map(entry => entry.name)).size !== sharedPackages.length) {
+    throw new Error('desktop runtime: duplicate shared package')
+  }
+  const files = value.files as DesktopRuntimeFile[]
+  if (sharedPackages.find(entry => entry.name === DESKTOP_DSH_PACKAGE)?.version !== release.dshVersion) {
+    throw new Error(`desktop runtime: missing or mismatched ${DESKTOP_DSH_PACKAGE}`)
+  }
+  if (sharedPackages.find(entry => entry.name === DESKTOP_HOST_PACKAGE) === undefined) {
+    throw new Error(`desktop runtime: missing ${DESKTOP_HOST_PACKAGE}`)
+  }
+  if (sharedPackages.find(entry => entry.name === DESKTOP_BRIDGE_PACKAGE) === undefined) {
+    throw new Error(`desktop runtime: missing ${DESKTOP_BRIDGE_PACKAGE}`)
+  }
+  return { schemaVersion: value.schemaVersion as 1, release, platform: value.platform as NodeJS.Platform,
+    arch: value.arch, sharedPackages, files }
+}
+
+/**
+ * Verify every packaged runtime file against its recorded bytes and permissions at build time.
+ * @param root - Materialized runtime resources.
+ * @param electronVersion - Expected shell version.
+ * @param target - Required execution target; defaults to the current process.
+ * @returns Validated runtime descriptor.
+ */
+export async function verifyDesktopRuntime(
+  root: string, electronVersion: string, target: { platform: NodeJS.Platform; arch: string } = process,
+): Promise<DesktopRuntimeDescriptor> {
+  const descriptor = readDesktopRuntime(root)
+  // readDesktopRuntime preserves the disk schema value without validating release compatibility.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+  if (descriptor.schemaVersion !== 1 || descriptor.platform !== target.platform || descriptor.arch !== target.arch) {
+    throw new Error('desktop runtime: invalid descriptor or incompatible platform/architecture')
+  }
+  const release = parseDesktopRelease(descriptor.release)
+  if (release.version !== electronVersion) throw new Error(`desktop runtime: ${release.version} does not match Electron ${electronVersion}`)
+  for (const entry of descriptor.sharedPackages) {
+    const manifest: unknown = JSON.parse(readFileSync(join(runtimePath(root, entry.path), 'package.json'), 'utf8'))
+    if (!record(manifest) || manifest.name !== entry.name || manifest.version !== entry.version) {
+      throw new Error(`desktop runtime: shared package metadata mismatch for ${entry.name}`)
+    }
+  }
+  const actual = await inventoryRuntimeForVerification(root)
+  // Windows has no portable Unix executable permission bits.
+  const comparable = (items: readonly DesktopRuntimeFile[]): unknown => process.platform === 'win32'
+    ? items.map(({ executable: _executable, ...item }) => item) : items
+  if (JSON.stringify(comparable(descriptor.files)) !== JSON.stringify(comparable(actual))) {
+    throw new Error('desktop runtime: integrity verification failed')
+  }
+  return descriptor
+}
+
+/**
+ * Identify exact runtime content independently of its installation path.
+ * @param descriptor - Validated runtime metadata.
+ * @returns SHA-256 runtime identity.
+ */
+export function desktopRuntimeId(descriptor: DesktopRuntimeDescriptor): string {
+  return createHash('sha256').update(JSON.stringify(descriptor)).digest('hex')
 }

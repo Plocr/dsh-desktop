@@ -1,11 +1,11 @@
 node_modules/
 dist/
 release/
-resources/dsh-runtime/
-resources/dsh-runtime.tar.gz
-resources/runtime.version
+# 随包运行时（setup-runtime.mjs 生成：便携 Node + pnpm / dsh 闭包 + 第一方包）
+resources/dsh/
+resources/runtime/
+resources/.dsh-runtime-cache.json
 resources/icons/
-resources/plugins/
 packages/*/lib/client.js
 packages/*/lib/client.js.map
 *.log

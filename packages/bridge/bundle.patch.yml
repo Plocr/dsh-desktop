@@ -1,0 +1,7 @@
+# dsh-desktop-bridge bundle layer —— 本壳唯一的第一方插件（壳↔harness 通道）。
+# 官方组合包协议：package.json 的 dsh.bundle.patch 指向本文件，
+# profile 的 dsh.profile.bundles 里列出本包即加载此层（见 dsh-app-boot loadProfile）。
+# 不注入 config：token 由插件自己在启动时随机生成并只打到 stdout，壳解析后发现行。
+- insert:
+    - id: dsh-desktop-bridge
+      name: dsh-desktop-bridge

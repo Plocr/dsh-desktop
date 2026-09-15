@@ -3,7 +3,7 @@
  * 用法: node scripts/cdp.mjs <eval-js>
  */
 const targets = await (await fetch('http://127.0.0.1:9222/json')).json()
-const page = targets.find((t) => t.type === 'page' && t.url.startsWith('http://127.0.0.1'))
+const page = targets.find((t) => t.type === 'page' && (t.url.startsWith('dsh-app://') || t.url.startsWith('http://127.0.0.1')))
 if (!page) {
   console.error('no page target')
   process.exit(1)

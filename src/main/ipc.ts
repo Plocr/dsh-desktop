@@ -1,19 +1,19 @@
 /**
- * IPC：壳页面（loading/error）白名单。
- * harness Web UI 不调用这些 API（仪表盘/终端/主题均为 harness 插件，
- * 数据走插件自身 webServer 路由，不再经过壳 IPC）。
+ * IPC：按来源分级的白名单（对齐官方壳的 assertDesktopSender）——
+ * 壳页面能力只给 dsh-app://shell，工作台（dsh-app://app）只留更新安装这一个动作。
  *
- * 安全：每个 handler 校验 senderFrame.url 为 file:// 壳页面——
- * harness Web UI（http://127.0.0.1:*）内的插件 client 代码拿不到这些能力。
+ * 安全：每个 handler 校验 senderFrame.url 的来源（preload 里那道门是给渲染层看的，
+ * 这里才是边界）；工作台里跑的第三方插件 client 代码拿不到文件系统/对话框等能力。
  */
 import { dialog, ipcMain, shell, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
-import type { HarnessManager } from './harness'
 import type { BridgeClient } from './bridge'
 import { logDirPath } from './logger'
 
+const SHELL_ORIGIN = 'dsh-app://shell'
+const APP_ORIGIN = 'dsh-app://app'
+
 export interface IpcDeps {
   getWindow: () => BrowserWindow | null
-  harness: HarnessManager
   bridge: BridgeClient
   pickWorkspace: () => Promise<string | null>
   restartHarness: () => void
@@ -23,10 +23,9 @@ export interface IpcDeps {
   requestUpdateInstall: () => Promise<boolean>
 }
 
-/** 仅放行壳页面（file:// 加载的 loading/error 页）；其他来源拒绝。 */
+/** 仅放行壳页面（dsh-app://shell 的 loading/error 页）；其他来源拒绝。 */
 function fromShellPage(e: IpcMainInvokeEvent): boolean {
-  const url = e.senderFrame?.url ?? ''
-  return url.startsWith('file://')
+  return (e.senderFrame?.url ?? '').startsWith(SHELL_ORIGIN)
 }
 
 export function registerIpc(deps: IpcDeps): void {
@@ -83,14 +82,15 @@ export function registerIpc(deps: IpcDeps): void {
     return { ok: true }
   })
 
-  // 更新「安装更新」：由页面右上角卡片按钮触发（harness 页，不 gate file://）。
+  // 更新「安装更新」：由页面右上角卡片按钮触发（壳页面与工作台都可能点）。
   // 主进程侧 requestUpdateInstall 会再做「就绪检查 + 原生确认」，双保险。
-  ipcMain.on('dsh:update-install', () => {
+  ipcMain.on('dsh:update-install', (e) => {
+    const url = e.senderFrame?.url ?? ''
+    if (!url.startsWith(SHELL_ORIGIN) && !url.startsWith(APP_ORIGIN)) return
     void deps.requestUpdateInstall()
   })
 
   // 保留：无窗口时也能触发的原生对话框兜底
   void dialog
   void deps.bridge
-  void deps.harness
 }

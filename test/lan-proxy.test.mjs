@@ -1,18 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, request as httpRequest } from 'node:http'
-import { createLanProxy, clientIpOf } from '../src/main/lanServer.ts'
-
-function startFakeHarness(handler) {
-  return new Promise((resolve) => {
-    const s = createServer(handler)
-    s.listen(0, '127.0.0.1', () => resolve({ server: s, port: s.address().port }))
-  })
-}
+import { clientIpOf, createLanProxy, isLoopbackSource } from '../src/main/lanServer.ts'
 
 /**
- * 原始 http.request（fetch/undici 不允许自定义 Host 头，无法模拟手机侧的
- * 局域网 Host/Origin 组合）。
+ * 对外门面（局域网 / 本机浏览器版）契约测试。
+ *
+ * 官方桌面架构下后端没有监听端口：请求不是「转发到 127.0.0.1:<port>」，而是直接喂给
+ * Host 的管道 fetch（本测试用假 forward 代替 Host）。因此这里验证的是：
+ * token 门禁、回环免授权、请求/响应（含流式体）如实透传、端口回退、停机。
  */
 function rawRequest(port, path, { method = 'GET', headers = {}, body = null } = {}) {
   return new Promise((resolve, reject) => {
@@ -22,7 +18,7 @@ function rawRequest(port, path, { method = 'GET', headers = {}, body = null } = 
       res.on('data', (c) => {
         text += c
       })
-      res.on('end', () => resolve({ status: res.statusCode, text }))
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text }))
     })
     req.on('error', reject)
     if (body !== null) req.write(body)
@@ -30,341 +26,167 @@ function rawRequest(port, path, { method = 'GET', headers = {}, body = null } = 
   })
 }
 
-const APPROVE = async () => true
-
-test('lanProxy: 首次访问授权后放行，白名单免重复授权', async () => {
-  const harness = await startFakeHarness((req, res) => {
-    res.setHeader('content-type', 'text/plain')
-    res.end('harness-ok')
-  })
-  let approvals = 0
-  const proxy = await createLanProxy({
-    targetHost: '127.0.0.1',
-    targetPort: harness.port,
+/** 起一个假 Host：把收到的 Request 记录下来，返回给定响应。 */
+async function startProxy(overrides = {}) {
+  const seen = []
+  const approvalCalls = []
+  const handle = await createLanProxy({
+    bindHost: '127.0.0.1',
     port: 0,
-    requestApproval: async () => {
-      approvals += 1
+    forward: async (request) => {
+      seen.push(request)
+      return new Response(`echo:${new URL(request.url).pathname}:${request.method}`, {
+        status: 200,
+        headers: { 'content-type': 'text/plain; charset=utf-8' },
+      })
+    },
+    requestApproval: async (ip) => {
+      approvalCalls.push(ip)
       return true
     },
+    ...overrides,
   })
-  try {
-    const r1 = await fetch(`http://127.0.0.1:${proxy.port}/a`)
-    assert.equal(r1.status, 200)
-    assert.equal(await r1.text(), 'harness-ok')
-    const r2 = await fetch(`http://127.0.0.1:${proxy.port}/b`)
-    assert.equal(r2.status, 200)
-    // 同一个 IP 只授权一次
-    assert.equal(approvals, 1)
-  } finally {
-    await proxy.stop()
-    await new Promise((r) => harness.server.close(r))
-  }
-})
+  return { handle, seen, approvalCalls }
+}
 
-test('lanProxy: 拒绝授权 → 403，且不放行', async () => {
-  const harness = await startFakeHarness((req, res) => res.end('harness-ok'))
-  const proxy = await createLanProxy({
-    targetHost: '127.0.0.1',
-    targetPort: harness.port,
-    port: 0,
-    requestApproval: async () => false,
-  })
-  try {
-    const r1 = await fetch(`http://127.0.0.1:${proxy.port}/`)
-    assert.equal(r1.status, 403)
-    const r2 = await fetch(`http://127.0.0.1:${proxy.port}/`)
-    assert.equal(r2.status, 403)
-  } finally {
-    await proxy.stop()
-    await new Promise((r) => harness.server.close(r))
-  }
-})
-
-test('lanProxy: 目标不可达 → 502', async () => {
-  const proxy = await createLanProxy({
-    targetHost: '127.0.0.1',
-    targetPort: 1, // 没有服务
-    port: 0,
-    requestApproval: APPROVE,
-  })
-  try {
-    const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 6_000)
-    const r = await fetch(`http://127.0.0.1:${proxy.port}/`, { signal: ctrl.signal }).catch((e) => e)
-    clearTimeout(t)
-    // Node fetch 可能抛 ECONNREFUSED（上游在建立连接时报错）→ 允许 502 或抛错都在预期内
-    if (r instanceof Error) assert.ok(/ECONNREFUSED|fetch failed|abort/i.test(r.message))
-    else assert.equal(r.status, 502)
-  } finally {
-    await proxy.stop()
-  }
-})
-
-test('lanProxy: 授权并发去重与 approve 一次性', async () => {
-  const harness = await startFakeHarness((req, res) => res.end('ok'))
-  let approvals = 0
-  let release = null
-  const gate = new Promise((r) => { release = r })
-  const proxy = await createLanProxy({
-    targetHost: '127.0.0.1',
-    targetPort: harness.port,
-    port: 0,
-    requestApproval: async () => {
-      approvals += 1
-      await gate
-      return true
-    },
-  })
-  try {
-    const p1 = fetch(`http://127.0.0.1:${proxy.port}/1`).then((r) => r.status)
-    const p2 = fetch(`http://127.0.0.1:${proxy.port}/2`).then((r2) => r2.status)
-    // 同一 IP 的第一个请求正在授权（挂起），第二个应等待而不是叠加授权
-    await new Promise((r) => setTimeout(r, 150))
-    release(true)
-    const [s1, s2] = await Promise.all([p1, p2])
-    assert.equal(s1, 200)
-    assert.equal(s2, 200)
-    assert.equal(approvals, 1)
-  } finally {
-    await proxy.stop()
-    await new Promise((r) => harness.server.close(r))
-  }
-})
-
-test('lanProxy: HTML 响应注入 crypto.randomUUID 垫片（手机非安全上下文）', async () => {
-  const harness = await startFakeHarness((req, res) => {
-    if (req.url === '/html') {
-      res.setHeader('content-type', 'text/html; charset=utf-8')
-      res.end('<html><head><title>x</title></head><body>hi</body></html>')
-    } else {
-      res.setHeader('content-type', 'application/javascript')
-      res.end('export const a = 1')
-    }
-  })
-  const proxy = await createLanProxy({
-    targetHost: '127.0.0.1',
-    targetPort: harness.port,
-    port: 0,
-    requestApproval: APPROVE,
-  })
-  try {
-    const r = await fetch(`http://127.0.0.1:${proxy.port}/html`)
-    const body = await r.text()
-    assert.equal(r.status, 200)
-    assert.match(body, /randomUUID/)
-    assert.match(body, /<head>/)
-    const js = await (await fetch(`http://127.0.0.1:${proxy.port}/a.js`)).text()
-    assert.ok(!js.includes('randomUUID'))
-    assert.match(js, /export const a = 1/)
-  } finally {
-    await proxy.stop()
-    await new Promise((r) => harness.server.close(r))
-  }
-})
-
-test('lanProxy: 固定端口（占用则回退随机）', async () => {
-  const harness = await startFakeHarness((req, res) => res.end('ok'))
-  const fixed = 49301
-  const p1 = await createLanProxy({ targetHost: '127.0.0.1', targetPort: harness.port, port: fixed, requestApproval: APPROVE })
-  try {
-    assert.equal(p1.port, fixed)
-    // 占用同一固定端口 → 回退随机（≠fixed）
-    const p2 = await createLanProxy({ targetHost: '127.0.0.1', targetPort: harness.port, port: fixed, requestApproval: APPROVE })
-    try {
-      assert.ok(p2.port !== fixed)
-    } finally {
-      await p2.stop()
-    }
-  } finally {
-    await p1.stop()
-    await new Promise((r) => harness.server.close(r))
-  }
-})
-
-test('lanProxy: /api/host.* 转发 Host+Origin 改回环（解锁原生能力）', async () => {
-  let seenHost = ''
-  let seenOrigin = ''
-  const harness = await startFakeHarness((req, res) => {
-    if (req.url.startsWith('/api/host.')) {
-      seenHost = String(req.headers.host ?? '')
-      seenOrigin = String(req.headers.origin ?? '')
-      res.setHeader('content-type', 'application/json')
-      res.end(JSON.stringify({ ok: true, value: { path: null } }))
-    } else {
-      seenHost = String(req.headers.host ?? '')
-      seenOrigin = String(req.headers.origin ?? '')
-      res.setHeader('content-type', 'application/json')
-      res.end(JSON.stringify({ ok: true }))
-    }
-  })
-  const proxy = await createLanProxy({
-    targetHost: '127.0.0.1',
-    targetPort: harness.port,
-    port: 0,
-    requestApproval: APPROVE,
-  })
-  try {
-    // 手机侧以局域网 Host/Origin 访问（同源 → 放行）
-    const r = await rawRequest(proxy.port, '/api/host.pickDirectory', {
-      method: 'POST',
-      headers: {
-        host: `192.168.30.41:${proxy.port}`,
-        origin: `http://192.168.30.41:${proxy.port}`,
-        'sec-fetch-site': 'same-origin',
-        'content-type': 'application/json',
-        'content-length': Buffer.byteLength('{}'),
-      },
-      body: '{}',
-    })
-    assert.equal(r.status, 200)
-    assert.equal(seenHost, `127.0.0.1:${harness.port}`, 'host.* 的 Host 应改回环')
-    assert.equal(seenOrigin, `http://127.0.0.1:${harness.port}`, 'host.* 的 Origin 应改回环')
-  } finally {
-    await proxy.stop()
-    await new Promise((r) => harness.server.close(r))
-  }
-})
-
-test('lanProxy: 跨站 Origin 被拒（CSRF 防护），同源放行', async () => {
-  let forwarded = 0
-  const harness = await startFakeHarness((req, res) => {
-    forwarded += 1
-    res.end('harness-ok')
-  })
-  const proxy = await createLanProxy({
-    targetHost: '127.0.0.1',
-    targetPort: harness.port,
-    port: 0,
-    requestApproval: APPROVE,
-  })
-  try {
-    // 本机/局域网内恶意网页：Origin 指向外部站点 → 403 且不转发
-    const bad = await rawRequest(proxy.port, '/api/workspace.list', {
-      headers: { origin: 'https://evil.example' },
-    })
-    assert.equal(bad.status, 403)
-    assert.equal(forwarded, 0, '跨站请求不得转发到 harness')
-
-    // 带 Referer 但非外部站点 → 同样拒绝
-    const badRef = await rawRequest(proxy.port, '/api/workspace.list', {
-      headers: { referer: 'https://evil.example/page' },
-    })
-    assert.equal(badRef.status, 403)
-    assert.equal(forwarded, 0)
-
-    // 无 Origin/Referer（curl 等非浏览器请求）→ 由 IP 授权把关，放行
-    const plain = await rawRequest(proxy.port, '/api/workspace.list')
-    assert.equal(plain.status, 200)
-    assert.equal(forwarded, 1)
-
-    // 同源（Host 与 Origin 一致）→ 放行
-    const good = await rawRequest(proxy.port, '/api/workspace.list', {
-      headers: { host: `127.0.0.1:${proxy.port}`, origin: `http://127.0.0.1:${proxy.port}` },
-    })
-    assert.equal(good.status, 200)
-    assert.equal(forwarded, 2)
-  } finally {
-    await proxy.stop()
-    await new Promise((r) => harness.server.close(r))
-  }
-})
-
-test('lanProxy: 无鉴权 cookie 时补一次 harness token（稳定 URL 换 cookie，不产生 303 循环）', async () => {
-  const seen = []
-  const harness = await startFakeHarness((req, res) => {
-    seen.push(req.url)
-    res.setHeader('content-type', 'text/plain')
-    res.end('ok')
-  })
-  const proxy = await createLanProxy({
-    targetHost: '127.0.0.1',
-    targetPort: harness.port,
-    port: 0,
-    requestApproval: APPROVE,
-    webToken: 'tok-123',
-  })
-  try {
-    // ① 外部设备首次访问（无 cookie）→ 代理补 token（harness 据此换 HttpOnly cookie）
-    await rawRequest(proxy.port, '/')
-    assert.equal(seen.at(-1), '/?token=tok-123')
-    // ② 已持有鉴权 cookie → 不再补 token（harness 见到 token 就会 303，会与代理形成死循环）
-    await rawRequest(proxy.port, '/', { headers: { cookie: 'dsh-auth-abc=xyz' } })
-    assert.equal(seen.at(-1), '/')
-    // ③ URL 已带 token → 不重复追加
-    await rawRequest(proxy.port, '/?token=other')
-    assert.equal(seen.at(-1), '/?token=other')
-    // ④ 带查询串 → 用 & 追加
-    await rawRequest(proxy.port, '/index.html?x=1')
-    assert.equal(seen.at(-1), '/index.html?x=1&token=tok-123')
-  } finally {
-    await proxy.stop()
-    await new Promise((r) => harness.server.close(r))
-  }
-})
-
-test('lanProxy: 未配置 webToken（旧版 harness 无 token 鉴权）时原样转发', async () => {
-  const seen = []
-  const harness = await startFakeHarness((req, res) => {
-    seen.push(req.url)
-    res.end('ok')
-  })
-  const proxy = await createLanProxy({
-    targetHost: '127.0.0.1',
-    targetPort: harness.port,
-    port: 0,
-    requestApproval: APPROVE,
-  })
-  try {
-    await rawRequest(proxy.port, '/')
-    assert.equal(seen.at(-1), '/')
-  } finally {
-    await proxy.stop()
-    await new Promise((r) => harness.server.close(r))
-  }
-})
-
-test('lanProxy: 客户端中途断开不崩（ECONNRESET 兜底）', async () => {
-  const harness = await startFakeHarness((req, res) => {
-    if (req.url === '/ok') {
-      res.end('ok')
-      return
-    }
-    // /hold 挂起，客户端断开后触发 ECONNRESET
-    const hold = setTimeout(() => {
-      try {
-        res.end('late')
-      } catch {
-        /* ignored */
-      }
-    }, 1200)
-    res.on('close', () => clearTimeout(hold))
-  })
-  const proxy = await createLanProxy({
-    targetHost: '127.0.0.1',
-    targetPort: harness.port,
-    port: 0,
-    requestApproval: APPROVE,
-  })
-  try {
-    const ctrl = new AbortController()
-    const p = fetch(`http://127.0.0.1:${proxy.port}/hold`, { signal: ctrl.signal }).catch(() => 'aborted')
-    await new Promise((r) => setTimeout(r, 40))
-    ctrl.abort() // 客户端主动断开 → 上游吞掉 ECONNRESET，不崩
-    await p
-    // 断开后再发新请求，代理必须仍可用
-    await new Promise((r) => setTimeout(r, 150))
-    const ok = await fetch(`http://127.0.0.1:${proxy.port}/ok`)
-    assert.equal(ok.status, 200)
-    assert.equal(await ok.text(), 'ok')
-  } finally {
-    await proxy.stop()
-    await new Promise((r) => harness.server.close(r))
-  }
-})
-
-test('lanProxy: clientIpOf 归一化 IPv4-mapped', () => {
-  assert.equal(clientIpOf({ remoteAddress: '::ffff:192.168.1.5' }), '192.168.1.5')
-  assert.equal(clientIpOf({ remoteAddress: '127.0.0.1' }), '127.0.0.1')
+test('clientIpOf：IPv4-mapped 与 IPv6 回环归一化', () => {
+  assert.equal(clientIpOf({ remoteAddress: '::ffff:192.168.1.7' }), '192.168.1.7')
+  assert.equal(clientIpOf({ remoteAddress: '::1' }), '127.0.0.1')
   assert.equal(clientIpOf(null), '')
-  assert.equal(clientIpOf({}), '')
+})
+
+test('isLoopbackSource：回环免授权，其它网段需要授权', () => {
+  assert.equal(isLoopbackSource('127.0.0.1'), true)
+  assert.equal(isLoopbackSource('127.5.6.7'), true)
+  assert.equal(isLoopbackSource('192.168.1.7'), false)
+  assert.equal(isLoopbackSource('10.0.0.2'), false)
+})
+
+test('无 token 时直通：请求如实交给 forward，响应如实回写', async () => {
+  const { handle, seen, approvalCalls } = await startProxy()
+  try {
+    const r = await rawRequest(handle.port, '/api/ping?x=1')
+    assert.equal(r.status, 200)
+    assert.equal(r.text, 'echo:/api/ping:GET')
+    assert.equal(seen.length, 1)
+    assert.equal(new URL(seen[0].url).search, '?x=1')
+    // 回环来源：绝不弹授权
+    assert.deepEqual(approvalCalls, [])
+  } finally {
+    await handle.stop()
+  }
+})
+
+test('请求体以流方式透传（POST 大 body 不被壳截断）', async () => {
+  const payload = 'x'.repeat(200_000)
+  let received = ''
+  const { handle } = await startProxy({
+    forward: async (request) => {
+      received = await request.text()
+      return new Response('ok')
+    },
+  })
+  try {
+    const r = await rawRequest(handle.port, '/api/upload', { method: 'POST', body: payload })
+    assert.equal(r.status, 200)
+    assert.equal(received.length, payload.length)
+  } finally {
+    await handle.stop()
+  }
+})
+
+test('token 门禁：无 token/cookie → 401；?token= → 303 + HttpOnly cookie；随后放行', async () => {
+  const { handle } = await startProxy({ token: 'secret-token' })
+  try {
+    const denied = await rawRequest(handle.port, '/')
+    assert.equal(denied.status, 401)
+
+    const exchange = await rawRequest(handle.port, '/?token=secret-token')
+    assert.equal(exchange.status, 303)
+    assert.equal(exchange.headers.location, '/')
+    const cookie = exchange.headers['set-cookie']?.[0] ?? ''
+    assert.match(cookie, /dsh-desk-access=secret-token/)
+    assert.match(cookie, /HttpOnly/)
+
+    const ok = await rawRequest(handle.port, '/', {
+      headers: { cookie: cookie.split(';')[0] },
+    })
+    assert.equal(ok.status, 200)
+    assert.equal(ok.text, 'echo:/:GET')
+  } finally {
+    await handle.stop()
+  }
+})
+
+test('token 门禁：错误 token 直接 401，不改 cookie', async () => {
+  const { handle } = await startProxy({ token: 'right' })
+  try {
+    const r = await rawRequest(handle.port, '/?token=wrong')
+    assert.equal(r.status, 401)
+    assert.equal(r.headers['set-cookie'], undefined)
+  } finally {
+    await handle.stop()
+  }
+})
+
+test('流式响应逐帧回写（NDJSON 远端流不被缓冲）', async () => {
+  const { handle } = await startProxy({
+    forward: async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            const enc = new TextEncoder()
+            controller.enqueue(enc.encode('{"type":"item","value":1}\n'))
+            controller.enqueue(enc.encode('{"type":"end"}\n'))
+            controller.close()
+          },
+        }),
+        { headers: { 'content-type': 'application/x-ndjson' } },
+      ),
+  })
+  try {
+    const r = await rawRequest(handle.port, '/.dsh/remote-stream', { method: 'POST', body: '{}' })
+    assert.equal(r.status, 200)
+    assert.equal(r.headers['content-type'], 'application/x-ndjson')
+    assert.equal(r.text, '{"type":"item","value":1}\n{"type":"end"}\n')
+  } finally {
+    await handle.stop()
+  }
+})
+
+test('forward 抛错 → 502（不泄露为未处理异常）', async () => {
+  const { handle } = await startProxy({
+    forward: async () => {
+      throw new Error('host is not running')
+    },
+  })
+  try {
+    const r = await rawRequest(handle.port, '/api/x')
+    assert.equal(r.status, 502)
+    assert.match(r.text, /host is not running/)
+  } finally {
+    await handle.stop()
+  }
+})
+
+test('固定端口被占用 → 回退随机端口（手机书签场景仍可用）', async () => {
+  const blocker = createServer(() => undefined)
+  await new Promise((resolve) => blocker.listen(0, '127.0.0.1', resolve))
+  const busy = blocker.address().port
+  const { handle } = await startProxy({ bindHost: '127.0.0.1', port: busy })
+  try {
+    assert.notEqual(handle.port, busy)
+    const r = await rawRequest(handle.port, '/')
+    assert.equal(r.status, 200)
+  } finally {
+    await handle.stop()
+    await new Promise((resolve) => blocker.close(resolve))
+  }
+})
+
+test('stop() 关闭监听（对外立刻不可达）', async () => {
+  const { handle } = await startProxy()
+  const port = handle.port
+  await handle.stop()
+  await assert.rejects(() => rawRequest(port, '/'))
 })

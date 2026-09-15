@@ -14,6 +14,11 @@ import { readFileSync } from 'node:fs'
 export interface ApiKeyCheckResult {
   /** key 是否被官方接受 */
   ok: boolean
+  /**
+   * 判定结论：ok=有效；invalid=官方明确拒绝（401/403）；
+   * unknown=没能判定（网络/服务异常）——**绝不能**拿 unknown 当"无效"去报警。
+   */
+  verdict: 'ok' | 'invalid' | 'unknown'
   /** 供日志展示的掩码尾号（如 sk-x3b6…5S5L） */
   masked: string | null
   /** HTTP 状态码（网络错误时为 null） */
@@ -51,7 +56,13 @@ export async function checkDeepSeekKey(
 ): Promise<ApiKeyCheckResult> {
   const key = apiKey ?? readDeepSeekKeyFromCredentials(credentialsYaml)
   if (!key) {
-    return { ok: false, masked: null, status: null, detail: '未找到 DEEPSEEK_API_KEY（.credentials.yaml 缺失或未配置）' }
+    return {
+      ok: false,
+      verdict: 'invalid',
+      masked: null,
+      status: null,
+      detail: '未找到 DEEPSEEK_API_KEY（.credentials.yaml 缺失或未配置）',
+    }
   }
   const masked = mask(key)
   const ctrl = new AbortController()
@@ -62,16 +73,23 @@ export async function checkDeepSeekKey(
       signal: ctrl.signal,
     })
     if (r.status === 200) {
-      return { ok: true, masked, status: 200, detail: `API Key 有效（${masked}）` }
+      return { ok: true, verdict: 'ok', masked, status: 200, detail: `API Key 有效（${masked}）` }
     }
-    if (r.status === 401) {
-      return { ok: false, masked, status: 401, detail: `API Key 无效（${masked}），请到「设置 → 模型」更新` }
+    if (r.status === 401 || r.status === 403) {
+      return {
+        ok: false,
+        verdict: 'invalid',
+        masked,
+        status: r.status,
+        detail: `API Key 无效（${masked}），请到「设置 → 模型」更新`,
+      }
     }
-    return { ok: false, masked, status: r.status, detail: `官方返回 HTTP ${r.status}（${masked}）` }
+    return { ok: false, verdict: 'unknown', masked, status: r.status, detail: `官方返回 HTTP ${r.status}（${masked}）` }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     return {
       ok: false,
+      verdict: 'unknown',
       masked,
       status: null,
       detail: `自检请求失败：${err instanceof Error && err.name === 'AbortError' ? '超时' : msg}`,
@@ -79,4 +97,38 @@ export async function checkDeepSeekKey(
   } finally {
     clearTimeout(timer)
   }
+}
+/**
+ * 把桥接 `billing.balance` 的回复/错误映射成自检结论（纯函数，可单测）。
+ *
+ * 为什么优先走桥接：harness 的 credentials 服务会依次看**环境变量**、credentials 文件、
+ * dotenv 回退；壳自己解析 `.credentials.yaml` 会在"用户按官方文档用环境变量启动"时
+ * 误报「未找到 key」。
+ *
+ * @param reply - 成功时的 result（`{ infos: [{currency,totalBalance,…}] }`）。
+ * @param error - 失败时的错误文案（RPC 的 error 字段）。
+ */
+export function interpretBalanceReply(reply: unknown, error: string | null): ApiKeyCheckResult {
+  if (error === null) {
+    const infos = (reply as { infos?: unknown } | undefined)?.infos
+    const first = Array.isArray(infos) ? (infos[0] as { currency?: unknown; totalBalance?: unknown } | undefined) : undefined
+    const amount =
+      first && (typeof first.totalBalance === 'string' || typeof first.totalBalance === 'number')
+        ? `${String(first.currency ?? '')} ${String(first.totalBalance)}`.trim()
+        : null
+    return {
+      ok: true,
+      verdict: 'ok',
+      masked: null,
+      status: null,
+      detail: amount ? `API Key 有效（余额 ${amount}）` : 'API Key 有效',
+    }
+  }
+  if (/未配置|no.?key|missing/i.test(error)) {
+    return { ok: false, verdict: 'invalid', masked: null, status: null, detail: `未找到 DEEPSEEK_API_KEY（${error}）` }
+  }
+  if (/401|403|无效|invalid|unauthor/i.test(error)) {
+    return { ok: false, verdict: 'invalid', masked: null, status: 401, detail: `API Key 无效，请到「设置 → 模型」更新（${error}）` }
+  }
+  return { ok: false, verdict: 'unknown', masked: null, status: null, detail: `无法判定（${error}）` }
 }

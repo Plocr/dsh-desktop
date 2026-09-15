@@ -36,3 +36,32 @@ test('readDeepSeekKeyFromCredentials：文件缺失返回 null；无该 ref 返�
     rmSync(dir, { recursive: true, force: true })
   }
 })
+test('interpretBalanceReply：成功 → 有效并带余额；失败分类不误报', async () => {
+  const { interpretBalanceReply } = await import('../src/main/apiKeyCheck.ts')
+
+  const ok = interpretBalanceReply(
+    { isAvailable: true, infos: [{ currency: 'CNY', totalBalance: '12.34' }] },
+    null,
+  )
+  assert.equal(ok.verdict, 'ok')
+  assert.equal(ok.ok, true)
+  assert.match(ok.detail, /12\.34/)
+
+  const okNoInfo = interpretBalanceReply({ infos: [] }, null)
+  assert.equal(okNoInfo.verdict, 'ok')
+  assert.equal(okNoInfo.detail, 'API Key 有效')
+
+  // 未配置 key：harness 侧明确说没配 → invalid（要提示用户去配）
+  const missing = interpretBalanceReply(undefined, 'DEEPSEEK_API_KEY 未配置（请在 harness 设置中填写 API key）')
+  assert.equal(missing.verdict, 'invalid')
+  assert.match(missing.detail, /未找到 DEEPSEEK_API_KEY/)
+
+  // 官方拒绝
+  assert.equal(interpretBalanceReply(undefined, '余额查询失败: HTTP 401').verdict, 'invalid')
+  assert.equal(interpretBalanceReply(undefined, 'Unauthorized').verdict, 'invalid')
+
+  // 网络/超时类 → unknown：绝不能当成"无效"去报警（这正是本轮修掉的误报）
+  assert.equal(interpretBalanceReply(undefined, 'bridge call timeout: billing.balance').verdict, 'unknown')
+  assert.equal(interpretBalanceReply(undefined, 'fetch failed').verdict, 'unknown')
+  assert.equal(interpretBalanceReply(undefined, '余额查询异常: 连接被重置').verdict, 'unknown')
+})

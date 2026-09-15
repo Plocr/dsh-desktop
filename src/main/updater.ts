@@ -2,7 +2,7 @@
  * 第 1 层·桌面端自动更新（electron-updater + GitHub provider）。
  *
  *  - 打包版：启动 15s 后自动检查（受托盘「自动检测更新」开关控制）；
- *    托盘「检查更新…」手动检查（仅桌面端一层，官方 harness 层见 harnessCheck.ts）。
+ *    托盘「检查更新…」手动检查（只有框架一层：壳 + 随包 dsh 运行时是一个签名更新单元）。
  *  - 本地下载不跳浏览器：autoDownload=true，下载进度实时推给更新覆盖层
  *    （进度条 + 下载地址）；下载完成后退出时自动安装（autoInstallOnAppQuit）。
  *  - 展示下载地址（官方 GitHub 地址 + GitHub 免费加速代理地址，便于复制/备用）。

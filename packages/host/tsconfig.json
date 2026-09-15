@@ -1,0 +1,28 @@
+{
+  // [ported] Upstream extends the monorepo `../../tsconfig.base.json` and lists
+  // project references to the sibling vendor/packages projects. This repo is not
+  // that monorepo, so the base options are inlined here and the references are
+  // dropped. `rootDir`/`outDir` are kept from upstream, but the shipped
+  // `lib/index.js` is produced by `build.mjs` (esbuild, ESM), so this
+  // configuration only type-checks.
+  //
+  // The type-only `@deepseek-ai/*` imports resolve against the installed dsh
+  // runtime tree (`resources/dsh-runtime/node_modules`); that tree must exist
+  // on the module path for a type-check to succeed.
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types",
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src"]
+}

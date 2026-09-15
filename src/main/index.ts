@@ -1,43 +1,65 @@
 /**
- * DSH Desktop 主进程入口：
- * 单实例 → 设置/日志 → 确保 desktop profile（同步 bridge）→ 定位运行时 → 生成 overlay →
- * 创建窗口/托盘 → spawn harness → 解析 URL/桥接行 → 加载 Web UI →
- * 桥接事件（徽标/通知，仅桌面原生部分）→ 全局快捷键 / dsh:// 深链 / 自动更新 →
- * 优雅停机。
+ * DSH Desktop 主进程入口（官方桌面架构）：
+ * 单实例 → 设置/日志 → 定位随包运行时 → 确保 desktop profile（共享包链接）→
+ * 创建窗口/托盘（dsh-app:// 特权方案）→ spawn **Host 子进程**（字节管道，无监听端口）→
+ * Host ready → 加载 dsh-app://app/ → 桥接事件（徽标/通知，仅桌面原生部分）→
+ * 全局快捷键 / dsh:// 深链 / 自动更新 → 优雅停机。
  *
- * 架构（0.4.1）：壳只保留桌面原生能力；与 harness 之间仅通过 dsh-desktop-bridge
- * 插件通信（通知/徽标/深链/工作区注册），壳不注入任何 UI。
+ * 与官方一致的传输与版本模型：
+ *  - 后端是 `packages/host`（官方 apps/desktop-host 的移植），在随包 Node 里**进程内**引导
+ *    dsh profile；渲染层只经 dsh-app:// 特权方案访问，壳与 Host 之间是 fd3/fd4 字节管道，
+ *    本机不存在 harness 的监听 socket（见 hostProtocol.ts / appProtocol.ts）；
+ *  - 壳版本与随包 dsh/Node/pnpm 由 resources/dsh/desktop-runtime.json 绑定为一个签名更新单元，
+ *    不存在「单独更新 harness」的通道；
+ *  - 插件事务（安装/卸载/升级）只走随包 pnpm + profile 锁（见 pluginTransactions.ts）。
  */
-import { app, clipboard, dialog, shell, BrowserWindow } from 'electron'
+import { app, clipboard, dialog, session, shell, BrowserWindow } from 'electron'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { initLogger, log, logDirPath } from './logger'
 import { loadSettings, saveSettings, type AppSettings } from './settings'
-import { appResourcesDir, ensureProfile, resolveRuntime, writeOverlay, listDesktopPlugins, readPatchInsertedIds } from './runtime'
-import { cleanPatchStaleEntries, uninstallUserPlugin, isValidPluginSpec, readProfileBundles, reconcileProfileBundles, runDshPluginCommand, isolateProfileForSafeMode, restoreProfileManifest, setBundleMounted, listInstalledBundleNames, cleanAllowBuildsForRemoved, isReservedPluginName, readTextNoBom, type DshPluginResult } from './pluginfs.ts'
+import { appResourcesDir, ensureProfile, resolveRuntime, type RuntimeSpec } from './runtime'
+import { isValidPluginSpec, readProfileBundles, reconcileProfileBundles, isolateProfileForSafeMode, restoreProfileManifest, setBundleMounted, listInstalledBundleNames, isReservedPluginName, type DshPluginResult } from './pluginfs.ts'
+import { resolveDesktopPaths } from './paths.ts'
+import { PluginTransactions } from './pluginTransactions.ts'
 import { isSafeMode, recordStartFailure, recordStartSuccess, exitSafeMode, activateSafeMode, SAFE_MODE_THRESHOLD, type SafeModeState } from './safeMode'
-import { checkDeepSeekKey, readDeepSeekKeyFromCredentials, type ApiKeyCheckResult } from './apiKeyCheck'
-import { HarnessManager, type HarnessReady } from './harness'
+import { checkDeepSeekKey, interpretBalanceReply, type ApiKeyCheckResult } from './apiKeyCheck'
+import { HostManager, type HostReady } from './host'
 import { BridgeClient } from './bridge'
-import { createWindow, type WindowHandle } from './window'
+import { createWindow, UI_PARTITION, type WindowHandle } from './window'
+import { APP_ORIGIN, SHELL_ORIGIN, installAppProtocol, registerAppScheme } from './appProtocol'
 import { resolveEffectiveTheme, resolveThemePreference } from './theme'
 import { createTray, type TrayHandle } from './tray'
 import { notify, setBadge } from './notify'
-import { handleBridgeEvent, runningJobCount } from './bridgeEvents'
+import {
+  BRIDGE_PROTOCOL_VERSION,
+  handleBridgeEvent,
+  handleBridgeSnapshot,
+  diagOf,
+  latestApproval,
+  parseBridgeDiscovery,
+  recentSessions,
+  redactBridgeLine,
+  runningJobCount,
+  sessionIndexFrom,
+  sessionLabel,
+  withApproval,
+  withoutApproval,
+  type ApprovalIndex,
+  type BridgeDiag,
+  type SessionIndex,
+} from './bridgeEvents'
 import { registerIpc } from './ipc'
 import { parseDeepLink, extractDeepLinkFromArgv, type DeepLinkAction } from './deepLink'
 import { registerGlobalShortcut, currentShortcut, unregisterAllShortcuts } from './shortcut'
 import { initUpdater, checkNow, updateDownloadReady, installDownloadedUpdate, type UpdateProgress } from './updater'
-import { runHarnessUpdate, type HarnessProgress } from './harnessUpdate'
-import { incompatibleVersionsFile, readLocalDshVersion } from './harnessCheck'
 import { createLanProxy } from './lanServer'
 import { repairLegacySubagentDescriptors } from './sessionRepair.ts'
 import { DESKTOP_PROFILE, desktopProfileDir as sharedDesktopProfileDir, migrateLegacyProfileDir } from './desktopProfile.ts'
 import { compareDots } from './version.ts'
 import { cleanLogs, uninstallApp } from './maintenance'
-import { clearIncompatibleVersions } from './harnessCompat.ts'
 
 // dev 模式与已安装版隔离 userData（app 名解析为 productName → 默认同名目录，
 // 已安装版运行中时 dev 会因单实例锁冲突直接退出；隔离后两者可并行）
@@ -74,27 +96,39 @@ process.on('unhandledRejection', (reason) => {
 // 本地地址绕过系统代理（electron-updater/Chromium net 走系统代理时会劫持 127.0.0.1 请求）
 app.commandLine.appendSwitch('proxy-bypass-list', '127.0.0.1;localhost;<local>')
 
+// dsh-app:// 特权方案必须在 app ready 之前注册（Chromium 只认 ready 前注册的方案）。
+// 工作台与壳页面都走它加载，渲染层不直连 harness 的监听端口——见 appProtocol.ts。
+registerAppScheme()
+
 let win: WindowHandle | null = null
 let trayHandle: TrayHandle | null = null
-let harness: HarnessManager
+/** Host 子进程管理器（官方桌面架构：字节管道 + 进程内引导 dsh profile）。 */
+let host: HostManager
 let bridge: BridgeClient
+/** 随包运行时（Node + dsh 树 + pnpm；进程内只解析一次，随包不可变）。 */
+let runtime: RuntimeSpec | null = null
+/** 插件事务（随包 pnpm + profile 锁；见 pluginTransactions.ts）。 */
+let pluginTx: PluginTransactions | null = null
 let settings: AppSettings
 let settingsFile = ''
 let quitting = false
 /** 用户点击「安装更新」后置位：before-quit 放行正常退出，让 electron-updater 执行安装。 */
 let quitForUpdateInstall = false
-/** 当前「官方 Harness」（DeepSeek Harness @deepseek-ai/dsh）版本，供托盘菜单展示；用户自更新后同步刷新。 */
+/** 随包「官方 Harness」（@deepseek-ai/dsh）版本，托盘展示用；来自运行时描述符（不可单独更新）。 */
 let harnessVersion: string | null = null
-let pendingRegisterWorkspace: string | null = null
-let lastUrl: string | null = null
+/** bridge 插件（在 Host 进程内的 dsh 插件）发现行给出的本地 WS 目标；未就绪为 null。 */
+let bridgeTarget: { port: number; token: string } | null = null
 let runningJobs = 0
 let pendingDeepLinks: DeepLinkAction[] = []
-let overlayPath = ''
-let launchToken = ''
-/** dsh CLI 入口（runtime.bin），供插件管理器执行 dsh plugin 命令。 */
-let dshCliPath = ''
-/** 运行时 node 可执行文件（dsh plugin 等 CLI 子进程用）。 */
-let dshNodePath = ''
+/** 桥接连接状态 + 插件诊断（托盘「桥接：…」一行；见 refreshTray）。 */
+let bridgeConnected = false
+let bridgeDiag: BridgeDiag | null = null
+/** 插件上报的协议版本（null=对面没报）；与本壳常量不一致时托盘标注。 */
+let bridgePeerProtocol: number | null = null
+/** 会话目录（快照 + sessions.changed 增量）：托盘「最近会话」与深链标题都用它。 */
+let sessionIndex: SessionIndex = new Map()
+/** 待审批环（approval.asked 入、approval.decided 出）：托盘「待审批」提醒。 */
+let pendingApprovals: ApprovalIndex = new Map()
 
 /* ── 既有基础设施 ───────────────────────────────────────────────────── */
 
@@ -162,11 +196,6 @@ function migrateToIsolatedHome(): void {
   }
 }
 
-/** 用户安装插件目录（userData/plugins；与随包内置区分，可被 UI 安装/卸载）。 */
-function userPluginsDir(): string {
-  return path.join(app.getPath('userData'), 'plugins')
-}
-
 /** 桌面 profile 目录（$DSH_HOME/profiles/<DESKTOP_PROFILE>；旧名 desktop 为官方保留名）。 */
 function desktopProfileDir(): string {
   return sharedDesktopProfileDir(dshHome())
@@ -177,38 +206,43 @@ function safeModeFile(): string {
   return path.join(app.getPath('userData'), 'safe-mode.json')
 }
 
-/** 依据当前设置重新生成 overlay（启停插件后重启 Harness 生效）。只含随包内置插件。 */
-function regenerateOverlay(resourcesDir: string, token: string): string {
-  // 安全模式（连续启动失败自动触发）：只注入系统必需的 bridge，其余插件全部停用，保底可启动
-  if (isSafeMode(safeModeFile())) {
-    const p = writeOverlay(app.getPath('userData'), token, [])
-    log('info', 'overlay regenerated: dsh-desktop-bridge only（安全模式，插件已全部停用）')
-    return p
+/**
+ * 插件启停后把 profile 组合拉回一致：
+ *  - 安全模式：bundles 只留官方基线 + bridge（`isolateProfileForSafeMode`，带备份可恢复）；
+ *  - settings.disabledPlugins 里被停用的包从 bundles 移出（代码与依赖保留，随时可重新挂载）；
+ *  - 官方依赖（dsh-base/dsh-web-app）与 bridge 永不可停用。
+ * 组合由 profile 的 package.json 承载，Host 启动时读取——不需要额外的 overlay 文件。
+ */
+function reconcilePluginBundles(): void {
+  const profileDir = desktopProfileDir()
+  try {
+    if (isSafeMode(safeModeFile())) {
+      // 安全模式只需保住基线 + bridge：Host 读的就是 profile 的 bundles
+      const isolated = isolateProfileForSafeMode(profileDir)
+      log('info', `safe mode bundles ${isolated ? 'isolated' : 'already isolated'}`)
+      return
+    }
+    // 安装/卸载后先让 bundles 跟随 dependencies（官方 reconcile 的等价物）
+    reconcileProfileBundles(profileDir)
+    const disabled = new Set(settings.disabledPlugins)
+    for (const name of listInstalledBundleNames(profileDir)) {
+      setBundleMounted(profileDir, name, !disabled.has(name))
+    }
+    log('info', `profile bundles: ${readProfileBundles(profileDir).join(', ') || '(none)'}`)
+  } catch (err) {
+    log('error', `reconcilePluginBundles failed: ${err instanceof Error ? err.message : String(err)}`)
   }
-  const pluginsDir = path.join(resourcesDir, 'plugins')
-  const enabled = listDesktopPlugins(pluginsDir, userPluginsDir()).filter(
-    (p) => isReservedPluginName(p.name) || !settings.disabledPlugins.includes(p.name),
-  )
-  // 用户持久层（cordis.patch.yml）已注册的插件 id 不重复注入 overlay：
-  // 同一 id 在两处各 insert 一次会让 harness 启动报 duplicate loader entry id 直接退出。
-  // 官方 `dsh plugin add` 安装的组合包同理：由 profile bundles 层加载，overlay 需跳过。
-  const persisted = readPatchInsertedIds(path.join(desktopProfileDir(), 'cordis.patch.yml'))
-  for (const b of readProfileBundles(desktopProfileDir())) persisted.add(b)
-  const rows = enabled.filter((p) => !persisted.has(p.name)).map((p) => ({ name: p.name }))
-  const p = writeOverlay(app.getPath('userData'), token, rows)
-  log('info', `overlay regenerated: ${rows.map((x) => x.name).join(', ') || '(none)'}`)
-  return p
 }
 
-// ---- 局域网访问（壳内反向代理 + 电脑授权）----
+// ---- 局域网访问 / 本机浏览器版（Host 管道 fetch 的对外门面）----
 /** 当前选定的局域网 IPv4（对外主地址）；null = 未开启或无非内部网卡。 */
 let lanIp: string | null = null
-/** 局域网访问地址（http://<lanIp>:<代理端口>），ready 后填充。 */
+/** 对外地址（http://<lanIp>:<端口>?token=…），开启后填充。 */
 let lanUrl: string | null = null
-/** 局域网反向代理句柄（关掉 LAN/退出时 stop）。 */
+/** 对外服务句柄（关掉 LAN/退出时 stop）。 */
 let lanHandle: import('./lanServer').LanProxyHandle | null = null
-/** 当前代理转发的 harness web 端口（harness 重启随机端口变化 → 重建代理）。 */
-let lanTargetPort: number | null = null
+/** 本次运行的访问 token（手机书签 / 本机浏览器版都用它换 cookie）。 */
+let lanToken: string | null = null
 /** 授权弹窗串行锁（多设备同时来不叠弹窗）。 */
 let lanApprovalLock = false
 /** 本次进程启动以来 harness 是否成功 ready 过（用于安全模式失败计数判定）。 */
@@ -217,6 +251,8 @@ let harnessEverReady = false
 let apiKeyStatus: ApiKeyCheckResult | null = null
 /** 是否已就当前 key 状态提示过用户（避免每次 ready 重复弹通知）。 */
 let apiKeyNotified = false
+/** 桥接协议不匹配只提示一次（每次重连都弹会很吵）。 */
+let bridgeProtocolNotified = false
 /** 最近一次 harness 启动失败摘要（stderr 的 Error 行）；onReady 时清空。 */
 let lastHarnessError: string | null = null
 
@@ -285,62 +321,36 @@ async function resolveBestLanIp(): Promise<string | null> {
 }
 
 /**
- * 局域网访问：不改变 harness 监听（保持 127.0.0.1，浏览器版/本机窗口不受影响）；
- * 把所有候选局域网 IP 加入 /api 信任围栏（--trusted-host，host-only，容忍任意端口），
- * 实际对外由壳起的反向代理 + 电脑授权负责。
+ * 局域网访问：官方架构下**没有 harness 端口可转发**，对外服务把请求直接交给
+ * Host 的管道 fetch（与桌面窗口同一实现），因此没有「宿主监听地址」需要保护——
+ * 对外只有一个门面，门禁是设备授权 + 本次运行 token（见 lanServer.ts）。
  */
 async function applyLanNetwork(): Promise<void> {
   lanIp = settings.lanShare ? await resolveBestLanIp() : null
-  const trusted = settings.lanShare ? lanCandidates() : []
-  harness?.setNetwork(undefined, trusted)
-  if (settings.lanShare && trusted.length === 0) {
+  if (settings.lanShare && lanIp === null) {
     log('error', 'lanShare: 未发现局域网 IPv4，无法对外提供访问')
   } else if (settings.lanShare && lanIp) {
-    log('info', `lanShare: 主地址 ${lanIp}，候选 ${trusted.join(', ')} 加入信任围栏`)
+    log('info', `lanShare: 对外地址将在 ${lanIp} 上监听（设备需本机授权）`)
   }
 }
 
-/** 从 harness web URL 提取本次启动的 URL token（供局域网代理换取鉴权 cookie 用）。 */
-function webTokenOf(url: string | null | undefined): string | undefined {
-  if (typeof url !== 'string' || url === '') return undefined
-  try {
-    const t = new URL(url).searchParams.get('token')
-    return t !== null && t !== '' ? t : undefined
-  } catch {
-    return undefined
-  }
-}
-
-/**
- * 依据当前状态启停局域网反向代理：转发到 127.0.0.1:<harnessPort>，首次访问需电脑授权。
- * webUrl：harness web URL（含 token）——代理在客户端无鉴权 cookie 时补 token（见 lanServer）。
- */
-async function manageLanProxy(harnessPort: number, webUrl?: string | null): Promise<void> {
+/** 依据当前设置启停对外服务（局域网 / 本机浏览器版共用同一个门面）。 */
+async function manageLanServer(): Promise<void> {
   if (settings.lanShare && lanIp) {
-    // 目标端口变化（harness 重启换了随机端口）→ 重建代理
-    if (lanTargetPort !== harnessPort) {
-      if (lanHandle) {
-        await lanHandle.stop()
-        lanHandle = null
-      }
-      lanTargetPort = harnessPort
-    }
     if (!lanHandle) {
+      lanToken = lanToken ?? randomBytes(16).toString('hex')
       lanHandle = await createLanProxy({
-        targetHost: '127.0.0.1',
-        targetPort: harnessPort,
+        bindHost: '0.0.0.0',
+        forward: (request) => host.fetch(request),
         requestApproval: (ip) => promptLanApproval(ip),
-        webToken: webTokenOf(webUrl),
+        token: lanToken,
       })
-      lanUrl = `http://${lanIp}:${lanHandle.port}`
-      log('info', `lanShare: proxy up -> ${lanUrl}（转发 127.0.0.1:${harnessPort}，需电脑授权）`)
+      lanUrl = `http://${lanIp}:${lanHandle.port}/?token=${lanToken}`
+      log('info', `lanShare: serving on ${lanIp}:${lanHandle.port}（设备首访需本机授权）`)
     }
-  } else {
-    if (lanHandle) {
-      await lanHandle.stop()
-      lanHandle = null
-    }
-    lanTargetPort = null
+  } else if (lanHandle) {
+    await lanHandle.stop()
+    lanHandle = null
     lanUrl = null
   }
   refreshTray()
@@ -381,51 +391,66 @@ async function promptLanApproval(ip: string): Promise<boolean> {
   }
 }
 
-/** 重启 Harness：先按当前设置重新同步插件并生成 overlay，再重启。 */
-async function restartHarness(dir?: string): Promise<void> {
+/** 重启 Host：先按当前设置把 profile 组合拉回一致（插件启停 / 安全模式），再重启。 */
+async function restartHarness(): Promise<void> {
+  // 手动重启 = 新启动会话：重置 ready 标记，让本次启动的连续失败重新计数（坏插件崩溃可触发安全模式）
+  harnessEverReady = false
   try {
     await applyLanNetwork()
-    const resourcesDir = appResourcesDir()
-    // 同步 profile（插件启停后，profile node_modules 增删）+ 重生成 overlay
-    ensureProfile(
-      dshHome(),
-      path.join(resourcesDir, 'profile-template', 'dsh-workbench'),
-      path.join(resourcesDir, 'plugins'),
-      userPluginsDir(),
-      settings.disabledPlugins,
-    )
-    overlayPath = regenerateOverlay(resourcesDir, launchToken || randomBytes(16).toString('hex'))
-    // 手动重启 = 新启动会话：重置 ready 标记，让本次启动的连续失败重新计数（坏插件崩溃可触发安全模式）
-    harnessEverReady = false
-    lastUrl = null
-    harness.restart(dir)
-  } catch (err) {
-    // 同步/生成失败不应导致 unhandled rejection：记日志并照常重启（旧 overlay 仍可用）
-    harnessEverReady = false
-    log('error', `restartHarness prepare failed: ${err instanceof Error ? err.message : String(err)}`)
-    lastUrl = null
-    try {
-      harness.restart(dir)
-    } catch (err2) {
-      log('error', `restartHarness spawn failed: ${err2 instanceof Error ? err2.message : String(err2)}`)
+    if (runtime) {
+      ensureProfile({
+        dshHome: dshHome(),
+        templateDir: path.join(appResourcesDir(), 'profile-template', 'dsh-workbench'),
+        runtime,
+      })
     }
+    reconcilePluginBundles()
+  } catch (err) {
+    // 准备失败不应导致 unhandled rejection：记日志并照常重启（profile 仍是上一次的可用状态）
+    log('error', `restartHarness prepare failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  try {
+    host.restart()
+  } catch (err) {
+    log('error', `restartHarness failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
-function defaultWorkspace(): string {
-  const recent = settings.recentWorkspaces.filter((w) => existsSync(w))
-  return recent[0] ?? os.homedir()
+/**
+ * 解析 Host stdout 上的 bridge 发现行（`dsh desktop: {"port":N,"token":"…"}`）。
+ * bridge 是壳↔harness 的通道（通知/徽标/深链/工作区注册），它在 Host 进程内起一个
+ * 本地 WS server 并把端口与本次运行 token 打到 stdout；壳据此连接（token 防本机劫持）。
+ * 解析/校验在 bridgeEvents.parseBridgeDiscovery（纯函数，可单测；非法目标一律拒绝）。
+ */
+function parseBridgeLine(line: string): void {
+  const target = parseBridgeDiscovery(line)
+  if (target === null) return
+  bridgeTarget = target
+  bridge?.connect()
 }
 
 function refreshTray(): void {
   trayHandle?.refresh()
 }
 
+/** jobs 服务可见性（诊断码 jobs.present/jobs.absent 是唯一事实来源）。 */
+function bridgeJobsState(): 'present' | 'absent' | null {
+  if (bridgeDiag?.code === 'jobs.present') return 'present'
+  if (bridgeDiag?.code === 'jobs.absent') return 'absent'
+  return null
+}
+
+/** 协议同代判断：对面没报版本（老插件）也算 unknown，托盘要能看出来。 */
+function bridgeProtocolState(): 'ok' | 'mismatch' | 'unknown' {
+  if (!bridgeConnected) return 'unknown'
+  if (bridgePeerProtocol === null) return 'unknown'
+  return bridgePeerProtocol === BRIDGE_PROTOCOL_VERSION ? 'ok' : 'mismatch'
+}
+
 // ---- 本地更新反馈：右上角小卡片（进度条 + 下载地址）+ 任务栏进度 ----
 type UpdateOverlayState = { pct: number | null; detail: string; url?: string | null }
-/** 外壳（electron-updater）更新卡与官方 Harness 更新卡使用不同 DOM id，互不覆盖/移除。 */
+/** 更新卡使用独立 DOM id，避免与其他注入卡片互相覆盖/移除。 */
 const SHELL_UPDATE_TOAST_ID = 'dsh-update-toast'
-const HARNESS_UPDATE_TOAST_ID = 'dsh-harness-update-toast'
 /** 外壳（electron-updater）下载进度卡的推送句柄：下载完成前一直显示。 */
 let shellUpdateSink: ((p: UpdateOverlayState) => void) | null = null
 
@@ -510,79 +535,9 @@ function maybeResumePendingUpdate(): void {
   notify('更新待安装', `DSH Desktop ${pending} 已下载完成，点击立即安装并重启。`, () => void requestUpdateInstall())
 }
 
-/** 刷新托盘显示的「官方 Harness 当前版本」（读已安装运行时，用户自更新后也准确）。 */
-function refreshHarnessVersion(): void {
-  void readLocalDshVersion()
-    .then((v) => {
-      if (v && v !== harnessVersion) {
-        harnessVersion = v
-        refreshTray()
-      }
-    })
-    .catch(() => {})
-}
-
-/** 手动/自动提示时的「双版本」文案（框架 = DSH Desktop，官方 = DeepSeek Harness）。 */
+/** 托盘展示用的「双版本」文案（框架 = DSH Desktop，官方 = 随包 Harness）。 */
 function updateVersionLabel(): string {
   return `框架 v${app.getVersion()} · 官方 Harness v${harnessVersion ?? '—'}`
-}
-
-/**
- * 官方 Harness 更新：检测 → 整树刷新（进度） → 替换 → 重启。
- * - 页面不被打断：进度是一条右上角小卡片（可关闭、可最小化）；任务栏同步进度。
- * - manual=false：冷启动自动检查；有新版或运行时不完整则本地整树刷新，已最新/失败静默（托盘常显版本）。
- * - manual=true：托盘「检查并更新…」；无论结果都明确回报（含框架+官方 Harness 版本）。
- */
-async function doHarnessUpdate(manual: boolean): Promise<void> {
-  const open = beginUpdateOverlay({ pct: 0, detail: '正在检查官方 Harness 更新…', url: null }, HARNESS_UPDATE_TOAST_ID)
-  let stoppedBeforeSwap = false
-  const r = await runHarnessUpdate(
-    false,
-    {
-      onProgress: (p: HarnessProgress) => open({ pct: p.pct, detail: p.detail, url: p.url }),
-      // 原子替换前停掉 harness，规避 Windows 下已加载原生模块占用导致的替换失败；
-      // 成功/失败路径随后统一 restart 恢复（失败时树已回滚，restart 用旧树即可）。
-      onBeforeSwap: async () => {
-        stoppedBeforeSwap = true
-        try {
-          if (harness.state !== 'stopped') await harness.stop()
-        } catch (err) {
-          log('error', `harnessUpdate: stop before swap failed: ${err instanceof Error ? err.message : String(err)}`)
-        }
-      },
-    },
-    dshHome(),
-  )
-  endUpdateOverlay(HARNESS_UPDATE_TOAST_ID)
-
-  if (r.ok && r.updated) {
-    // 更新已落地：刷新版本显示 → 通知 → 重启 harness 生效
-    refreshHarnessVersion()
-    notify('官方 Harness 更新完成', r.message, () => undefined)
-    try {
-      harness.restart()
-    } catch (err) {
-      log('error', `harnessUpdate: restart failed: ${err instanceof Error ? err.message : String(err)}`)
-    }
-    return
-  }
-  if (!r.ok && stoppedBeforeSwap) {
-    // 更新失败且已停掉 harness：恢复运行（树已回滚，用旧树即可）
-    try {
-      harness.start()
-    } catch (err) {
-      log('error', `harnessUpdate: recover start failed: ${err instanceof Error ? err.message : String(err)}`)
-    }
-  }
-  if (manual) {
-    // 手动检查：明确回报（已最新 / 失败），含框架 + 官方 Harness 当前版本
-    const label = updateVersionLabel()
-    if (r.ok) notify('检查并更新', `${r.message}（${label}）`, () => showWindow())
-    else notify('检查并更新失败', `${r.message}（${label}）`, () => showWindow())
-  } else {
-    // 自动（冷启动）检查：只记日志，不打扰（托盘菜单已常显两个版本）
-    log('info', `harnessUpdate(auto): ${r.message}（${updateVersionLabel()}）`)
-  }
 }
 
 function showWindow(): void {
@@ -593,24 +548,42 @@ function showWindow(): void {
   w.focus()
 }
 
+/**
+ * 在系统浏览器打开工作台。
+ * 官方架构下后端没有监听端口（Host 走字节管道），所以本机浏览器版复用对外门面：
+ * 已开启局域网访问 → 直接开回环地址（回环免设备授权，仍需本次运行 token）；
+ * 未开启 → 明确提示先开启（不偷偷为本机再开一个长期监听口）。
+ */
 function openBrowser(): void {
-  const url = harness.ready?.url ?? lastUrl
-  if (url) void shell.openExternal(url)
+  if (!lanHandle || !lanToken) {
+    notify('打开浏览器版', '官方桌面架构下后端不监听端口：请先在托盘菜单开启「局域网访问」，本机浏览器版与它共用同一个对外地址。', () => showWindow())
+    return
+  }
+  void shell.openExternal(`http://127.0.0.1:${lanHandle.port}/?token=${lanToken}`)
 }
 
 function currentInfo(): unknown {
   return {
     version: app.getVersion(),
-    harnessState: harness?.state ?? 'stopped',
-    url: harness?.ready?.url ?? lastUrl,
+    harnessState: host?.state ?? 'stopped',
+    url: lanUrl,
     dshHome: dshHome(),
-    cwd: harness?.cwd ?? null,
+    transport: 'byte-pipes (dsh-app://app)',
     runningJobs,
     appData: app.getPath('userData'),
     logsDir: logDirPath(),
     globalShortcut: currentShortcut(),
     safeMode: isSafeMode(safeModeFile()),
     lastHarnessError,
+    bridge: {
+      connected: bridgeConnected,
+      jobs: bridgeJobsState(),
+      protocol: bridgeProtocolState(),
+      peerProtocol: bridgePeerProtocol,
+      pending: pendingApprovals.size,
+      lastDiag: bridgeDiag,
+      sessions: sessionIndex.size,
+    },
   }
 }
 
@@ -623,24 +596,28 @@ async function pickWorkspace(): Promise<string | null> {
   const dir = r.filePaths[0]
   settings.recentWorkspaces = [dir, ...settings.recentWorkspaces.filter((x) => x !== dir)].slice(0, 8)
   saveSettings(settingsFile, settings)
-  pendingRegisterWorkspace = dir
-  log('info', `switch workspace -> ${dir}`)
-  void restartHarness(dir)
+  log('info', `register workspace -> ${dir}`)
+  // 工作区是 harness 自己的注册表（$DSH_HOME/storages），Host 以 profile 为 cwd 常驻：
+  // 注册走 bridge RPC（与 Web UI 的「添加工作区」同一实现），无需重启 Host。
+  try {
+    await bridge.call('workspace.register', { path: dir })
+  } catch (err) {
+    log('error', `workspace.register failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
   refreshTray()
   return dir
 }
 
-/** 插件操作（dsh plugin add/remove）前停止 harness：运行中的热监听（watchUserPatches）
- *  会把 profile 目录改动覆盖回滚（内存配置重写 package.json）。 */
-async function stopHarnessBeforePluginOp(): Promise<void> {
-  if (harness && (harness.state === 'ready' || harness.state === 'starting')) {
-    log('info', 'plugin op: stopping harness first（避免热监听回滚）')
-    await harness.stop()
+/** 插件操作前停止 Host：官方要求 profile 改动前后端必须停止（避免热监听回滚 package.json）。 */
+async function stopHostBeforePluginOp(): Promise<void> {
+  if (host && (host.state === 'ready' || host.state === 'starting')) {
+    log('info', 'plugin op: stopping host first（官方：profile 改动前必须停后端）')
+    await host.stop()
   }
 }
 
-/** 插件操作完成后重启 harness（重新同步插件 + 生成 overlay）。 */
-async function startHarnessAfterPluginOp(): Promise<void> {
+/** 插件操作完成后重启 Host（重新读取 profile 组合）。 */
+async function startHostAfterPluginOp(): Promise<void> {
   await restartHarness()
 }
 
@@ -709,88 +686,56 @@ async function promptPluginSpec(): Promise<string | null> {
   })
 }
 
-/** 执行官方 `dsh plugin --profile <DESKTOP_PROFILE> <args...>`（add/remove 组合包）。 */
-async function runDshPlugin(args: string[]): Promise<DshPluginResult> {
-  const res = await runDshPluginCommand(dshNodePath || 'node', dshCliPath, dshHome(), DESKTOP_PROFILE, args)
-  log('info', `dsh plugin ${args.join(' ')} -> exit=${String(res.code)}`)
-  return res
+/** 插件包事务（随包 pnpm + profile 锁）。 */
+function transactions(): PluginTransactions {
+  if (pluginTx === null) throw new Error('插件事务未就绪：运行时尚未解析完成')
+  return pluginTx
 }
 
-/** 托盘「安装插件…」：输入官方 spec（npm/github/路径/tgz）→ dsh plugin add → 重启生效。 */
+/** 事务的 pnpm 诊断/错误摘要（对话框展示用）。 */
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** 托盘「安装插件…」：输入 spec（npm/github/路径/tgz）→ 随包 pnpm add → 重启生效。 */
 async function installPluginFromDialog(): Promise<void> {
   const spec = await promptPluginSpec()
   if (!spec) return
   if (!isValidPluginSpec(spec)) {
-    dialog.showErrorBox('插件安装失败', `插件标识不合法：${spec}\n\n请填写 npm 包名（如 my-plugin 或 @scope/my-plugin）、github:user/repo、本地目录或 .tgz 路径。`)
+    dialog.showErrorBox(
+      '插件安装失败',
+      `插件标识不合法：${spec}\n\n请填写 npm 包名（如 my-plugin 或 @scope/my-plugin）、github:user/repo、本地目录或 .tgz 路径。`,
+    )
     return
   }
-  if (!dshCliPath) {
-    dialog.showErrorBox('插件安装失败', 'dsh 运行时尚未就绪，请稍后重试。')
-    return
-  }
-  log('info', `plugin install (official): add ${spec}`)
-  notify('正在安装插件', `${spec} 安装中（dsh plugin add）…`)
-  // 先停止 harness，避免运行中的热监听（watchUserPatches）把 profile 改动覆盖回滚
-  await stopHarnessBeforePluginOp()
-  // 备份 profile manifest：pnpm 失败时可能已半装（dependencies 已写但安装中断），失败要回滚还原
-  const pkgFile = path.join(desktopProfileDir(), 'package.json')
-  let pkgBefore: string | null = null
+  notify('正在安装插件', `${spec} 安装中（随包 pnpm，官方事务流程）…`)
   try {
-    pkgBefore = readFileSync(pkgFile, 'utf8')
-  } catch {
-    /* 不存在则无需回滚 */
-  }
-  const res = await runDshPlugin(['add', spec])
-  const ignoredBuilds = res.output.includes('ERR_PNPM_IGNORED_BUILDS')
-  if (res.code !== 0 && !ignoredBuilds) {
-    log('error', `plugin install failed: ${res.output.slice(0, 800)}`)
-    // 回滚半装的 profile manifest（dependencies/bundles），避免残留依赖影响 harness/UI
-    if (pkgBefore !== null) {
-      try {
-        writeFileSync(pkgFile, pkgBefore, 'utf8')
-        log('info', 'plugin install failed: profile manifest rolled back')
-      } catch {
-        /* 回滚失败仅记日志 */
-      }
-    }
-    // git 依赖被 pnpm ≥10 拦截 prepare 构建脚本时，官方提示补 allowBuilds 后重试
+    await transactions().add(spec)
+  } catch (err) {
+    const message = errorText(err)
+    log('error', `plugin install failed: ${message}`)
     const gitHint = /git\+|github:|\.git(?:#|$)/.test(spec)
-      ? '\n\n该插件来自 git 源：pnpm 可能拦截了它的构建脚本。请把上方输出中 pnpm 提示的 key '
-        + `加入 ${path.join(desktopProfileDir(), 'pnpm-workspace.yaml')} 的 allowBuilds 后重试。`
+      ? `\n\n该插件来自 git 源：pnpm 可能拦截了它的构建脚本。请把 pnpm 提示的 key 加入 `
+        + `${path.join(desktopProfileDir(), 'pnpm-workspace.yaml')} 的 allowBuilds 后重试。`
       : ''
     dialog.showErrorBox(
       '插件安装失败',
-      `dsh plugin add ${spec} 未成功（exit=${String(res.code)}）。\n\n${res.output.slice(0, 800)}\n\n常见原因：包名不存在、网络不可达、或该包未声明 dsh.bundle。${gitHint}`,
+      `pnpm add ${spec} 未成功。\n\n${message}\n\n`
+        + '常见原因：包名不存在、网络不可达、该包未声明 dsh.bundle（仅作普通依赖）。'
+        + '官方语义下失败会保留部分改动、不自动回滚；修正后可直接重试。'
+        + gitHint,
     )
-    void startHarnessAfterPluginOp()
+    refreshTray()
     return
   }
-  if (ignoredBuilds) {
-    // 依赖已安装，仅原生构建脚本被 pnpm 11 安全策略忽略（exit=1）；宽容视为安装成功。
-    // 纯 JS 插件不受影响；需要原生模块的功能缺失时，用户可手动 approve-builds。
-    log('info', `plugin install: build scripts ignored (ERR_PNPM_IGNORED_BUILDS)\n${res.output.slice(0, 600)}`)
-  }
-  log('info', `plugin installed (official): ${spec}\n${res.output.slice(0, 500)}`)
-  // 官方对「未声明 dsh.bundle 的依赖」打印一次性警告：仅作普通依赖、不激活为 profile 层
-  const bundleLess = res.output.includes('declares no dsh.bundle')
-  if (bundleLess) {
-    log('info', `plugin ${spec} declares no dsh.bundle — 作为普通依赖安装，未激活为 profile 层`)
-  }
-  // 自愈 bundles 列表（官方 reconcile 偶发不追加时兜底，语义一致）
-  const reconciled = reconcileProfileBundles(desktopProfileDir())
-  log('info', `plugin bundles after reconcile: ${reconciled.join(', ')}`)
-  notify(
-    '插件已安装',
-    bundleLess
-      ? `${spec} 已安装（未声明 dsh.bundle，仅作为普通依赖；后续版本获得该声明会自动激活）`
-      : `${spec} 已安装（bundle），正在重启工作台生效…`,
-  )
+  // 组合列表统一由 reconcilePluginBundles 维护（restartHarness 内调用）
+  log('info', `plugin installed: ${spec}`)
+  notify('插件已安装', `${spec} 已安装，正在重启工作台生效…`)
   refreshTray()
-  await restartHarness()
 }
 
-/** 托盘「卸载插件」：bundle 插件走官方 dsh plugin remove；user 插件删除目录；内置插件不可卸。 */
-async function uninstallPluginFromDialog(name: string, kind: 'bundle' | 'user', dir?: string): Promise<void> {
+/** 托盘「卸载插件」：随包 pnpm remove（官方语义：失败保留部分改动）。 */
+async function uninstallPluginFromDialog(name: string): Promise<void> {
   const w = win?.win ?? null
   const opts = {
     type: 'warning' as const,
@@ -799,56 +744,31 @@ async function uninstallPluginFromDialog(name: string, kind: 'bundle' | 'user', 
     cancelId: 1,
     title: '卸载插件',
     message: `确定卸载插件「${name}」？`,
-    detail: kind === 'bundle' ? '将执行 dsh plugin remove 并从组合包列表移除；工作台将重启。' : '插件目录会被删除；内置插件不受影响。卸载后工作台将重启。',
+    detail: '将从 profile 依赖中移除（pnpm remove）并重启工作台；预设的停用状态一并清理。',
   }
   const r = w ? await dialog.showMessageBox(w, opts) : await dialog.showMessageBox(opts)
   if (r.response !== 0) return
-
-  if (kind === 'bundle') {
-    if (!dshCliPath) {
-      dialog.showErrorBox('卸载失败', 'dsh 运行时尚未就绪。')
-      return
-    }
-    // 先停止 harness，避免热监听回滚 profile 改动
-    await stopHarnessBeforePluginOp()
-    const res = await runDshPlugin(['remove', name])
-    if (res.code !== 0) {
-      dialog.showErrorBox('插件卸载失败', `dsh plugin remove ${name} 未成功（exit=${String(res.code)}）。\n\n${res.output.slice(0, 500)}`)
-      void startHarnessAfterPluginOp()
-      return
-    }
-    log('info', `plugin uninstalled (official): ${name}`)
-    // 自愈：从 bundles 移除已卸载的依赖（官方 reconcile 偶发漏处理时兜底）
-    reconcileProfileBundles(desktopProfileDir())
-    // 清理 pnpm-workspace.yaml 中该包残留的 allowBuilds 条目（git 依赖构建授权）
-    if (cleanAllowBuildsForRemoved(desktopProfileDir(), [name])) {
-      log('info', `plugin uninstalled: allowBuilds entries cleaned for ${name}`)
-    }
-    notify('插件已卸载', `${name} 已卸载，正在重启工作台生效…`)
-  } else {
-    // user 插件按目录名定位（package.json 的 name 与目录名可能不一致）
-    const dirName = dir !== undefined && dir !== '' ? dir : name
-    const removed = uninstallUserPlugin(dirName, userPluginsDir())
-    if (!removed) {
-      dialog.showErrorBox(
-        '卸载失败',
-        `未找到可删除的插件目录：${path.join(userPluginsDir(), dirName)}\n\n请手动删除对应目录后重启。`,
-      )
-      return
-    }
+  try {
+    await transactions().remove(name)
+  } catch (err) {
+    dialog.showErrorBox('插件卸载失败', `pnpm remove ${name} 未成功。\n\n${errorText(err)}`)
+    refreshTray()
+    return
+  }
+  // 该包的停用记录不再需要（下次 boot 不会再有这个 bundle）
+  if (settings.disabledPlugins.includes(name)) {
     settings.disabledPlugins = settings.disabledPlugins.filter((x) => x !== name)
     saveSettings(settingsFile, settings)
-    log('info', `plugin uninstalled: ${name} (dir=${dirName}, removed=${removed})`)
-    notify('插件已卸载', `${name} 已卸载，正在重启工作台生效…`)
   }
+  log('info', `plugin uninstalled: ${name}`)
+  notify('插件已卸载', `${name} 已卸载，正在重启工作台生效…`)
   refreshTray()
-  await restartHarness()
 }
 
-/** 托盘「进入安全模式」：停用全部插件（先停 harness，避免热监听把 manifest 改动回滚）。 */
+/** 托盘「进入安全模式」：停用全部插件（先停 Host，避免热监听把 manifest 改动回滚）。 */
 async function enterSafeModeFromTray(): Promise<void> {
   activateSafeMode(safeModeFile())
-  await stopHarnessBeforePluginOp()
+  await stopHostBeforePluginOp()
   log('info', 'safe mode entered manually（插件已全部停用）')
   if (isolateProfileForSafeMode(desktopProfileDir())) {
     log('info', 'safe mode: profile bundles isolated (only official bundles kept)')
@@ -862,8 +782,8 @@ async function enterSafeModeFromTray(): Promise<void> {
 /** 托盘「退出安全模式」：恢复全部插件（清失败计数 + 还原 bundle 清单）。 */
 async function exitSafeModeFromTray(): Promise<void> {
   const st: SafeModeState = exitSafeMode(safeModeFile())
-  // 先停 harness：否则运行中的热监听会把还原后的 manifest 又改回隔离态
-  await stopHarnessBeforePluginOp()
+  // 先停 Host：否则运行中的热监听会把还原后的 manifest 又改回隔离态
+  await stopHostBeforePluginOp()
   const restored = restoreProfileManifest(desktopProfileDir())
   log('info', `safe mode exited by user (failCount=${st.failCount}, safeMode=${st.safeMode}, manifestRestored=${restored})`)
   notify('已退出安全模式', '全部插件已恢复，正在重启工作台…')
@@ -871,14 +791,34 @@ async function exitSafeModeFromTray(): Promise<void> {
   await restartHarness()
 }
 
-/** API Key 自检（只读 /user/balance）：更新托盘状态；失效时记录日志并通知一次。 */
+/**
+ * API Key 自检：**优先走桥接**（harness 的 credentials 服务会读环境变量 / credentials 文件 /
+ * dotenv 回退），桥接不可用时回退本地 `.credentials.yaml` 解析。
+ * 只有官方明确拒绝（401/403）或"未配置"才报警；网络类失败记为 unknown，绝不误报"无效"。
+ */
+async function checkApiKey(): Promise<ApiKeyCheckResult> {
+  if (bridgeConnected) {
+    try {
+      const reply = await bridge.call('billing.balance', undefined, 12_000)
+      return interpretBalanceReply(reply, null)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      const mapped = interpretBalanceReply(undefined, message)
+      if (mapped.verdict !== 'unknown') return mapped
+      log('error', `api key check via bridge inconclusive: ${message}`)
+    }
+  }
+  return checkDeepSeekKey(path.join(dshHome(), '.credentials.yaml'))
+}
+
+/** 自检并更新托盘/通知（只在明确无效时通知一次）。 */
 async function runApiKeyCheck(): Promise<void> {
   try {
-    const res = await checkDeepSeekKey(path.join(dshHome(), '.credentials.yaml'))
+    const res = await checkApiKey()
     apiKeyStatus = res
     log(res.ok ? 'info' : 'error', `api key check: ${res.detail}`)
     refreshTray()
-    if (!res.ok && !apiKeyNotified) {
+    if (res.verdict === 'invalid' && !apiKeyNotified) {
       apiKeyNotified = true
       notify('DeepSeek API Key 检测', `${res.detail}。更新后立即生效（无需重启应用）。`)
     }
@@ -888,7 +828,14 @@ async function runApiKeyCheck(): Promise<void> {
 }
 
 function handleBridgeEventWrapper(type: string, payload: unknown): void {
-  if (type === 'job.done' || type === 'jobs.changed' || type === 'approval.asked') {
+  if (
+    type === 'job.done' ||
+    type === 'jobs.changed' ||
+    type === 'approval.asked' ||
+    type === 'approval.decided' ||
+    type === 'sessions.changed' ||
+    type === 'bridge.diag'
+  ) {
     log('info', `bridge event: ${type} ${JSON.stringify(payload).slice(0, 300)}`)
   }
   handleBridgeEvent(
@@ -896,13 +843,36 @@ function handleBridgeEventWrapper(type: string, payload: unknown): void {
     payload,
     { notifications: settings.notifications },
     {
-      notify: (title, body) => notify(title, body, () => showWindow()),
+      // 通知点击：审批通知直接落到那个会话；其余只聚焦窗口
+      notify: (title, body, onClick) => notify(title, body, onClick ?? (() => showWindow())),
       setBadge,
+      openSession: (sessionId) => void handleDeepLink({ kind: 'session', sessionId }),
+      diag: (d) => {
+        bridgeDiag = d
+        log(d.level === 'info' ? 'info' : 'error', `bridge diag(${d.level}): ${d.code} ${JSON.stringify(d.detail)}`)
+        refreshTray()
+      },
     },
   )
   if (type === 'jobs.changed') {
     const jobs = ((payload as { jobs?: unknown[] } | undefined)?.jobs) ?? []
     runningJobs = runningJobCount(jobs)
+    refreshTray()
+    return
+  }
+  // 会话目录增量：托盘「最近会话」、深链标题缓存（改标题/新建后不重启即生效）
+  if (type === 'sessions.changed') {
+    sessionIndex = sessionIndexFrom(payload)
+    refreshTray()
+    return
+  }
+  if (type === 'approval.asked') {
+    pendingApprovals = withApproval(pendingApprovals, payload)
+    refreshTray()
+    return
+  }
+  if (type === 'approval.decided') {
+    pendingApprovals = withoutApproval(pendingApprovals, payload)
     refreshTray()
   }
 }
@@ -978,7 +948,8 @@ function execJsWithTimeout(w: Electron.BrowserWindow, code: string, timeoutMs = 
 function uiReady(): boolean {
   const w = win?.win
   if (!w || w.isDestroyed()) return false
-  return w.webContents.getURL().startsWith('http://127.0.0.1:')
+  // 工作台地址是 dsh-app://app/（壳页面是 dsh-app://shell/，两者不会混淆）
+  return w.webContents.getURL().startsWith(APP_ORIGIN)
 }
 
 /** 处理一条深链：聚焦窗口 + 尽力导航（新会话/指定会话）。 */
@@ -995,12 +966,15 @@ async function handleDeepLink(action: DeepLinkAction): Promise<void> {
     return
   }
   if (action.kind === 'session' && action.sessionId) {
-    let title: unknown = null
-    try {
-      const res = (await bridge.call('session.resolve', { id: action.sessionId }, 8000)) as { title?: unknown }
-      title = res?.title
-    } catch (err) {
-      log('error', `session.resolve failed: ${err instanceof Error ? err.message : String(err)}`)
+    // 目录里已有标题就不打扰 harness（会话目录由 dashboard.snapshot + sessions.changed 维护）
+    let title: unknown = sessionIndex.get(action.sessionId)?.title ?? null
+    if (typeof title !== 'string' || title === '') {
+      try {
+        const res = (await bridge.call('session.resolve', { id: action.sessionId }, 8000)) as { title?: unknown }
+        title = res?.title
+      } catch (err) {
+        log('error', `session.resolve failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
     }
     if (typeof title === 'string' && title) {
       await expandOverflowSessions()
@@ -1041,35 +1015,20 @@ async function main(): Promise<void> {
   // 默认独立 DSH_HOME：首次切换时迁移旧 ~/.dsh 数据（与 web 版/CLI 共存不冲突）
   migrateToIsolatedHome()
 
-  const token = randomBytes(16).toString('hex')
-  launchToken = token
   const resourcesDir = appResourcesDir()
 
-  // 先创建窗口并立即显示加载页，再准备运行时——
-  // 首启解压运行时 tar.gz（约 200MB）耗时较长，若先 await 再建窗口，
-  // 用户在任务管理器里只见进程、长时间看不到界面。
+  // 先创建窗口并立即显示加载页，再准备运行时/后端。
   win = createWindow(path.join(__dirname, '..', 'preload', 'index.cjs'), resourcesDir, {
-    // 导航锁：file:// 壳页面 + 精确匹配已解析的 harness URL（host+port）。
-    // 窗口只加载回环地址；局域网走壳的反向代理，不让窗口直接访问任意主机/端口。
-    isAllowed: (url) => {
-      if (url.startsWith('file://')) return true
-      try {
-        const u = new URL(url)
-        if (u.protocol !== 'http:' || u.hostname !== '127.0.0.1') return false
-        const known = [lastUrl, harness?.ready?.url].filter((x): x is string => !!x)
-        return known.some((k) => {
-          try {
-            return new URL(k).port === u.port
-          } catch {
-            return false
-          }
-        })
-      } catch {
-        return false
-      }
-    },
+    // 导航锁：只允许本壳的两个 dsh-app:// 来源（shell 壳页面 / app 工作台）。
+    // 后端没有监听端口，页面也无从访问任何 http/ws 地址。
+    isAllowed: (url) => url.startsWith(SHELL_ORIGIN) || url.startsWith(APP_ORIGIN),
     theme: resolveEffectiveTheme(dshHome()),
   })
+  // dsh-app:// 处理器要装在窗口所在分区（Electron 的 protocol 模块只管默认分区）；
+  // 工作台请求全部转给 Host 的管道 fetch。
+  installAppProtocol(session.fromPartition(UI_PARTITION), path.join(resourcesDir, 'shell-pages'), (request) =>
+    host.fetch(request),
+  )
   win.showLoading(undefined, resolveThemePreference(dshHome()))
   win.win.on('close', (e) => {
     if (settings.trayOnClose && !quitting) {
@@ -1078,46 +1037,34 @@ async function main(): Promise<void> {
     }
   })
 
-  // 一次性迁移旧 profile 名（desktop 是官方保留名，0.1.5+ 的 CLI 拒绝启动）。
-  // 改名成功后清空「不兼容版本」记录——那些记录都是被 desktop 守卫误伤的版本。
+  // 一次性迁移旧 profile 名（desktop 是官方保留名；本壳自有名 dsh-workbench）。
   if (migrateLegacyProfileDir(dshHome())) {
     log('info', `profile migrated: profiles/desktop -> profiles/${DESKTOP_PROFILE}`)
-    if (clearIncompatibleVersions(incompatibleVersionsFile())) {
-      log('info', 'harness incompatible list cleared（旧记录由 desktop 守卫产生）')
-    }
   }
 
-  // 确保 profile（同步启用的插件）与生成 overlay
-  const profileDir = ensureProfile(
-    dshHome(),
-    path.join(resourcesDir, 'profile-template', 'dsh-workbench'),
-    path.join(resourcesDir, 'plugins'),
-    userPluginsDir(),
-    settings.disabledPlugins,
-  )
-  // 清理 cordis.patch.yml 中指向「已不存在插件」的残留 insert 条目
-  // （历史持久化安装/卸载不彻底留下的脏数据，会让 harness 启动报错）
-  {
-    const known = new Set(listDesktopPlugins(path.join(resourcesDir, 'plugins'), userPluginsDir()).map((p) => p.name))
-    if (cleanPatchStaleEntries(path.join(profileDir, 'cordis.patch.yml'), known)) {
-      log('info', 'cordis.patch.yml: stale plugin entries cleaned')
-    }
-  }
-  // 定位运行时（打包模式首启解压到本地目录；窗口与加载页已先行显示）。
-  // 解压开始前更新加载页副标题，避免用户误以为卡死。
-  const runtime = await resolveRuntime(dshHome(), () => {
-    win?.showLoading('首次运行：正在解压运行时…', resolveThemePreference(dshHome()))
+  // 定位随包运行时（不可变：Node + dsh 树 + pnpm，见 resources/dsh/desktop-runtime.json）。
+  // 版本绑定校验失败会在这里直接抛出——绝不带着未知组合启动。
+  runtime = resolveRuntime()
+  harnessVersion = runtime.dshVersion
+  // 插件事务（随包 pnpm + profile 锁）：Profile 就绪后即可用
+  pluginTx = new PluginTransactions(runtime, resolveDesktopPaths(dshHome()), {
+    beforeChange: () => stopHostBeforePluginOp(),
+    afterChange: () => startHostAfterPluginOp(),
   })
-  dshCliPath = runtime.bin
-  dshNodePath = runtime.node
-  harnessVersion = runtime.dshVersion ?? null
-  refreshHarnessVersion()
+  pluginTx.assertSettled()
+
+  // 确保 profile（模板 + pnpm workspace + bundles + 共享包链接）就绪
+  ensureProfile({
+    dshHome: dshHome(),
+    templateDir: path.join(resourcesDir, 'profile-template', 'dsh-workbench'),
+    runtime,
+  })
 
   // 旧会话修复：v0 日志里的 subagent descriptor 版本过旧会让 dsh ≥ 0.1.3 的迁移整条拒绝
-  // （历史会话打不开）。只在确认运行时会做该迁移时执行，纯本地最小改写 + 备份。
+  // （历史会话打不开）。按随包 dsh 版本判断，纯本地最小改写 + 备份。
   {
     const v = runtime.dshVersion
-    if (v === undefined || compareDots(v, '0.1.3-alpha.2') >= 0) {
+    if (compareDots(v, '0.1.3-alpha.2') >= 0) {
       try {
         const rep = repairLegacySubagentDescriptors(path.join(dshHome(), 'sessions'))
         if (rep.repaired > 0) {
@@ -1129,32 +1076,28 @@ async function main(): Promise<void> {
     }
   }
 
-  overlayPath = regenerateOverlay(resourcesDir, token)
+  // 插件启停 / 安全模式 → profile 组合
+  reconcilePluginBundles()
 
-  harness = new HarnessManager(
+  host = new HostManager(
     {
       node: runtime.node,
-      bin: runtime.bin,
-      dshHome: dshHome(),
-      profile: profileDir,
-      overlay: overlayPath,
-      cwd: defaultWorkspace(),
+      runtimeDir: runtime.runtimeDir,
+      projectDir: desktopProfileDir(),
+      // Host 在随包 Node 里引导 profile：DSH_HOME 必须显式传入（官方 Host 不读壳的设置）
+      env: { ...process.env, DSH_HOME: dshHome(), DSH_DESKTOP: '1' },
     },
     {
-      onReady: (r: HarnessReady) => {
+      onReady: (r: HostReady) => {
         // 成功 ready：清安全模式失败计数（不自动退出安全模式，由用户显式恢复）
         harnessEverReady = true
         lastHarnessError = null
         recordStartSuccess(safeModeFile())
-        // 本机窗口永远加载回环地址；局域网经壳的反向代理（manageLanProxy）对外
-        const url = r.url
-        lastUrl = url
-        void manageLanProxy(r.port, url).then(() => {
-          log('info', `harness ready: ${url} bridgePort=${r.bridgePort}${lanUrl ? ` lan=${lanUrl}` : ''}`)
-          refreshTray()
-        })
-        win?.loadApp(url)
-        bridge.connect()
+        harnessVersion = r.dshVersion
+        // 对外服务（默认关闭）：官方架构下没有 harness 端口，门面直连 Host 管道 fetch
+        void manageLanServer().then(() => refreshTray())
+        // 切到工作台：dsh-app://app/ 的所有请求都由 Host 处理（含 __DSH_TRANSPORT__ 注入）
+        win?.loadApp()
         refreshTray()
         // API Key 自检（异步，不阻塞）：失效时托盘/通知给出明确提示
         void runApiKeyCheck()
@@ -1162,17 +1105,14 @@ async function main(): Promise<void> {
         setTimeout(() => flushPendingDeepLinks(), 2500)
       },
       onExit: ({ code, signal, willRestart }) => {
-        log('info', `harness exited code=${code} signal=${String(signal)} willRestart=${willRestart}`)
+        log('info', `host exited code=${code} signal=${String(signal)} willRestart=${willRestart}`)
         // 保底启动（安全模式）：自上次 ready 以来非零码退出 → 记一次失败；
-        // 连续失败达阈值 → 自动进入安全模式，重写 overlay（仅 bridge），
-        // harness 的自动重启会读取同一 overlay 文件 → 插件全部停用，应用保底可打开
+        // 连续失败达阈值 → 自动进入安全模式：profile bundles 只留官方基线 + bridge，
+        // Host 的自动重启会读到同一 profile → 插件全部停用，应用保底可打开
         if (code !== 0 && !harnessEverReady) {
           const st = recordStartFailure(safeModeFile())
           log('error', `safe mode: 连续启动失败 ${st.failCount}/${SAFE_MODE_THRESHOLD}${st.safeMode ? ' → 已进入安全模式' : ''}`)
           if (st.safeMode) {
-            overlayPath = regenerateOverlay(resourcesDir, launchToken || randomBytes(16).toString('hex'))
-            // 安全模式隔离 bundle 层：临时把非官方组合包移出 bundles（备份可恢复），
-            // 保证 harness 崩溃时只剩官方 bundle + bridge，应用保底可打开
             if (isolateProfileForSafeMode(desktopProfileDir())) {
               log('info', 'safe mode: profile bundles isolated (only official bundles kept)')
             }
@@ -1189,53 +1129,85 @@ async function main(): Promise<void> {
         refreshTray()
       },
       onLog: (stream, line) => {
-        log(stream === 'stdout' ? 'info' : 'error', `[harness:${stream}] ${line}`)
+        // 发现行带本次运行 token：日志脱敏后再落盘（token 只该存在于内存里的握手）
+        log(stream === 'stdout' ? 'info' : 'error', `[host:${stream}] ${redactBridgeLine(line)}`)
+        // bridge 插件的发现行（stdout）：壳↔harness 通道的 ws 端口 + 本次运行 token
+        if (stream === 'stdout') parseBridgeLine(line)
         // 记录启动失败摘要（onReady 时清空）：安全模式托盘区向用户展示可读原因
         if (stream === 'stderr' && /^Error:/.test(line.trim())) {
           lastHarnessError = line.trim().slice(0, 220)
         }
       },
       onState: (s) => {
-        if (s === 'starting') {
-          if (!lastUrl) win?.showLoading(undefined, resolveThemePreference(dshHome()))
-        }
+        if (s === 'starting' && !harnessEverReady) win?.showLoading(undefined, resolveThemePreference(dshHome()))
         refreshTray()
       },
     },
   )
 
-  // 局域网访问：harness 保持回环监听 + 把候选局域网 IP 加入信任围栏（start 前应用）
+  // 局域网访问：目标地址在 Host ready 后才会启用
   await applyLanNetwork()
 
   bridge = new BridgeClient(
-    () => {
-      const r = harness.ready
-      return r?.bridgePort != null && r.token ? { port: r.bridgePort, token: r.token } : null
-    },
+    () => (bridgeTarget !== null ? bridgeTarget : null),
     {
       onEvent: handleBridgeEventWrapper,
-      onConnected: (connected) => {
-        if (connected) {
-          // 自检：验证 shell -> harness RPC 通路
-          void bridge
-            .call('ping')
-            .then(() => log('info', 'bridge RPC self-test OK'))
-            .catch((err) => log('error', `bridge RPC self-test failed: ${err instanceof Error ? err.message : String(err)}`))
-          if (pendingRegisterWorkspace) {
-            const dir = pendingRegisterWorkspace
-            pendingRegisterWorkspace = null
-            void bridge
-              .call('workspace.register', { path: dir })
-              .then(() => log('info', `workspace registered: ${dir}`))
-              .catch((err) => log('error', `workspace register failed: ${err instanceof Error ? err.message : String(err)}`))
+      onConnected: (connected, hello) => {
+        bridgeConnected = connected
+        if (!connected) {
+          bridgePeerProtocol = null
+          // 断开 = harness 进程已退出/重启：后台任务/待审批随进程消失，必须复位
+          // （新进程的增量只会覆盖、不会清零，否则徽标/提醒会一直挂着旧状态）
+          if (runningJobs !== 0 || pendingApprovals.size !== 0) {
+            runningJobs = 0
+            pendingApprovals = new Map()
+            setBadge(0)
+          }
+          refreshTray()
+          return
+        }
+        bridgePeerProtocol = hello?.protocolVersion ?? null
+        if (hello?.diag !== undefined && hello.diag !== null) {
+          const d = diagOf(hello.diag)
+          if (d !== null) bridgeDiag = d
+        }
+        // 协议不同代（profile 层替换过 bundle / 版本漂移）：报错并标注在托盘，但不掐断——
+        // 增量字段是加法式的，旧壳仍能用已认识的部分。
+        if (bridgePeerProtocol !== BRIDGE_PROTOCOL_VERSION) {
+          log(
+            'error',
+            `bridge protocol mismatch: shell v${BRIDGE_PROTOCOL_VERSION} vs plugin v${String(bridgePeerProtocol ?? 'unknown')}`,
+          )
+          if (!bridgeProtocolNotified) {
+            bridgeProtocolNotified = true
+            notify('桥接协议不匹配', 'dsh-desktop-bridge 与本应用版本不同步，部分桌面功能可能失效。请重新安装或更新应用。')
           }
         }
+        refreshTray()
+        // 自检：验证 shell -> harness RPC 通路
+        void bridge
+          .call('ping')
+          .then(() => log('info', 'bridge RPC self-test OK'))
+          .catch((err) => log('error', `bridge RPC self-test failed: ${err instanceof Error ? err.message : String(err)}`))
+        // 重连/重启后事件增量已丢失：拉一次快照整份对齐（徽标 + 会话目录 + 待审批）
+        void bridge
+          .call('dashboard.snapshot')
+          .then((snapshot) => {
+            const state = handleBridgeSnapshot(snapshot, { setBadge })
+            runningJobs = state.running
+            sessionIndex = state.sessions
+            pendingApprovals = state.approvals
+            refreshTray()
+          })
+          .catch((err) => log('error', `bridge snapshot failed: ${err instanceof Error ? err.message : String(err)}`))
+        // 桥接可用后重跑一次 API Key 自检（首启时桥接可能还没连上，走的文件回退）
+        if (!apiKeyNotified) void runApiKeyCheck()
       },
     },
   )
 
   trayHandle = createTray(path.join(resourcesDir, 'icons', 'tray.png'), {
-    getUrl: () => lanUrl ?? harness?.ready?.url ?? lastUrl,
+    getUrl: () => lanUrl,
     getState: () => ({
       autoStart: settings.autoStart,
       notifications: settings.notifications,
@@ -1243,52 +1215,54 @@ async function main(): Promise<void> {
       lanShare: settings.lanShare,
       lanUrl,
       runningJobs,
-      harnessState: harness?.state === 'ready' ? '运行中' : harness?.state === 'starting' ? '启动中' : '已停止',
+      harnessState: host?.state === 'ready' ? '运行中' : host?.state === 'starting' ? '启动中' : '已停止',
       globalShortcut: currentShortcut(),
       appVersion: app.getVersion(),
       harnessVersion,
       safeMode: isSafeMode(safeModeFile()),
       lastHarnessError,
       apiKey: apiKeyStatus,
+      bridge: {
+        connected: bridgeConnected,
+        jobs: bridgeJobsState(),
+        protocol: bridgeProtocolState(),
+        pending: pendingApprovals.size,
+        lastCode: bridgeDiag?.code ?? null,
+      },
+      recentSessions: recentSessions(sessionIndex, 8).map((entry) => ({
+        id: entry.id,
+        label: entry.live ? `${sessionLabel(entry, entry.id)}` : `${sessionLabel(entry, entry.id)}（历史）`,
+      })),
     }),
+    pendingSessionId: () => latestApproval(pendingApprovals)?.sessionId ?? null,
+    openSession: (sessionId) => {
+      if (!sessionId) return
+      void handleDeepLink({ kind: 'session', sessionId })
+    },
     showWindow,
     openBrowser,
     pickWorkspace: () => void pickWorkspace(),
+    // 插件列表 = profile 里已安装的组合包（官方模型：dependencies + bundles）：
+    // bridge 与官方基线永不可卸；其余可停用（移出 bundles，代码保留）或卸载（pnpm remove）
     getPlugins: () => {
-      const base = listDesktopPlugins(path.join(appResourcesDir(), 'plugins'), userPluginsDir()).map((p) => ({
-        name: p.name,
-        dir: p.dir,
-        version: p.version ?? undefined,
-        source: p.source,
-        enabled: isReservedPluginName(p.name) || !settings.disabledPlugins.includes(p.name),
-        locked: isReservedPluginName(p.name),
-      }))
-      // 官方 `dsh plugin add` 安装的组合包：列出「已安装（含未挂载）」，
-      // 勾选状态 = 是否已挂载（取消挂载后仍显示，可随时重新挂载或完整卸载）
-      const mountedSet = new Set(
-        readProfileBundles(desktopProfileDir()).filter((b) => b !== '@deepseek-ai/dsh-base' && b !== '@deepseek-ai/dsh-web-app'),
-      )
-      const bundles = listInstalledBundleNames(desktopProfileDir()).filter((b) => !base.some((x) => x.name === b))
-      const bundleVersion = (name: string): string | undefined => {
+      const mounted = new Set(readProfileBundles(desktopProfileDir()))
+      const versionOf = (name: string): string | undefined => {
         try {
           const p = JSON.parse(
-            readTextNoBom(path.join(desktopProfileDir(), 'node_modules', name, 'package.json')),
+            readFileSync(path.join(desktopProfileDir(), 'node_modules', name, 'package.json'), 'utf8'),
           ) as { version?: unknown }
           return typeof p.version === 'string' ? p.version : undefined
         } catch {
           return undefined
         }
       }
-      return [
-        ...base,
-        ...bundles.map((b) => ({
-          name: b,
-          version: bundleVersion(b),
-          source: 'bundle' as const,
-          enabled: mountedSet.has(b),
-          locked: false,
-        })),
-      ]
+      return listInstalledBundleNames(desktopProfileDir()).map((name) => ({
+        name,
+        version: versionOf(name),
+        source: 'bundle' as const,
+        enabled: mounted.has(name),
+        locked: isReservedPluginName(name),
+      }))
     },
     togglePlugin: (name, enabled) => {
       if (isReservedPluginName(name)) return
@@ -1301,25 +1275,25 @@ async function main(): Promise<void> {
     // 组合包（bundle）插件的快捷挂载开关：取消挂载=移出 bundles（保留代码可恢复）
     toggleBundleMount: (name, mounted) =>
       void (async () => {
-        // 先停 harness：运行中的热监听会把 profile manifest 改动覆盖回滚
-        await stopHarnessBeforePluginOp()
+        // 先停 Host：Host 常驻时改动 profile manifest 会被热监听覆盖回滚
+        await stopHostBeforePluginOp()
         const ok = setBundleMounted(desktopProfileDir(), name, mounted)
         log('info', `bundle ${name} mounted=${ok}`)
         refreshTray()
         await restartHarness()
       })(),
     installPlugin: () => void installPluginFromDialog(),
-    uninstallPlugin: (name, kind, dir) => void uninstallPluginFromDialog(name, kind, dir),
+    uninstallPlugin: (name) => void uninstallPluginFromDialog(name),
     exitSafeMode: () => void exitSafeModeFromTray(),
     enterSafeMode: () => void enterSafeModeFromTray(),
     restartHarness: () => void restartHarness(),
     openLogs: () => void shell.openPath(logDirPath()),
     cleanLogs: () => cleanLogs(),
     uninstall: () => uninstallApp(),
-    // 手动「检查并更新…」：外壳 + 框架一起查，有新版就本地下载/替换（右上角小卡片进度）
+    // 手动「检查并更新…」：官方桌面端只有一个更新单元（壳 + dsh 运行时一起换），
+    // 因此查的就是外壳自己的更新流（electron-updater → GitHub Releases）
     checkUpdate: () => {
       void checkNow(true)
-      void doHarnessUpdate(true)
     },
     setAutoStart: (v) => {
       settings.autoStart = v
@@ -1337,28 +1311,34 @@ async function main(): Promise<void> {
       saveSettings(settingsFile, settings)
       refreshTray()
     },
-    // 局域网访问开关：开启 → 重启 harness 加入信任围栏，ready 后台起反向代理（手机访问需电脑授权）；
-    // 关闭 → 立即停代理并重启 harness。不改 harness 监听地址，本机 127.0.0.1 始终可用。
+    // 局域网访问开关：开启 → 立即起对外门面（手机首访需本机授权）；关闭 → 立即断开。
+    // 后端无监听端口，因此不重启 Host、也不影响本机窗口。
     setLanShare: (v) => {
       settings.lanShare = v
       saveSettings(settingsFile, settings)
-      refreshTray()
       if (!v) {
-        // 立刻断开对外：停止代理，避免未经授权仍可访问
-        void (async () => {
-          if (lanHandle) {
-            await lanHandle.stop()
-            lanHandle = null
-          }
-          lanUrl = null
+        void manageLanServer().then(() => {
           refreshTray()
-        })()
-      } else if (lanCandidates().length === 0) {
-        notify('局域网访问已开启', '未发现局域网网卡 IPv4，无法对外提供服务。', () => showWindow())
-      } else {
-        notify('局域网访问已开启', '正在重启 harness 以开放局域网（手机/其它设备首次访问需在本机授权）。', () => showWindow())
+          notify('局域网访问已关闭', '对外地址已停止服务。', () => showWindow())
+        })
+        return
       }
-      void restartHarness()
+      void (async () => {
+        await applyLanNetwork()
+        if (lanIp === null) {
+          notify('局域网访问已开启', '未发现局域网网卡 IPv4，无法对外提供服务。', () => showWindow())
+          refreshTray()
+          return
+        }
+        await manageLanServer()
+        refreshTray()
+        notify(
+          '局域网访问已开启',
+          `地址已复制到剪贴板：${lanUrl ?? ''}\n手机/其它设备首次访问需在本机确认授权。`,
+          () => showWindow(),
+        )
+        if (lanUrl) void clipboard.writeText(lanUrl)
+      })()
     },
     // 复制局域网地址到剪贴板（供同网段设备浏览器打开）
     copyLanUrl: () => {
@@ -1374,7 +1354,6 @@ async function main(): Promise<void> {
 
   registerIpc({
     getWindow: () => win?.win ?? null,
-    harness,
     bridge,
     pickWorkspace,
     restartHarness: () => void restartHarness(),
@@ -1445,13 +1424,6 @@ async function main(): Promise<void> {
   )
   // 启动后：若上次下载完但没装，重新显示「安装更新」卡片（跨重启不丢）
   setTimeout(() => maybeResumePendingUpdate(), 4000)
-  // 更新：总开关「自动更新」= 冷启动自动检查一次（外壳 15s 下载 + 框架 30s 本地替换）；
-  // 关闭则只保留手动「检查并更新…」。
-  if (settings.autoUpdate) {
-    // 第 1 层·外壳：启动 15s 后自动检查（electron-updater）
-    // 第 2 层·框架：仅冷启动 30s 后检查一次，有新版自动下载替换（进度条 + 重启）
-    setTimeout(() => void doHarnessUpdate(false), 30_000)
-  }
 
   app.on('second-instance', (_e, argv) => {
     consumeDeepLinkArgv(argv)
@@ -1484,7 +1456,7 @@ async function main(): Promise<void> {
     }, 1500)
   }
 
-  harness.start()
+  host.start()
 }
 
 app.on('before-quit', (e) => {
@@ -1493,7 +1465,7 @@ app.on('before-quit', (e) => {
     quitForUpdateInstall = false
     log('info', 'before-quit: update install flow, allowing normal quit')
     try {
-      harness?.killNow()
+      host?.killNow()
     } catch {
       /* ignore */
     }
@@ -1502,7 +1474,7 @@ app.on('before-quit', (e) => {
   if (quitting) return
   e.preventDefault()
   quitting = true
-  log('info', 'quitting: stopping harness')
+  log('info', 'quitting: stopping host')
   unregisterAllShortcuts()
   // 停局域网代理，断开所有外部设备
   if (lanHandle) {
@@ -1511,7 +1483,7 @@ app.on('before-quit', (e) => {
     void h.stop()
   }
   bridge?.stop()
-  void harness
+  void host
     ?.stop()
     .catch((err) => log('error', `stop failed: ${err instanceof Error ? err.message : String(err)}`))
     .finally(() => app.exit(0))

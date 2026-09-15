@@ -36,10 +36,25 @@ export interface TrayDeps {
     /** 最近一次 harness 启动失败摘要（ready 后清空） */
     lastHarnessError: string | null
     /** DeepSeek API Key 自检结果（null=检测中/未检测） */
-    apiKey: { ok: boolean; detail: string } | null
+    apiKey: { ok: boolean; detail: string; verdict: 'ok' | 'invalid' | 'unknown' } | null
+    /** 桥接通道状态（壳 ↔ harness 唯一通道；诊断来自插件 bridge.diag 与握手回执） */
+    bridge: {
+      connected: boolean
+      /** jobs 服务是否可见（null=未知）：不可见时徽标/任务通知不可用 */
+      jobs: 'present' | 'absent' | null
+      protocol: 'ok' | 'mismatch' | 'unknown'
+      /** 待审批条数（approval.asked 入、approval.decided 出） */
+      pending: number
+      /** 最新诊断码（排障用；如 auth.rejected / ws.server.error） */
+      lastCode: string | null
+    }
+    /** 最近会话（快照 + sessions.changed 增量；点击直达） */
+    recentSessions: { id: string; label: string }[]
   }
   getPlugins: () => DesktopPluginToggle[]
   showWindow: () => void
+  /** 点击托盘会话条目 / 待审批条目：跳到该会话（复用 dsh:// 深链路径） */
+  openSession: (sessionId: string) => void
   openBrowser: () => void
   pickWorkspace: () => void
   restartHarness: () => void
@@ -50,6 +65,8 @@ export interface TrayDeps {
   togglePlugin: (name: string, enabled: boolean) => void
   /** 组合包（bundle）插件快捷挂载开关：取消勾选=取消挂载（保留代码，可再勾选恢复） */
   toggleBundleMount: (name: string, mounted: boolean) => void
+  /** 最新一条待审批所属会话；没有可跳转的目标时返回 null（托盘条目据此禁用） */
+  pendingSessionId: () => string | null
   /** 托盘「安装插件…」：输入官方 spec（npm/github/路径/tgz）→ dsh plugin add → 重启生效 */
   installPlugin: () => void
   /** 托盘「卸载插件」：bundle=官方 remove，user=删除目录；确认 + 重启生效 */
@@ -71,6 +88,13 @@ export interface TrayHandle {
   refresh: () => void
 }
 
+/** jobs 服务可见性的托盘文案。 */
+function bridgeJobsLabel(jobs: 'present' | 'absent' | null): string {
+  if (jobs === 'present') return 'jobs present'
+  if (jobs === 'absent') return 'jobs 不可用（任务徽标/通知失效）'
+  return 'jobs 未知'
+}
+
 export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
   let image = nativeImage.createFromPath(iconPath)
   if (image.isEmpty()) image = nativeImage.createEmpty()
@@ -88,13 +112,44 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
         label: `Harness: ${s.harnessState}${s.runningJobs > 0 ? `（${s.runningJobs} 个任务运行中）` : ''}`,
         enabled: false,
       },
+      {
+        // 桥接状态：通知/徽标/深链都走这条通道，"连上了吗、jobs 在不在"必须一眼可见
+        label: s.bridge.connected
+          ? `桥接：已连接 · ${bridgeJobsLabel(s.bridge.jobs)}${
+              s.bridge.protocol === 'mismatch' ? ' ⚠ 协议不匹配' : s.bridge.protocol === 'unknown' ? ' ⚠ 版本未知' : ''
+            }`
+          : `桥接：未连接${s.bridge.lastCode ? `（${s.bridge.lastCode}）` : ''}`,
+        enabled: false,
+      },
+      ...(s.bridge.pending > 0
+        ? ([
+            {
+              label: `待审批：${s.bridge.pending} 条（点击查看）`,
+              click: () => deps.openSession(deps.pendingSessionId() ?? ''),
+              enabled: deps.pendingSessionId() !== null,
+            },
+          ] as const)
+        : []),
+      ...(s.recentSessions.length > 0
+        ? ([
+            {
+              label: '最近会话',
+              submenu: s.recentSessions.map((session) => ({
+                label: session.label.length > 60 ? `${session.label.slice(0, 60)}…` : session.label,
+                click: () => deps.openSession(session.id),
+              })),
+            },
+          ] as const)
+        : []),
       { label: '重启 Harness', click: () => deps.restartHarness() },
       {
         // DeepSeek API Key 自检状态（只读）：防止「key 失效/未落盘」被误判为配置错误
         label: s.apiKey
-          ? s.apiKey.ok
-            ? 'DeepSeek API Key：有效'
-            : 'DeepSeek API Key：无效（请到设置→模型更新）'
+          ? s.apiKey.verdict === 'ok'
+            ? `DeepSeek API Key：有效`
+            : s.apiKey.verdict === 'invalid'
+              ? 'DeepSeek API Key：无效（请到设置→模型更新）'
+              : 'DeepSeek API Key：状态未知（网络/服务异常，见日志）'
           : 'DeepSeek API Key：检测中…',
         enabled: false,
       },
@@ -171,15 +226,15 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
         label: '设置',
         submenu: [
           {
-            // 总开关：开 = 冷启动自动检查（框架下载 + 官方 Harness 本地替换）；关 = 仅手动
-            // 常显两个当前版本：框架（DSH Desktop） + 官方 Harness（DeepSeek Harness 本体）
+            // 总开关：开 = 冷启动自动检查下载（官方模型：壳 + dsh 运行时是一个签名更新单元）；
+            // 关 = 仅手动。常显两个版本号便于核对绑定关系（框架 = 本次发版号，官方 Harness = 随包 dsh）
             label: `自动更新（框架 v${s.appVersion} · 官方 Harness v${s.harnessVersion ?? '—'}）`,
             type: 'checkbox' as const,
             checked: s.autoUpdate,
             click: (item) => deps.setAutoUpdate(item.checked),
           },
           {
-            // 手动：检查外壳 + 框架，有新版自动下载/替换（本地，不跳浏览器）
+            // 手动：检查桌面端更新（一处更新即同时换壳与随包 dsh 运行时）
             label: '检查并更新…',
             click: () => deps.checkUpdate(),
           },

@@ -1,16 +1,23 @@
 /**
- * 开发启动：build（plugins 复制到 resources/plugins）→ electron .
+ * 开发启动：build（壳 dist/）→ 增量准备随包运行时树 → electron .
  *
- * 说明：曾用 dev-link（junction 把 packages/* 链接进 profile node_modules），
- * 但 Windows junction 在 ensureProfile 重建/清理时会被 rmSync 穿透，
- * 曾误删 packages/bridge 与 packages/ui-dashboard 源码——已移除该机制；
- * build.mjs 把 packages/* 复制到 resources/plugins，ensureProfile 负责
- * 同步进 profile，dev 与打包版走完全相同的插件加载链路。
+ * 开发与打包走**完全相同**的加载链路：Host 从 resources/dsh 引导 profile，
+ * 第一方包（bridge / host）作为共享包 junction 链接进 profile。因此 dev 前必须
+ * 先有运行时树（setup-runtime 增量执行，源码未变时不联网、秒过）。
  */
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import path from 'node:path'
 
 await import('./build.mjs')
+
+// 运行时树（resources/runtime + resources/dsh）是 Host 的加载目标：缺失/源码有变时增量重建。
+// 增量判据用源码哈希，日常改壳代码不会触发重装（不联网、不重下 Node）。
+console.log('[dev] ensuring packaged runtime tree (incremental)…')
+const setup = spawnSync(process.execPath, [path.resolve('scripts', 'setup-runtime.mjs')], { stdio: 'inherit' })
+if (setup.status !== 0) {
+  console.error('[dev] setup-runtime 失败：Host 无法启动（见上方输出）')
+  process.exit(setup.status ?? 1)
+}
 
 const exe =
   process.platform === 'win32'

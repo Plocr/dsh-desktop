@@ -6,6 +6,17 @@ name: build-release
 # 运行时便携 Node 通过 DSH_RUNTIME_NODE_ARCH 显式指定目标架构，避免打进错误架构的 Node）。
 # 产物按平台前缀命名，互不覆盖。
 # 手动触发（workflow_dispatch）：必须指定 tag 名（如 v0.4.1），上传到该 Release。
+#
+# 签名/公证（可选，全部走 secrets，缺失时自动降级为未签名构建）：
+#   Windows：EV 证书（SafeNet Token）+ 自定义 signtool 钩子，见 docs/SIGNING.md。
+#     需要 (DSH_WIN_CER_BASE64, DSH_WIN_SIGNTOOL, DSH_WIN_KEY_CONTAINER, DSH_WIN_TOKEN_PIN)
+#     四个 secret 同时存在；Token 必须插在 runner 上，因此签名构建需把仓库变量
+#     DSH_WINDOWS_RUNNER 指向挂了 Token 的 self-hosted Windows runner（未设置时
+#     仍是 windows-latest，只会走未签名路径）。
+#   macOS：Developer ID Application 证书 + notarytool 公证，见 docs/SIGNING.md。
+#     需要 (MAC_CSC_LINK, MAC_CSC_KEY_PASSWORD, MAC_SIGNING_IDENTITY, MAC_TEAM_ID)
+#     以及一套公证凭据 (APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID)
+#     （或改用 API Key / 钥匙串 profile，见文档）。
 on:
   push:
     branches:
@@ -38,11 +49,43 @@ jobs:
       - name: Test
         run: npm test
 
+  # 端到端契约（真实随包 dsh + Host 字节管道 + bridge 插件）：Windows runner。
+  # 这条链路是"插件/壳在真实运行时树里静默失灵"唯一能被挡住的门，PR 也要跑；
+  # 运行时树命中上面的缓存时只要几分钟（首次或缓存失效另算）。
+  e2e:
+    needs: check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install deps
+        run: npm ci
+      - name: Cache dsh runtime（命中则跳过 20-30 分钟 npm install）
+        uses: actions/cache@v4
+        with:
+          path: |
+            resources/dsh
+            resources/runtime
+            resources/.dsh-runtime-cache.json
+          key: dsh-runtime-${{ runner.os }}-${{ runner.arch }}-x64-${{ hashFiles('scripts/setup-runtime.mjs', 'packages/bridge/package.json', 'packages/host/package.json', 'package.json') }}
+          restore-keys: |
+            dsh-runtime-${{ runner.os }}-${{ runner.arch }}-
+      - name: Build app + runtime
+        run: node scripts/build.mjs
+      - name: Prepare runtime
+        run: node scripts/setup-runtime.mjs
+      - name: "E2E: bridge contract over real dsh"
+        run: node scripts/e2e-bridge.mjs
+
   # 重量级构建（含 20-30 分钟运行时安装）只在打 tag / 手动触发时跑；
-  # master 与 PR 只跑上方 check，避免每次 push 白烧时长与上传到不存在 release 的失败。
+  # master 与 PR 只跑上方 check + e2e，避免每次 push 白烧时长与上传到不存在 release 的失败。
   build-windows:
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
-    runs-on: windows-latest
+    # 默认 GitHub 托管 runner；要用 EV Token 签名时把仓库变量 DSH_WINDOWS_RUNNER
+    # 指向挂着 SafeNet Token 的 self-hosted Windows runner。
+    runs-on: ${{ vars.DSH_WINDOWS_RUNNER || 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -53,8 +96,12 @@ jobs:
       - name: Cache dsh runtime（命中则跳过 20-30 分钟 npm install）
         uses: actions/cache@v4
         with:
-          path: resources/dsh-runtime
-          key: dsh-runtime-${{ runner.os }}-${{ runner.arch }}-x64-${{ hashFiles('scripts/setup-runtime.mjs', 'packages/bridge/package.json') }}
+          # setup-runtime 的真实产物（旧路径 resources/dsh-runtime 不存在，缓存从未命中过）
+          path: |
+            resources/dsh
+            resources/runtime
+            resources/.dsh-runtime-cache.json
+          key: dsh-runtime-${{ runner.os }}-${{ runner.arch }}-x64-${{ hashFiles('scripts/setup-runtime.mjs', 'packages/bridge/package.json', 'packages/host/package.json', 'package.json') }}
           restore-keys: |
             dsh-runtime-${{ runner.os }}-${{ runner.arch }}-
       - name: Build app + runtime
@@ -62,8 +109,50 @@ jobs:
           node scripts/build.mjs
           node scripts/make-icons.mjs
           node scripts/setup-runtime.mjs
+      # 四个签名 secret 全部存在 → 启用 EV 签名；缺任意一个 → enabled=false，
+      # 下方打包步骤不注入任何 DSH_DESKTOP_WINDOWS_* 变量，走未签名路径。
+      - name: Detect Windows EV signing secrets
+        id: windows-signing
+        shell: pwsh
+        env:
+          DSH_WIN_CER_BASE64: ${{ secrets.DSH_WIN_CER_BASE64 }}
+          DSH_WIN_SIGNTOOL: ${{ secrets.DSH_WIN_SIGNTOOL }}
+          DSH_WIN_KEY_CONTAINER: ${{ secrets.DSH_WIN_KEY_CONTAINER }}
+          DSH_WIN_TOKEN_PIN: ${{ secrets.DSH_WIN_TOKEN_PIN }}
+        run: |
+          if ("$env:DSH_WIN_CER_BASE64" -and "$env:DSH_WIN_SIGNTOOL" -and "$env:DSH_WIN_KEY_CONTAINER" -and "$env:DSH_WIN_TOKEN_PIN") {
+            $dir = Join-Path $env:RUNNER_TEMP 'dsh-signing'
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            $cer = Join-Path $dir 'leaf.cer'
+            [IO.File]::WriteAllBytes($cer, [Convert]::FromBase64String($env:DSH_WIN_CER_BASE64))
+            "enabled=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "cer_path=$cer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            Write-Output "Windows EV signing enabled; public certificate written to $cer"
+          } else {
+            "enabled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "cer_path=" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            Write-Output "Windows EV signing secrets are absent; building an unsigned installer"
+          }
       - name: Package NSIS installer
+        env:
+          # 空值 = 未配置：scripts/windows-sign.mjs 只在四个变量齐全时才签名，
+          # 只配置一部分会直接报错（避免误判为已签名）。
+          DSH_DESKTOP_WINDOWS_CER_FILE: ${{ steps.windows-signing.outputs.cer_path }}
+          DSH_DESKTOP_WINDOWS_SIGNTOOL: ${{ secrets.DSH_WIN_SIGNTOOL }}
+          DSH_DESKTOP_WINDOWS_KEY_CONTAINER: ${{ secrets.DSH_WIN_KEY_CONTAINER }}
+          DSH_DESKTOP_WINDOWS_TOKEN_PIN: ${{ secrets.DSH_WIN_TOKEN_PIN }}
         run: npx electron-builder --win nsis --publish never
+      # 签名构建的硬校验：安装包必须带有效 Authenticode 签名（否则前面静默降级会漏掉）
+      - name: Verify Authenticode signature (signed builds only)
+        if: steps.windows-signing.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $installer = "release/DSH.Desktop-$version-setup.exe"
+          if (-not (Test-Path $installer)) { throw "missing installer $installer" }
+          $signature = Get-AuthenticodeSignature $installer
+          $signature | Format-List Status, StatusMessage, SignerCertificate
+          if ($signature.Status -ne 'Valid') { throw "Authenticode signature is $($signature.Status)" }
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -97,8 +186,12 @@ jobs:
       - name: Cache dsh runtime（命中则跳过 20-30 分钟 npm install）
         uses: actions/cache@v4
         with:
-          path: resources/dsh-runtime
-          key: dsh-runtime-${{ runner.os }}-${{ runner.arch }}-arm64-${{ hashFiles('scripts/setup-runtime.mjs', 'packages/bridge/package.json') }}
+          # setup-runtime 的真实产物（旧路径 resources/dsh-runtime 不存在，缓存从未命中过）
+          path: |
+            resources/dsh
+            resources/runtime
+            resources/.dsh-runtime-cache.json
+          key: dsh-runtime-${{ runner.os }}-${{ runner.arch }}-arm64-${{ hashFiles('scripts/setup-runtime.mjs', 'packages/bridge/package.json', 'packages/host/package.json', 'package.json') }}
           restore-keys: |
             dsh-runtime-${{ runner.os }}-${{ runner.arch }}-
       - name: Build app + runtime
@@ -106,7 +199,53 @@ jobs:
           node scripts/build.mjs
           node scripts/make-icons.mjs
           node scripts/setup-runtime.mjs
-      - name: Package DMG (arm64)
+      # 签名 + 公证凭据齐全 → enabled=true；否则走下方未签名打包步骤。
+      - name: Detect macOS signing secrets
+        id: mac-signing
+        shell: bash
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          MAC_SIGNING_IDENTITY: ${{ secrets.MAC_SIGNING_IDENTITY }}
+          MAC_TEAM_ID: ${{ secrets.MAC_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$MAC_CSC_LINK" ] && [ -n "$MAC_CSC_KEY_PASSWORD" ] && [ -n "$MAC_SIGNING_IDENTITY" ] && [ -n "$MAC_TEAM_ID" ] \
+             && [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "macOS signing + notarization enabled"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "macOS signing secrets are absent; building an unsigned dmg"
+          fi
+      - name: Package DMG (arm64, signed + notarized)
+        if: steps.mac-signing.outputs.enabled == 'true'
+        timeout-minutes: 90
+        env:
+          # electron-builder 用 CSC_LINK 建立临时钥匙串并导入 .p12；identity 用命令行显式指定，
+          # 不接受钥匙串里“第一个匹配”的证书（与官方桌面端一致）。
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          DSH_DESKTOP_MACOS_SIGNING_IDENTITY: ${{ secrets.MAC_SIGNING_IDENTITY }}
+          DSH_DESKTOP_MACOS_TEAM_ID: ${{ secrets.MAC_TEAM_ID }}
+          DSH_DESKTOP_APP_ID: com.dsh.desktop.workbench
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # 1) 构建并签名 .app + DMG（forceCodeSigning=true：找不到指定证书时直接失败，不产出未签名产物；
+          #    mac.notarize=false：App 公证交给下面脚本统一处理，避免重复提交）
+          npx electron-builder --mac dmg --arm64 --publish never \
+            --config.mac.identity="$DSH_DESKTOP_MACOS_SIGNING_IDENTITY" \
+            --config.mac.forceCodeSigning=true \
+            --config.mac.notarize=false
+          # 2) 核对 .app 签名身份 → notarytool 公证 DMG → stapler 装订 → spctl 验证
+          #    （装订后 dmg 字节变化，脚本会删掉已过期的 *.dmg.blockmap）
+          node scripts/package-macos.mjs --release-dir release --arch arm64 --require-signing
+      - name: Package DMG (arm64, unsigned)
+        if: steps.mac-signing.outputs.enabled != 'true'
         run: npx electron-builder --mac dmg --arm64 --publish never
       - name: Upload to release
         env:
@@ -119,7 +258,10 @@ jobs:
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes
           fi
-          gh release upload "$RELEASE_TAG" release/*arm64*.dmg release/*arm64*.dmg.blockmap --clobber
+          # 公证装订后 blockmap 会被删除（装订改变了 dmg 字节），存在才上传
+          assets=(release/*arm64*.dmg)
+          if [ -e release/*arm64*.dmg.blockmap ]; then assets+=(release/*arm64*.dmg.blockmap); fi
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
 
   # macOS x64：原生 x64 构建。
   build-macos-x64:
@@ -140,8 +282,12 @@ jobs:
       - name: Cache dsh runtime（命中则跳过 20-30 分钟 npm install）
         uses: actions/cache@v4
         with:
-          path: resources/dsh-runtime
-          key: dsh-runtime-${{ runner.os }}-${{ runner.arch }}-x64-${{ hashFiles('scripts/setup-runtime.mjs', 'packages/bridge/package.json') }}
+          # setup-runtime 的真实产物（旧路径 resources/dsh-runtime 不存在，缓存从未命中过）
+          path: |
+            resources/dsh
+            resources/runtime
+            resources/.dsh-runtime-cache.json
+          key: dsh-runtime-${{ runner.os }}-${{ runner.arch }}-x64-${{ hashFiles('scripts/setup-runtime.mjs', 'packages/bridge/package.json', 'packages/host/package.json', 'package.json') }}
           restore-keys: |
             dsh-runtime-${{ runner.os }}-${{ runner.arch }}-
       - name: Build app + runtime
@@ -149,7 +295,46 @@ jobs:
           node scripts/build.mjs
           node scripts/make-icons.mjs
           node scripts/setup-runtime.mjs
-      - name: Package DMG (x64)
+      - name: Detect macOS signing secrets
+        id: mac-signing
+        shell: bash
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          MAC_SIGNING_IDENTITY: ${{ secrets.MAC_SIGNING_IDENTITY }}
+          MAC_TEAM_ID: ${{ secrets.MAC_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$MAC_CSC_LINK" ] && [ -n "$MAC_CSC_KEY_PASSWORD" ] && [ -n "$MAC_SIGNING_IDENTITY" ] && [ -n "$MAC_TEAM_ID" ] \
+             && [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "macOS signing + notarization enabled"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "macOS signing secrets are absent; building an unsigned dmg"
+          fi
+      - name: Package DMG (x64, signed + notarized)
+        if: steps.mac-signing.outputs.enabled == 'true'
+        timeout-minutes: 90
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          DSH_DESKTOP_MACOS_SIGNING_IDENTITY: ${{ secrets.MAC_SIGNING_IDENTITY }}
+          DSH_DESKTOP_MACOS_TEAM_ID: ${{ secrets.MAC_TEAM_ID }}
+          DSH_DESKTOP_APP_ID: com.dsh.desktop.workbench
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          npx electron-builder --mac dmg --x64 --publish never \
+            --config.mac.identity="$DSH_DESKTOP_MACOS_SIGNING_IDENTITY" \
+            --config.mac.forceCodeSigning=true \
+            --config.mac.notarize=false
+          node scripts/package-macos.mjs --release-dir release --arch x64 --require-signing
+      - name: Package DMG (x64, unsigned)
+        if: steps.mac-signing.outputs.enabled != 'true'
         run: npx electron-builder --mac dmg --x64 --publish never
       - name: Upload to release
         env:
@@ -162,7 +347,10 @@ jobs:
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes
           fi
-          gh release upload "$RELEASE_TAG" release/*x64*.dmg release/*x64*.dmg.blockmap --clobber
+          # 公证装订后 blockmap 会被删除（装订改变了 dmg 字节），存在才上传
+          assets=(release/*x64*.dmg)
+          if [ -e release/*x64*.dmg.blockmap ]; then assets+=(release/*x64*.dmg.blockmap); fi
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
 
   # macOS 多架构更新的关键：把两个架构各自生成的 latest-mac.yml 合并为一份
   # 含 arm64+x64 的 files[]，供 electron-updater 按 process.arch 挑选对应 dmg。
@@ -181,7 +369,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p dmg
-          gh release download "$RELEASE_TAG" --pattern '*.dmg' --pattern '*.dmg.blockmap' --dir dmg
+          gh release download "$RELEASE_TAG" --pattern '*.dmg' --dir dmg
+          # 公证装订后的 dmg 不再带 blockmap（上传步骤也会跳过），缺失不算失败
+          gh release download "$RELEASE_TAG" --pattern '*.dmg.blockmap' --dir dmg || true
           ls -la dmg
       - name: Merge latest-mac.yml
         run: node scripts/merge-mac-manifest.mjs ./dmg ./dmg/latest-mac.yml

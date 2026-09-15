@@ -1,19 +1,25 @@
 /**
- * 主窗口：加载 harness Web UI（http://127.0.0.1:<port>），
- * 内置 loading/error 过渡页；导航锁 + 外链拦截。
+ * 主窗口：加载 harness Web UI（dsh-app://app/，由主进程代理到回环 harness，
+ * 渲染层拿不到端口 —— 见 appProtocol.ts），内置 loading/error 过渡页；
+ * 导航锁 + 外链拦截。
  */
 import { BrowserWindow, nativeTheme, shell } from 'electron'
 import path from 'node:path'
 import { THEME_COLORS } from './theme'
+import { APP_ENTRY_URL, SHELL_ORIGIN } from './appProtocol'
+
+/** 窗口所用 session 分区（dsh-app:// 协议处理器必须装在这个分区上）。 */
+export const UI_PARTITION = 'persist:dsh-ui'
 
 export interface WindowHandle {
   win: BrowserWindow
-  loadApp: (url: string) => void
+  /** 切到工作台（harness 就绪后调用；地址固定为 dsh-app://app/）。 */
+  loadApp: () => void
   showLoading: (state?: string, theme?: 'light' | 'dark' | 'system') => void
   showError: (msg: string, theme?: 'light' | 'dark' | 'system') => void
   /**
    * 更新进度小卡片：在当前页面右上角注入一个非阻塞卡片（可关闭、不导航、不影响使用/最小化）。
-   * id 区分不同来源的卡片（外壳更新 / 官方 Harness 更新），互不覆盖与移除。
+   * id 区分不同来源的卡片，互不覆盖与移除。
    */
   showUpdateOverlay: (
     init: { pct?: number | null; detail: string; url?: string | null },
@@ -55,7 +61,7 @@ export function createWindow(
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      partition: 'persist:dsh-ui',
+      partition: UI_PARTITION,
     },
   })
 
@@ -74,9 +80,6 @@ export function createWindow(
 
   // 阻止页面尝试打开 devtools 以外的敏感能力；静默即可
   win.webContents.on('will-attach-webview', (e) => e.preventDefault())
-
-  const loadingPage = path.join(resourcesDir, 'shell-pages', 'loading.html')
-  const errorPage = path.join(resourcesDir, 'shell-pages', 'error.html')
 
   // 加载页最短显示时长：避免启动很快时 logo 一闪而过
   const MIN_LOADING_MS = 900
@@ -132,18 +135,18 @@ export function createWindow(
     })
   }
 
-  const loadApp = (url: string): void => {
+  const loadApp = (): void => {
     if (win.isDestroyed()) return
     const current = win.webContents.getURL()
     const doSwitch = (): void => {
-      if (current.startsWith('file://')) {
+      if (current.startsWith(SHELL_ORIGIN)) {
         // 加载页先淡出（0.35s），再切换——转场不突变
         void win.webContents
           .executeJavaScript(`window.__fadeOut ? window.__fadeOut() : Promise.resolve()`)
-          .then(() => loadURL(url))
-          .catch(() => loadURL(url))
+          .then(() => loadURL(APP_ENTRY_URL))
+          .catch(() => loadURL(APP_ENTRY_URL))
       } else {
-        loadURL(url)
+        loadURL(APP_ENTRY_URL)
       }
     }
     // 保证加载页至少展示了 MIN_LOADING_MS（避免闪现）
@@ -155,6 +158,12 @@ export function createWindow(
     }
   }
 
+  /** 壳页面地址（dsh-app://shell/<page>?…）：由 appProtocol 只读服务 resources/shell-pages。 */
+  const shellUrl = (page: string, query: Record<string, string>): string => {
+    const q = new URLSearchParams(query).toString()
+    return `${SHELL_ORIGIN}/${page}${q ? `?${q}` : ''}`
+  }
+
   const showLoading = (state?: string, themeArg?: 'light' | 'dark' | 'system'): void => {
     if (win.isDestroyed()) return
     loadingShownAt = Date.now()
@@ -164,14 +173,15 @@ export function createWindow(
     const query: Record<string, string> = {}
     if (state) query.state = state
     if (themeArg === 'light' || themeArg === 'dark') query.theme = themeArg
-    void win.loadFile(loadingPage, { query })
+    void win.loadURL(shellUrl('loading.html', query)).catch(() => undefined)
   }
 
   const showError = (msg: string, themeArg?: 'light' | 'dark' | 'system'): void => {
     if (win.isDestroyed()) return
-    const query: Record<string, string> = { msg }
+    // 页面用 decodeURIComponent 读取 msg → 这里先编码一次，避免 % 触发解码异常
+    const query: Record<string, string> = { msg: encodeURIComponent(msg) }
     if (themeArg === 'light' || themeArg === 'dark') query.theme = themeArg
-    void win.loadFile(errorPage, { query })
+    void win.loadURL(shellUrl('error.html', query)).catch(() => undefined)
   }
 
   /**
@@ -181,7 +191,7 @@ export function createWindow(
    */
   // 注入到页面里的卡片引导脚本：创建固定 div + 更新卡片内容
   // 下载完成时显示「安装更新并重启」按钮 → 调 window.dshDesktop.installUpdate()（壳 IPC 触发安装）
-  // id 由调用方传入：外壳更新卡与官方 Harness 更新卡使用不同 id，互不覆盖/移除
+  // id 由调用方传入：不同来源的卡片用不同 id，互不覆盖/移除
   const UPDATE_TOAST = `function(id,pct,detail,url){
   var ID=id;
   var el=document.getElementById(ID);

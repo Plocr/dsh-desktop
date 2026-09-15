@@ -5,6 +5,7 @@
  *  - RPC（workspace.register / runtime.info / ping）→ call()
  *  - 断线 1s 退避重连（harness 重启后 token/端口会更新，connect() 重新读取目标）
  */
+import { BRIDGE_PROTOCOL_VERSION } from './bridgeEvents'
 import { log } from './logger'
 
 export interface BridgeTarget {
@@ -12,9 +13,15 @@ export interface BridgeTarget {
   token: string
 }
 
+/** `authed` 回执：协议版本 + 插件最新诊断（壳用于同代判断与托盘状态）。 */
+export interface BridgeHello {
+  protocolVersion: number | null
+  diag: unknown
+}
+
 export interface BridgeHandlers {
   onEvent: (type: string, payload: unknown) => void
-  onConnected: (connected: boolean) => void
+  onConnected: (connected: boolean, hello?: BridgeHello) => void
 }
 
 interface Pending {
@@ -125,7 +132,7 @@ export class BridgeClient {
     ws.onopen = () => {
       if (!isCurrent()) return
       try {
-        ws.send(JSON.stringify({ type: 'auth', token: target.token }))
+        ws.send(JSON.stringify({ type: 'auth', token: target.token, protocolVersion: BRIDGE_PROTOCOL_VERSION }))
       } catch {
         /* ignore */
       }
@@ -141,7 +148,15 @@ export class BridgeClient {
       if (!msg || typeof msg.type !== 'string') return
       if (msg.type === 'authed') {
         this.connected = true
-        this.handlers.onConnected(true)
+        // 插件回执统一包成 {type, payload}（encode()）：版本号/诊断都在 payload 里。
+        // 版本 = 对面那半边的协议版本（不一致由 index.ts 报警并标注在托盘）。
+        const payload = (msg as { payload?: { protocolVersion?: unknown; diag?: unknown } }).payload
+        const reported = payload?.protocolVersion
+        const hello: BridgeHello = {
+          protocolVersion: typeof reported === 'number' && Number.isInteger(reported) ? reported : null,
+          diag: payload?.diag ?? null,
+        }
+        this.handlers.onConnected(true, hello)
         log('info', 'bridge connected')
       } else if (msg.type === 'result') {
         const id = msg.id

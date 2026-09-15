@@ -10,17 +10,22 @@ files:
   - dist/**
   - resources/profile-template/**
   - resources/shell-pages/**
-  - resources/plugins/**
   - resources/icons/**
   - package.json
 
-# 运行时以 tar.gz 分发（electron-builder 会剔除 extraResources 中的 node_modules，
-# 故由壳在首启解压到 %LOCALAPPDATA%/DSH Desktop/runtime）
+# 运行时随包分发（对齐官方 apps/desktop 的 extraResources 形状）：
+#   resources/runtime  便携 Node + pnpm（+ versions.json）
+#   resources/dsh      dsh 运行时树（+ desktop-runtime.json 完整性清单）
+# 官方要点：electron-builder 会剔除 extraResources 里源目录的**根 node_modules**，
+# 因此必须为 dsh/node_modules 再显式声明一条映射（官方 config 同款做法）。
+# 树本身已按 scripts/runtime-file-policy.mjs 裁剪，且带 sha256 清单（启动时校验）。
 extraResources:
-  - from: resources/dsh-runtime.tar.gz
-    to: dsh-runtime.tar.gz
-  - from: resources/runtime.version
-    to: runtime.version
+  - from: resources/runtime
+    to: runtime
+  - from: resources/dsh
+    to: dsh
+  - from: resources/dsh/node_modules
+    to: dsh/node_modules
 
 win:
   target:
@@ -29,6 +34,13 @@ win:
         - x64
   icon: resources/icons/icon.ico
   executableName: dsh-desktop
+  # 代码签名：脚本按环境变量决定（DSH_DESKTOP_WINDOWS_* + SafeNet EV 令牌）。
+  # 未配置签名环境时脚本显式跳过（不明文失败，保持可打未签名测试包）；
+  # 配置了一半则硬报错，绝不做「看起来签名了其实没签」的假签名。
+  signtoolOptions:
+    sign: ./scripts/windows-sign.mjs
+    signingHashAlgorithms:
+      - sha256
 
 mac:
   target:
@@ -47,9 +59,22 @@ mac:
     - name: DSH Desktop Link
       schemes:
         - dsh
+  # 签名/公证：CSC_*（证书）就绪时 electron-builder 自动签 .app；
+  # 公证与 stapling 由 scripts/package-macos.mjs 单独执行（未配置凭据时自动跳过），
+  # 因此这里关掉 electron-builder 自带的 notarize，避免两套流程互相干扰。
+  hardenedRuntime: true
+  notarize: false
+  # 随包运行时（resources/dsh 与 resources/runtime）是不可变的签名产物：
+  # 官方桌面端同样把它们排除在 electron-builder 签名之外（signIgnore），
+  # 否则会对上万条 dsh 依赖文件逐个签名（含原生模块），既慢又会被公证挑刺。
+  signIgnore:
+    - /Contents/Resources/dsh(?:/|$)
+    - /Contents/Resources/runtime(?:/|$)
 
 dmg:
   artifactName: DSH.Desktop-${version}-${arch}.${ext}
+  # dmg 本身也做 Developer ID 签名（无证书时 dmg-builder 静默跳过）
+  sign: true
 
 nsis:
   oneClick: false
@@ -58,18 +83,17 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: DSH Desktop
   artifactName: DSH.Desktop-${version}-setup.${ext}
+  include: scripts/installer.nsh
 
 portable:
   artifactName: DSH.Desktop-${version}-portable.${ext}
 
 npmRebuild: false
 
-# 自动更新源（第 1 层·桌面端）：直接对接仓库的 GitHub Releases。
-# provider: github 时 electron-updater 查询该仓库的 latest release，比对系统版本，
-# 有新版即下载对应平台的安装包替换。GitHub 既是发布源也是更新源，无需额外服务器。
-#
-# 说明：官方 harness 更新走的是另一套检测（src/main/harnessCheck.ts，查 npm registry），
-# 与本字段无关——本字段只决定「DSH Desktop 外壳」自己怎么更新。
+# 自动更新源：直接对接仓库的 GitHub Releases。
+# 官方桌面端把「壳 + dsh 运行时 + Node + pnpm」当作**一个签名更新单元**：
+# 本仓库用 resources/dsh/desktop-runtime.json 把四者版本绑定在一起，
+# 启动时校验（见 src/main/runtimeTree.ts），因此不存在单独更新 harness 的通道。
 publish:
   provider: github
   owner: Plocr

@@ -137,7 +137,10 @@ export function reconcileProfileBundles(profileDir: string): string[] {
   }
   const bundles = [...(m.dsh?.profile?.bundles ?? [])]
   const deps = m.dependencies ?? {}
-  const BUILTIN = new Set(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
+  // 基线包永不移出 bundles：官方两项 + 本壳 bridge。
+  // bridge 是运行时共享包（junction 链接，**不在 dependencies 里**），因此对它的
+  // 「是否仍是依赖」判断必须跳过——官方模型里 bundles 本来就可以含非依赖项。
+  const BUILTIN = new Set(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', BRIDGE_PLUGIN_NAME])
   let changed = false
   // 依赖 → bundle 声明 → 追加
   for (const name of Object.keys(deps)) {
@@ -328,7 +331,7 @@ export function discoverPluginsIn(dir: string | undefined, onSkip?: (message: st
 export interface DesktopPlugin {
   /** package.json 的 name（harness 按此解析加载） */
   name: string
-  /** 插件目录名（resources/plugins/<dir> 或 userData/plugins/<dir>） */
+  /** 插件目录名（profile node_modules/<dir>） */
   dir: string
   version: string | null
   source: 'bundled' | 'user'
@@ -435,12 +438,18 @@ export function restoreProfileManifest(profileDir: string): boolean {
  */
 export function listInstalledBundleNames(profileDir: string): string[] {
   const out = new Set<string>()
-  let m: { dependencies?: Record<string, unknown> }
+  let m: { dependencies?: Record<string, unknown>; dsh?: { profile?: { bundles?: string[] } } }
   try {
     m = JSON.parse(readFileSync(path.join(profileDir, 'package.json'), 'utf8')) as typeof m
   } catch {
     return []
   }
+  // 已挂载的组合包（含 shared package 形式的第一方包，如 bridge）
+  for (const name of m.dsh?.profile?.bundles ?? []) {
+    if (name === '@deepseek-ai/dsh-base' || name === '@deepseek-ai/dsh-web-app') continue
+    out.add(name)
+  }
+  // 已安装但处于「取消挂载」状态的组合包：依赖仍在、且声明了 dsh.bundle
   for (const name of Object.keys(m.dependencies ?? {})) {
     if (name === '@deepseek-ai/dsh-base' || name === '@deepseek-ai/dsh-web-app') continue
     try {
@@ -473,8 +482,7 @@ export function setBundleMounted(profileDir: string, name: string, mounted: bool
   const inBundles = bundles.includes(name)
   if (mounted === inBundles) return inBundles // 无变化
   if (mounted) {
-    // 重新挂载：要求依赖仍在且有 bundle 声明
-    if (!(m.dependencies ?? {})[name]) return false
+    // 重新挂载：要求包仍在 profile 里（依赖或共享包链接）且声明了 dsh.bundle
     let isBundle = false
     try {
       const p = JSON.parse(readTextNoBom(path.join(profileDir, 'node_modules', name, 'package.json'))) as {
