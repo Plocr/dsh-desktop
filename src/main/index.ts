@@ -1169,7 +1169,10 @@ async function main(): Promise<void> {
         bridgePeerProtocol = hello?.protocolVersion ?? null
         if (hello?.diag !== undefined && hello.diag !== null) {
           const d = diagOf(hello.diag)
-          if (d !== null) bridgeDiag = d
+          if (d !== null) {
+            bridgeDiag = d
+            log('info', `bridge diag(${d.level}): ${d.code} ${JSON.stringify(d.detail)}`)
+          }
         }
         // 协议不同代（profile 层替换过 bundle / 版本漂移）：报错并标注在托盘，但不掐断——
         // 增量字段是加法式的，旧壳仍能用已认识的部分。
