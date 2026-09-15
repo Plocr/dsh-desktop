@@ -615,3 +615,36 @@ test('宿主服务缺失：RPC 报错而不是把插件打挂', async () => {
     stdout.restore()
   }
 })
+
+test('sessions.changed：目录超过上限时截断（live 全留 + 最近持久化，带 truncated 标记）', async () => {
+  const persisted = async () => {
+    const rows = []
+    for (let i = 0; i < 260; i += 1) rows.push({ header: { id: `p-${i}`, createdAt: 1000 + i }, revision: 1, sizeBytes: 1 })
+    return rows
+  }
+  const services = harnessStub({ sessionIds: ['live-1'] })
+  services.sessionPersistence.list = persisted
+  const { ctx, target, stdout } = await startBridge({ services })
+  const client = openClient(target.port)
+  try {
+    await client.open
+    client.ws.send(JSON.stringify({ type: 'auth', token: target.token, protocolVersion: BRIDGE_PROTOCOL_VERSION }))
+    await waitFor(() => client.messages.find((m) => m.type === 'authed'), 'authed')
+
+    const snapshot = await rpc(client.ws, client.messages, 41, 'dashboard.snapshot')
+    assert.equal(snapshot.result.truncated, true)
+    assert.equal(snapshot.result.sessions.length, 200)
+    // live 会话必须在（不管多老），其余按 createdAt 新→旧
+    assert.equal(snapshot.result.sessions[0].id, 'live-1')
+    assert.equal(snapshot.result.sessions[1].id, 'p-259')
+
+    ctx.emit('session/event', { id: 'live-1' }, { type: 'session/title', data: { title: '改了标题' } })
+    const pushed = await waitFor(() => client.messages.find((m) => m.type === 'sessions.changed'), 'sessions.changed')
+    assert.equal(pushed.payload.truncated, true)
+    assert.equal(pushed.payload.sessions.length, 200)
+  } finally {
+    client.ws.close()
+    ctx.dispose()
+    stdout.restore()
+  }
+})

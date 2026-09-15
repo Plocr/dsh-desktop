@@ -269,7 +269,22 @@ export function apply(ctx, config = {}) {
     return uniqueJobs(out)
   }
 
-  /** 会话目录：live 会话带标题；持久化会话只带 id/createdAt。 */
+  /**
+   * 会话目录：live 会话带标题；持久化会话只带 id/createdAt。
+   * **上限 200 条**（live 全留 + 最近的持久化）：目录会随每次变更整份推送，
+   * 上万条历史会话的 JSON 帧既浪费带宽也白占壳的内存；壳只需要"最近的 + 活着的"，
+   * 更老的会话由 `session.resolve` 按 id 兜底查。
+   */
+  const SESSIONS_MAX = 200
+
+  /** 截断到上限：live 优先，其余按 createdAt 新→旧。 */
+  function capSessions(list) {
+    if (list.length <= SESSIONS_MAX) return { sessions: list, truncated: false }
+    const live = list.filter((s) => s.live)
+    const rest = list.filter((s) => !s.live).sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+    return { sessions: [...live, ...rest].slice(0, Math.max(SESSIONS_MAX, live.length)), truncated: true }
+  }
+
   async function listSessions() {
     const sessions = ctx.get('sessions')
     const out = []
@@ -294,6 +309,12 @@ export function apply(ctx, config = {}) {
       }
     }
     return out
+  }
+
+  /** 目录 + 截断标记（推送给壳的 payload 用；壳据此知道"这不是全量历史"）。 */
+  async function listSessionsCapped() {
+    const { sessions, truncated } = capSessions(await listSessions())
+    return { sessions, truncated }
   }
 
   /** 运行时信息（runtime.info 与 dashboard.snapshot 共用）。 */
@@ -345,7 +366,7 @@ export function apply(ctx, config = {}) {
       while (sessionsDirty) {
         sessionsDirty = false
         if (clients.size === 0) continue // 没有客户端：不白算（连接时的快照会带走全量）
-        broadcast('sessions.changed', { sessions: await listSessions() })
+        broadcast('sessions.changed', await listSessionsCapped())
       }
     } catch (err) {
       diag('warn', 'sessions.push.failed', { message: err instanceof Error ? err.message : String(err) })
@@ -400,7 +421,7 @@ export function apply(ctx, config = {}) {
 
         case 'sessions.list': {
           // 会话目录：live 会话带标题；持久化会话只带 id/createdAt（轻量 list，不逐个 inspect）。
-          reply({ sessions: await listSessions() })
+          reply(await listSessionsCapped())
           break
         }
 
@@ -410,7 +431,7 @@ export function apply(ctx, config = {}) {
           pruneApprovals()
           reply({
             runtime: runtimeInfo(),
-            sessions: await listSessions(),
+            ...(await listSessionsCapped()),
             jobs: listAllJobs().map(minimalJob),
             approvals: [...approvals],
           })

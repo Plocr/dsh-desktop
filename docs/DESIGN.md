@@ -110,11 +110,11 @@ cordis.patch.yml  []（用户补丁层，壳不写它）
   - `job.done`：`{job:{…}}` —— `onJobDone`（快照含 label/kind，通知可读）；
   - `approval.asked` / `approval.decided`：`{kind,sessionId,requestId,toolName}` —— 从 `session/event` 过滤
     （**监听签名是 `(session, event)`**）；asked 入环、decided 出环（TTL 10 分钟，最多 20 条）；
-  - `sessions.changed`：`{sessions:[{id,title,live,createdAt}]}` —— 会话新建/结束/标题变更的合并目录
-    （去抖 250ms + 单飞；无客户端时不计算）；
+  - `sessions.changed`：`{sessions:[{id,title,live,createdAt}],truncated}` —— 会话新建/结束/标题变更的合并目录
+    （去抖 250ms + 单飞；无客户端时不计算；**上限 200 条**：live 全留 + 最近持久化，更老的由 `session.resolve` 兜底）；
   - `bridge.diag`：`{level,code,detail}` —— 见 D33。
 - RPC（消费者见 `docs/BRIDGE-ROADMAP.md` 契约表）：
-  - 正式面：`ping` / `workspace.register {path}`（`workspaceRegistry.create`）/ `session.resolve {id}`（live 优先、持久化兜底）/ `dashboard.snapshot`（运行时 + 会话 + 任务 + 待审批）；
+  - 正式面：`ping` / `workspace.register {path}`（`workspaceRegistry.create`）/ `session.resolve {id}`（live 优先、持久化兜底）/ `dashboard.snapshot`（运行时 + 会话目录（同上限）+ 任务 + 待审批）；
   - 诊断面：`runtime.info` / `sessions.list` / `billing.balance`（后者也是壳 API key 自检的桥接实现，D35）。
 - 防御性：所有外部读取经 `safe()` 包装、服务缺失按"没有"降级（jobs/sessions/agents 全缺也不抛），
   单个事件异常不拖垮 harness；全部副作用可逆（disposer + `ctx.on('dispose')`），卸载先广播空任务集再优雅关连接。

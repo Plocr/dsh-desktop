@@ -16,7 +16,7 @@ bridge 是**壳 ↔ harness 的唯一通道**：插件跑在 Host 进程内的 d
 | 推送 | `job.done` | 壳：系统通知 | 关闭通知时静默 |
 | 推送 | `approval.asked` | 壳：系统通知（**点击直达会话**）+ 托盘「待审批」 | 带 `sessionId/requestId/toolName` |
 | 推送 | `approval.decided` | 壳：待审批出环 | 刷新托盘「待审批：N」 |
-| 推送 | `sessions.changed` | 壳：托盘「最近会话」+ 深链标题缓存 | 去抖 250ms + 单飞合并；与快照同形状（全量目录） |
+| 推送 | `sessions.changed` | 壳：托盘「最近会话」+ 深链标题缓存 | 去抖 250ms + 单飞合并；与快照同形状（全量目录，**上限 200 条**：live 全留 + 最近持久化，带 `truncated`） |
 | 推送 | `bridge.diag` | 壳：日志 + 托盘「桥接：…」状态行 | 插件诊断（D33） |
 | RPC | `ping` | 壳：连接自检 | |
 | RPC | `workspace.register` | 壳：「选择工作区」 | 不重启 Host 即可注册 |
