@@ -8,24 +8,38 @@
 
 ## 设计架构
 
-**壳只保留桌面原生能力**（窗口、托盘、启动 harness、加载 Web UI、深链、全局快捷键、自动更新、系统通知/任务栏徽标），加载官方 Web UI（会话、工作区、插件、设置）。壳与 harness 之间仅通过一个桥接插件通信——不注入任何 UI、不持有任何面板代码。
+**完全对齐官方 [DeepSeek Harness 桌面端](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop) 的架构**（同一套传输、运行时、插件与版本模型），壳只保留桌面原生能力（窗口、托盘、深链、快捷键、通知/徽标、自动更新、局域网/浏览器版），界面是官方 Web UI 原样。
 
 ```
-Electron 壳 ──spawn──▶ dsh --profile dsh-workbench --patch <overlay> --port 0
-    │  ▲                     │  ▲
-    │  │ stdout 行解析        │  │ dsh-desktop-bridge 插件（通知/徽标/深链/工作区注册）
-    │  └── dsh web: http://127.0.0.1:<port>
-    └── bridge WS ───────────┘
+Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（Host 子进程，进程内引导 dsh profile）
+    │  ▲                              │  ▲
+    │  │ fd5: Node IPC（ready/fatal/shutdown）
+    │  │ fd3/fd4: 13 字节帧头的字节管道（请求/响应，64KiB 分片 + 背压）
+    │  └──────────────────────────────┘
+    ├── 窗口加载 dsh-app://app/ ──▶ 壳把整份 Request 交给 Host（管道 fetch）：
+    │        • /api/*              → connection.createSharedFetchHandler('/api')
+    │        • /.dsh/remote-stream → NDJSON 远端流（Host 注入 __DSH_TRANSPORT__）
+    │        • 其余                 → 官方 Web 前端静态资源（index.html 注入传输脚本）
+    └── bridge 插件 WS（127.0.0.1，随机端口 + 随机 token）→ 通知/徽标/深链/工作区注册
 ```
 
-- 🪟 原生窗口加载官方 Web UI（`--port 0`，无端口冲突）
-- 🧩 专用 `dsh-workbench` profile（`$DSH_HOME/profiles/dsh-workbench`），会话与 Web/CLI 共享
-  - 为何不用 `desktop`：官方自 `0.1.5-alpha.1` 起在 CLI 硬编码拒绝 `--profile desktop`（留给官方 Electron 应用）。改用自有名后本壳可随官方更新到 0.1.5+；老用户的 `profiles/desktop` 首次启动自动改名迁移（保留已装组合包与补丁层，见 `src/main/desktopProfile.ts`）
-- 🩹 历史会话修复：早期版本写的 v0 会话日志里 `subagent/descriptor` 版本为 2，会让新版 harness 的格式迁移整条拒绝（会话打不开）。启动时做**最小改写**（仅该字段 2→3，其余字节不动，原文件留 `.v0-original.bak` 备份），由官方迁移链完成后续转换（见 `src/main/sessionRepair.ts`）
-- 🔌 `dsh-desktop-bridge` 桥接插件：后台任务/审批事件 → 系统通知与任务栏徽标
-- ⌨️ 全局快捷键唤出（默认 `Ctrl+Shift+Space`）
-- 🔗 `dsh://` 深链：`dsh://`（聚焦）、`dsh://new`（新建会话）、`dsh://session/<id>`（打开会话）
-- ⬆️ 自动更新、🗂️ 托盘常驻、🛡️ 崩溃自愈、📦 自包含打包
+### 与官方一致的几条关键决策
+
+| 维度 | 本壳做法（= 官方做法） |
+|---|---|
+| 传输 | **没有任何 harness 监听端口**。Host 在随包 Node 里引导 dsh，壳与它之间只有 fd3/fd4 字节管道（13 字节帧头、协议 v3、64 KiB 数据帧上限、按 `desiredSize` 背压）；渲染层只看到特权方案 `dsh-app://`（`shell` 壳页面 / `app` 工作台），端口、token、cookie 概念上都不存在 |
+| Web UI 远端流 | 原本是 WebSocket mux（自定义方案开不了 WS）：Host 在入口文档注入 `__DSH_TRANSPORT__`（`ownsHost: true` + `openStream`），客户端改走 `/.dsh/remote-stream` 的 NDJSON；壳侧只透传 |
+| 运行时 | `extraResources` 直接随包两棵树：`resources/runtime`（便携 Node + pnpm）与 `resources/dsh`（`npm install @deepseek-ai/dsh` 的完整生产闭包 + 第一方包），**不再首启解压**；`resources/dsh/desktop-runtime.json` 记录每个文件的 sha256 与发行身份（壳版本 + dsh 版本 + Node/pnpm 版本 + 协议版本），启动时校验，对不上直接拒绝启动 |
+| 版本模型 | **一个签名更新单元**：壳 / dsh / Node / pnpm 由 `desktop-runtime.json` 绑死，随桌面端一起发版；不再有「单独更新 harness」的通道（历史上的整树刷新、兼容探测、tar.gz 解压与不兼容清单全部删除） |
+| 插件 | profile（`$DSH_HOME/profiles/dsh-workbench`）承载组合：`dsh.profile.bundles` 列出启用的组合包，第一方包（bridge / host / dsh）以 **junction 共享包**链接进 profile `node_modules`，第三方插件用**随包 pnpm**（`--save-exact --ignore-scripts` + 官方 `allowBuilds` 白名单）装进 profile 依赖，事务期间持有 `<profile>/lock` 与 `desktop-packages-pending` 标记，失败保留部分改动、不自动回滚（官方语义） |
+| 签名 | Windows：EV 证书 + SafeNet 令牌（`signtoolOptions.sign` → `scripts/windows-sign.mjs`，未配置签名环境时显式跳过）；macOS：Developer ID 签名 + `notarytool` 公证 + stapling（`scripts/package-macos.mjs`，`resources/dsh`/`resources/runtime` 排除签名）。逐项说明见 [docs/SIGNING.md](docs/SIGNING.md) |
+
+### 本壳相对官方的**有意差异**
+
+- **profile 名是 `dsh-workbench`**（官方用保留名 `desktop`）。本壳是独立应用，不占用官方保留名；首次启动会把历史 `profiles/desktop` 改名迁移。
+- **多一个 `dsh-desktop-bridge` 插件**（第一方、随包、bundle 层加载）：官方壳用原生对话框/无托盘，本壳用系统通知、任务栏徽标、`dsh://` 深链、托盘、局域网/浏览器版，这些需要一条壳↔harness 的本地 RPC 通道。它是**唯一的监听 socket**（127.0.0.1 随机端口 + 每次启动随机 token），不参与 harness 的 HTTP 面。
+- **局域网访问 / 浏览器版**：官方没有该能力；本壳的对外门面把 HTTP 请求喂给同一条管道 fetch，回环免授权、局域网设备需电脑确认 + 本次运行 token 换 cookie（`src/main/lanServer.ts`）。
+- **会话修复与安全模式**：官方没有；本壳保留（`src/main/sessionRepair.ts`、`src/main/safeMode.ts`）。
 
 ---
 
@@ -51,7 +65,7 @@ Electron 壳 ──spawn──▶ dsh --profile dsh-workbench --patch <overlay> 
 
 ### 托盘菜单
 
-关闭窗口默认最小化到托盘；右键托盘图标可切换工作区、重启 Harness、查看日志、检查更新、开机自启、开关通知、查看全局快捷键。
+关闭窗口默认最小化到托盘；右键托盘图标可看到 Harness/桥接状态、最近会话与待审批（点击直达）、重启 Harness、API Key 自检状态、桌面插件管理、切换工作区、查看日志、检查更新、开机自启、开关通知、查看全局快捷键。
 
 | 托盘菜单 |
 |---|
@@ -109,7 +123,7 @@ Electron 壳 ──spawn──▶ dsh --profile dsh-workbench --patch <overlay> 
 - **视觉模型**：模型下拉切换到 `DeepSeek-V4-Flash-Vision-Exp`，拖入图片即可看图对话（见上方"模型与视觉能力"）
 - **全局唤出**：任意界面按 `Ctrl+Shift+Space` 呼出/隐藏窗口
 - **深链**：浏览器或其他应用点击 `dsh://` 链接可唤起并打开对应会话
-- **托盘**：关闭窗口默认最小化到托盘；右键托盘图标可切换工作区、重启 Harness、查看日志、检查更新、开机自启、开关通知
+- **托盘**：关闭窗口默认最小化到托盘；右键托盘图标可看 Harness/桥接状态、最近会话与待审批（点击直达）、切换工作区、重启 Harness、查看日志、检查更新、开机自启、开关通知
 - **会话共享**：桌面版默认使用**独立数据目录**（`%LOCALAPPDATA%/DSH Desktop/dsh-home`），并与 Web/CLI 并存互不冲突；首次启动会自动把旧的 `~/.dsh` 迁移过去，原数据保留。
 - **局域网访问**（托盘 → 设置 → 局域网访问）：不改 harness 监听（本机 `127.0.0.1` 始终可用），由壳起一个**局域网反向代理**（绑 `0.0.0.0:<随机端口>`，转发到本机 harness）并显示「局域网地址」。手机/其它设备首次访问该地址时，**电脑会弹授权框**（按设备 IP 记一次，本次运行有效）：允许才放行，拒绝返回 403。⚠️ 允许后该设备可在浏览器中操作本工作台（可读文件/执行命令），建议仅在可信网络使用，用毕关闭。
 
@@ -127,33 +141,34 @@ Electron 壳 ──spawn──▶ dsh --profile dsh-workbench --patch <overlay> 
 
 ## 更新机制
 
-两条独立链路，互不干扰。（术语：**框架** = DSH Desktop 本体；**官方 Harness** = DeepSeek Harness @deepseek-ai/dsh）
+**一条链路：框架更新（本应用）**，它同时带走随包运行时。术语：**框架** = DSH Desktop 本体；**官方 Harness** = DeepSeek Harness（`@deepseek-ai/dsh`）。
 
-1. **框架（DSH Desktop 自身）** —— `src/main/updater.ts`
-   - 源：GitHub Releases（[Plocr/dsh-desktop](https://github.com/Plocr/dsh-desktop/releases)）
-   - **本地下载，不跳浏览器**：electron-updater `autoDownload`；下载全程右上角卡片实时进度 + 任务栏进度条
-   - **下载完成 → 点「安装更新并重启」按钮（或系统通知）→ 确认后退出并安装**，安装完自动重启。
-     若下载完没点安装就退出，下次启动仍会重新提示（跨重启保留，不会丢）
-   - 通知内附两个下载地址：GitHub 官方地址 + **免费加速代理地址**（默认 `ghfast.top`，可用环境变量 `DSH_DESKTOP_GH_PROXY` 覆盖）
+- 源：GitHub Releases（[Plocr/dsh-desktop](https://github.com/Plocr/dsh-desktop/releases)）
+- **本地下载，不跳浏览器**：electron-updater `autoDownload`；下载全程右上角卡片实时进度 + 任务栏进度条
+- **下载完成 → 点「安装更新并重启」按钮（或系统通知）→ 确认后退出并安装**，安装完自动重启；
+  若下载完没点安装就退出，下次启动仍会重新提示（跨重启保留，不会丢）
+- 通知内附两个下载地址：GitHub 官方地址 + **免费加速代理地址**（默认 `ghfast.top`，可用环境变量 `DSH_DESKTOP_GH_PROXY` 覆盖）
 
-2. **官方 Harness（DeepSeek Harness 本体）** —— `src/main/harnessCheck.ts` + `harnessUpdate.ts`
-   - 源：npm registry（官方失败回退 **npmmirror 镜像**）
-   - **检测不再依赖 `latest` dist-tag**（官方可能忘打 tag：rc.8 已发而 latest 指 rc.7）——枚举全部已发布版本取最大 semver
-   - **整树刷新而非单包替换**：发现新版后在 `%LOCALAPPDATA%/DSH Desktop/runtime` 暂存目录用内置便携 Node 的 npm 安装 `@deepseek-ai/dsh@<新版>`（整棵 `@deepseek-ai/*` 依赖树解析到同一 rc 线，**含视觉模型等兄弟包能力**）→ 校验 → 原子替换 `node_modules`（含回滚）→ 写用户自更新标记（携带**整树指纹**）→ 重启 harness 生效
-   - **混血树自愈**：检测与解压决策均基于整树一致性（`@deepseek-ai/*` 锁步包是否同版本线）。本地树不一致（如旧版单包更新残留：dsh 已升、兄弟包仍旧）时——
-     - 在线：更新流程判定「需要修复」，自动整树重建到最新版；
-     - 离线：启动期解压决策回退到安装包内置的一致运行时
-   - **启动兼容性闸门（防变砖）**：原子替换前先停 harness，再用 `@deepseek-ai/dsh --profile dsh-workbench --dump-config` 探测暂存树能否以本壳 profile 启动；不兼容则中止替换、保留旧树，并把该版本记入 `%LOCALAPPDATA%/DSH Desktop/harness-incompatible.json`（后续选版直接跳过，详见 `harnessCompat.ts`）
-   - **运行时自愈**：启动时若本地用户运行时探测失败（无法用本壳 profile 启动），自动回退随包运行时并记录不兼容版本，避免「应用反复崩溃重启」的死循环
-   - 用户自更新后**一致且较新**的运行时不会被安装包重复覆盖，除非安装包内嵌的 dsh 版本更新
+> **为什么没有"单独更新官方 Harness"的通道**：壳版本 + dsh 版本 + 便携 Node + pnpm + Host 协议版本被打包成一个
+> **签名更新单元**，写进随包 `resources/dsh/desktop-runtime.json`（逐文件 sha256），启动时校验；对不上直接拒绝启动。
+> 历史版本里那套「应用内检测 npm 版本 → 整树替换 → 兼容性闸门 → 不兼容清单」已全部移除。
+> 这么做换来的是：不存在"壳与运行时半新半旧"的组合，任何一方的行为差异都不会变成用户侧的偶发故障；
+> 代价是 harness 只能跟着框架一起升级（要更新的 dsh 请等框架发版）。
+> 相关环境变量（仅打包时用，见 `scripts/setup-runtime.mjs`）：`DSH_RUNTIME_DSH_VERSION`（默认 npm 上最新的可用版）、
+> `DSH_RUNTIME_NODE_VERSION`、`DSH_RUNTIME_NODE_ARCH`。
 
 **入口只有两个（托盘 → 设置）：**
-- `自动更新（框架 v… · 官方 Harness v…）`（开关，默认开）：冷启动自动检查一次（框架 15s 下载 + 官方 Harness 30s 本地替换）；关闭则仅手动
-- `检查并更新…`（动作）：同时查框架 + 官方 Harness，有新版自动本地下载/替换；**外壳下载完成后需点「安装更新」按钮确认安装**
 
-> Why npm not GitHub tags：deepseek-harness 通过 npm 分发（GitHub 只有源码 tags，无构建产物），所以「官方 Harness 最新」为 npm 已发布版本中**可用**的最大 semver（被兼容性闸门判定不兼容的版本会跳过）。
+- `自动更新（框架 v… · 官方 Harness v…）`（开关，默认开）：冷启动自动检查并下载一次；关闭则仅手动
+- `检查并更新…`（动作）：检查框架更新，有新版自动本地下载；下载完成后需点「安装更新」按钮确认安装
 
----
+**托盘状态行（排障用）：**
+
+- `Harness: running（N 个任务运行中）`：Host 进程状态 + 后台任务数
+- `桥接：已连接 · jobs present`：壳 ↔ harness 的桥接通道状态（插件 `bridge.diag` 上报）；
+  显示 `未连接`、`jobs 不可用`、`⚠ 协议不匹配` 时，通知/徽标/深链会相应降级，日志里有 `bridge diag(...)` 明细
+- `待审批：N 条（点击查看）`：有审批等待处理时出现，点击直达该会话（同一份提醒也发系统通知）
+- `最近会话`：最近会话列表（新→旧，最多 8 条），点击直达；改动即时生效（`sessions.changed` 增量推送）
 
 ## 开发 / 构建
 
@@ -174,13 +189,13 @@ npm run dist:win:portable # Windows 便携版
 npm run dist:mac          # macOS dmg（需在 macOS 上执行，arm64/x64）
 ```
 
-- `scripts/build.mjs`：esbuild 打包 main/preload + 复制桌面插件
+- `scripts/build.mjs`：esbuild 打包 main/preload → `dist/`
 - `scripts/make-icons.mjs`：生成应用图标（png / ico / icns）
-- `scripts/setup-runtime.mjs`：构建自包含运行时（下载便携 Node + `npm install @deepseek-ai/dsh` + bridge，输出 `resources/dsh-runtime.tar.gz` 与 `resources/runtime.version`）
+- `scripts/setup-runtime.mjs`：构建随包运行时两棵树——`resources/runtime`（便携 Node + pnpm）与 `resources/dsh`（`npm install @deepseek-ai/dsh` + 第一方包 tgz + `desktop-runtime.json` 逐文件 sha256 清单）；源码哈希未变时秒过不联网
   - 可用环境变量：`DSH_RUNTIME_DSH_VERSION`（默认 `0.1.5-rc.2`，即 npm 已发布版本里的最新版；本壳 profile 为自有名 `dsh-workbench`，不受官方 desktop 守卫影响）、`DSH_RUNTIME_NODE_VERSION`（默认 `v24.15.0`）、`DSH_RUNTIME_NODE_ARCH`（目标便携 Node 架构，交叉构建时显式指定）
 - `scripts/merge-mac-manifest.mjs`：合并 macOS arm64/x64 两个 `latest-mac.yml` 为一份（多架构自动更新）
 
-CI（`.github/workflows/build-release.yml`）：master/PR 跑 `check`（typecheck + 单测）；打 `v*` tag 或手动触发时跑三平台安装包构建并上传到对应 Release。mac 的 arm64 构建在 x64 runner 上交叉进行，便携 Node 目标架构经 `DSH_RUNTIME_NODE_ARCH` 显式指定。
+CI（`.github/workflows/build-release.yml`）：master/PR 跑 `check`（typecheck + 单测）与 `e2e`（Windows：真实 dsh 运行时 + Host 管道 + 桥接契约，`npm run e2e:bridge`）；打 `v*` tag 或手动触发时跑三平台安装包构建并上传到对应 Release。mac 的 arm64 构建在 x64 runner 上交叉进行，便携 Node 目标架构经 `DSH_RUNTIME_NODE_ARCH` 显式指定。
 
 ---
 

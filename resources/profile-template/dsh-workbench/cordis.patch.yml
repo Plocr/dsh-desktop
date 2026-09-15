@@ -2,6 +2,7 @@
 # a top-level YAML array of loader patch entries (id-targeted config
 # overrides, disables, and insert lists; `!!js` expressions allowed).
 #
-# The desktop shell injects the dsh-desktop-bridge row and its per-launch token
-# through a generated `--patch` overlay, so this file stays user-owned.
+# The desktop shell does not write here: dsh-desktop-bridge is mounted as a
+# standard bundle layer (its own dsh.bundle.patch) and listed in
+# `dsh.profile.bundles`, so this file stays user-owned.
 []
