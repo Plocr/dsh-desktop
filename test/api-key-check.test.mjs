@@ -65,3 +65,26 @@ test('interpretBalanceReply：成功 → 有效并带余额；失败分类不误
   assert.equal(interpretBalanceReply(undefined, 'fetch failed').verdict, 'unknown')
   assert.equal(interpretBalanceReply(undefined, '余额查询异常: 连接被重置').verdict, 'unknown')
 })
+
+test('apiKeyNeedsAttention：只有桥接（权威来源）的否定结论才打扰用户', async () => {
+  const { apiKeyNeedsAttention, interpretBalanceReply, checkDeepSeekKey } = await import('../src/main/apiKeyCheck.ts')
+
+  // 桥接明确拒绝 / 未配置 → 值得通知
+  const invalidViaBridge = interpretBalanceReply(undefined, '余额查询失败: HTTP 401')
+  assert.equal(apiKeyNeedsAttention(invalidViaBridge, 'bridge'), true)
+  const missingViaBridge = interpretBalanceReply(undefined, 'DEEPSEEK_API_KEY 未配置')
+  assert.equal(apiKeyNeedsAttention(missingViaBridge, 'bridge'), true)
+
+  // 同一个否定结论来自文件回退 → 不通知（环境变量/dotenv 配的 key 文件里看不到）
+  assert.equal(apiKeyNeedsAttention(missingViaBridge, 'file'), false)
+  assert.equal(apiKeyNeedsAttention(invalidViaBridge, 'file'), false)
+
+  // 成功/未知都不通知
+  assert.equal(apiKeyNeedsAttention(interpretBalanceReply({ infos: [] }, null), 'bridge'), false)
+  assert.equal(apiKeyNeedsAttention(interpretBalanceReply(undefined, 'fetch failed'), 'bridge'), false)
+
+  // 本地文件解析缺失时也不该把它当权威（供壳复用的判定）
+  const missing = await checkDeepSeekKey('C:/definitely/missing/.credentials.yaml')
+  assert.equal(missing.verdict, 'invalid')
+  assert.equal(apiKeyNeedsAttention(missing, 'file'), false)
+})

@@ -25,7 +25,13 @@ import { isValidPluginSpec, readProfileBundles, reconcileProfileBundles, isolate
 import { resolveDesktopPaths } from './paths.ts'
 import { PluginTransactions } from './pluginTransactions.ts'
 import { isSafeMode, recordStartFailure, recordStartSuccess, exitSafeMode, activateSafeMode, SAFE_MODE_THRESHOLD, type SafeModeState } from './safeMode'
-import { checkDeepSeekKey, interpretBalanceReply, type ApiKeyCheckResult } from './apiKeyCheck'
+import {
+  apiKeyNeedsAttention,
+  checkDeepSeekKey,
+  fileFallbackDetail,
+  interpretBalanceReply,
+  type ApiKeyCheckResult,
+} from './apiKeyCheck'
 import { HostManager, type HostReady } from './host'
 import { BridgeClient } from './bridge'
 import { createWindow, UI_PARTITION, type WindowHandle } from './window'
@@ -796,31 +802,31 @@ async function exitSafeModeFromTray(): Promise<void> {
  * dotenv 回退），桥接不可用时回退本地 `.credentials.yaml` 解析。
  * 只有官方明确拒绝（401/403）或"未配置"才报警；网络类失败记为 unknown，绝不误报"无效"。
  */
-async function checkApiKey(): Promise<ApiKeyCheckResult> {
+async function checkApiKey(): Promise<{ result: ApiKeyCheckResult; via: 'bridge' | 'file' }> {
   if (bridgeConnected) {
     try {
       const reply = await bridge.call('billing.balance', undefined, 12_000)
-      return interpretBalanceReply(reply, null)
+      return { result: interpretBalanceReply(reply, null), via: 'bridge' }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       const mapped = interpretBalanceReply(undefined, message)
-      if (mapped.verdict !== 'unknown') return mapped
+      if (mapped.verdict !== 'unknown') return { result: mapped, via: 'bridge' }
       log('error', `api key check via bridge inconclusive: ${message}`)
     }
   }
-  return checkDeepSeekKey(path.join(dshHome(), '.credentials.yaml'))
+  return { result: await checkDeepSeekKey(path.join(dshHome(), '.credentials.yaml')), via: 'file' }
 }
 
 /** 自检并更新托盘/通知（只在明确无效时通知一次）。 */
 async function runApiKeyCheck(): Promise<void> {
   try {
-    const res = await checkApiKey()
-    apiKeyStatus = res
-    log(res.ok ? 'info' : 'error', `api key check: ${res.detail}`)
+    const { result, via } = await checkApiKey()
+    apiKeyStatus = via === 'file' ? { ...result, detail: fileFallbackDetail(result) } : result
+    log(result.ok ? 'info' : 'error', `api key check (${via}): ${result.detail}`)
     refreshTray()
-    if (res.verdict === 'invalid' && !apiKeyNotified) {
+    if (apiKeyNeedsAttention(result, via) && !apiKeyNotified) {
       apiKeyNotified = true
-      notify('DeepSeek API Key 检测', `${res.detail}。更新后立即生效（无需重启应用）。`)
+      notify('DeepSeek API Key 检测', `${result.detail}。更新后立即生效（无需重启应用）。`)
     }
   } catch {
     /* 自检失败不影响主流程 */
@@ -1203,8 +1209,9 @@ async function main(): Promise<void> {
             refreshTray()
           })
           .catch((err) => log('error', `bridge snapshot failed: ${err instanceof Error ? err.message : String(err)}`))
-        // 桥接可用后重跑一次 API Key 自检（首启时桥接可能还没连上，走的文件回退）
-        if (!apiKeyNotified) void runApiKeyCheck()
+        // 桥接可用后重跑一次 API Key 自检：首启那次可能走的是文件回退（非权威），
+        // 而用环境变量/dotenv 配的 key 只有 harness 的凭据服务看得见。
+        void runApiKeyCheck()
       },
     },
   )

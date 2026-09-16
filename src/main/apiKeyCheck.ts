@@ -132,3 +132,16 @@ export function interpretBalanceReply(reply: unknown, error: string | null): Api
   }
   return { ok: false, verdict: 'unknown', masked: null, status: null, detail: `无法判定（${error}）` }
 }
+
+/**
+ * 只有**权威来源**（桥接 = harness 的凭据服务，能看见环境变量与 dotenv）的否定结论才值得打扰用户。
+ * 文件回退只说明"这个文件里没有"：把它当判决会在"用环境变量启动"时误报（本地文件 ≠ 全部来源）。
+ */
+export function apiKeyNeedsAttention(res: ApiKeyCheckResult, via: 'bridge' | 'file'): boolean {
+  return via === 'bridge' && res.verdict === 'invalid'
+}
+
+/** 文件回退的文案补一句来源，避免用户以为 key 真的没了。 */
+export function fileFallbackDetail(res: ApiKeyCheckResult): string {
+  return res.verdict === 'invalid' ? `${res.detail}（本地文件；桥接连接后以 harness 凭据为准）` : res.detail
+}
