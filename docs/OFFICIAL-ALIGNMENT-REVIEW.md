@@ -95,7 +95,8 @@
 4. **模块解析 generation（P2）**：官方 `runProfile` 还会挂 `PluginPackages`（`resolutionMode: runtime`
    下按安装包与 bundle 图生成不可变解析代）。本壳 Host 未移植它，仍靠 `healProfilesModuleFallback`
    ＋ profile `node_modules` 解析——启动、插件列表与 Remote 面已验证可用（见 e2e）；若后续出现
-   "装了插件但重载后解析不到"一类问题，这里就是第一处要补的地方。
+   "装了插件但重载后解析不到"一类问题，这里就是第一处要补的地方。代价是每次启动多付
+   `healProfilesModuleFallback` 的 **190 ms**（官方走 PluginPackages，不付这笔；见 §6.3 实测）。
 5. **文档口径**：`README.md` 里"完全对齐官方"的表述需要区分"已对齐"与"有意差异"两栏；
    本文件即后续对齐清单的来源。
 
