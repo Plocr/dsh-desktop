@@ -679,7 +679,7 @@ async function stopHostBeforePluginOp(): Promise<void> {
  *
  * 官方桌面设计里 Electron **不提供**独立的插件管理页面；插件管理统一由共享的
  * Web 插件管理器（侧边栏「插件」页 + `plugin_manager` 工具）承担，桌面壳只提供
- * 原生恢复与包管理器。托盘的安装/卸载入口是为离线与救急保留的补充通道。
+ * 原生恢复与包管理器——所以这里只把人带到那个页面，不在托盘复制第二套管理界面。
  */
 function openPluginPage(): void {
   showWindow()
