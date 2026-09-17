@@ -7,18 +7,6 @@
 import { Menu, nativeImage, Tray } from 'electron'
 import type { AppSettings } from './settings'
 
-export interface DesktopPluginToggle {
-  name: string
-  /** 插件目录名（user 插件卸载按目录名定位，避免目录名 ≠ 包名时删错/删不到） */
-  dir?: string
-  /** 插件版本（bundled/user 读自身 package.json；bundle 读 profile node_modules） */
-  version?: string
-  enabled: boolean
-  locked: boolean
-  /** 插件来源：bundled=随包内置，user=用户安装（本地复制），bundle=官方 dsh plugin add 组合包 */
-  source: 'bundled' | 'user' | 'bundle'
-}
-
 export interface TrayDeps {
   getUrl: () => string | null
   getState: () => {
@@ -51,7 +39,6 @@ export interface TrayDeps {
     /** 最近会话（快照 + sessions.changed 增量；点击直达） */
     recentSessions: { id: string; label: string }[]
   }
-  getPlugins: () => DesktopPluginToggle[]
   showWindow: () => void
   /** 点击托盘会话条目 / 待审批条目：跳到该会话（复用 dsh:// 深链路径） */
   openSession: (sessionId: string) => void
@@ -59,18 +46,15 @@ export interface TrayDeps {
   pickWorkspace: () => void
   restartHarness: () => void
   openLogs: () => void
+  /** 重新扫描并修复历史会话日志（一次性迁移的强制重跑入口） */
+  repairSessions: () => void
   checkUpdate: () => void
   cleanLogs: () => void
   uninstall: () => void
-  togglePlugin: (name: string, enabled: boolean) => void
-  /** 组合包（bundle）插件快捷挂载开关：取消勾选=取消挂载（保留代码，可再勾选恢复） */
-  toggleBundleMount: (name: string, mounted: boolean) => void
   /** 最新一条待审批所属会话；没有可跳转的目标时返回 null（托盘条目据此禁用） */
   pendingSessionId: () => string | null
-  /** 托盘「安装插件…」：输入官方 spec（npm/github/路径/tgz）→ dsh plugin add → 重启生效 */
-  installPlugin: () => void
-  /** 托盘「卸载插件」：bundle=官方 remove，user=删除目录；确认 + 重启生效 */
-  uninstallPlugin: (name: string, kind: 'bundle' | 'user', dir?: string) => void
+  /** 打开官方插件页（Web 侧边栏「插件」）：官方设计里插件管理的唯一主场 */
+  openPluginPage: () => void
   /** 托盘「退出安全模式」：恢复全部插件 */
   exitSafeMode: () => void
   /** 托盘「进入安全模式」：停用全部插件（仅系统必需） */
@@ -156,6 +140,14 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
       {
         label: '桌面插件',
         submenu: [
+          // 官方设计：插件管理只有一个主场——Web 侧边栏「插件」页（安装、启停、卸载、
+          // 依赖脚本授权、包诊断都在那里）。托盘不再复制一套列表/开关/安装器，
+          // 只保留原生恢复（安全模式）与这个「去哪儿管」的入口。
+          {
+            label: '在插件页管理（官方）…',
+            click: () => deps.openPluginPage(),
+          },
+          { type: 'separator' as const },
           // 安全模式：状态 + 恢复入口（置于最前）
           ...(s.safeMode
             ? ([
@@ -183,42 +175,6 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
                   click: () => deps.enterSafeMode(),
                 },
               ] as const)),
-          // 启停/挂载开关（bundle 组合包同样可勾选 = 快速挂载/取消挂载；内置必需锁定）
-          ...deps.getPlugins().map((p) => ({
-            label:
-              p.source === 'bundle'
-                ? `${p.name}（组合包 · v${p.version ?? '—'}）`
-                : p.source === 'user'
-                  ? `${p.name}（用户 · v${p.version ?? '—'}）`
-                  : p.locked
-                    ? `${p.name}（必需 · v${p.version ?? '—'}）`
-                    : `${p.name} · v${p.version ?? '—'}`,
-            type: 'checkbox' as const,
-            checked: p.enabled,
-            enabled: !p.locked,
-            click: (item: Electron.MenuItem) =>
-              p.source === 'bundle' ? deps.toggleBundleMount(p.name, item.checked) : deps.togglePlugin(p.name, item.checked),
-          })),
-          { type: 'separator' as const },
-          {
-            label: '安装插件…',
-            click: () => deps.installPlugin(),
-          },
-          {
-            label: '卸载插件',
-            submenu: deps
-              .getPlugins()
-              .map((p) => ({
-                label:
-                  p.source === 'bundle'
-                    ? `${p.name}（组合包）`
-                    : p.source === 'user'
-                      ? p.name
-                      : `${p.name}（内置，不可卸载）`,
-                enabled: p.source === 'bundle' || p.source === 'user',
-                click: () => deps.uninstallPlugin(p.name, p.source === 'bundle' ? 'bundle' : 'user', p.dir),
-              })),
-          },
         ],
       },
       { type: 'separator' },
@@ -261,6 +217,7 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
           { label: '切换工作区…', click: () => deps.pickWorkspace() },
           { type: 'separator' },
           { label: '查看日志', click: () => deps.openLogs() },
+          { label: '重新修复旧会话日志', click: () => deps.repairSessions() },
           { label: '清理日志', click: () => deps.cleanLogs() },
           { type: 'separator' },
           {

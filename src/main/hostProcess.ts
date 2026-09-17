@@ -113,6 +113,8 @@ export class DesktopHostProcess {
    * @param onStdout - [ported] Receives every complete stdout line (CR stripped, empty lines dropped).
    * @param onStderr - [ported] Receives every complete stderr line; accumulation below is unchanged.
    * @param onExit - [ported] Receives the child's exit code and signal once the process is gone.
+   * @param pnpmEntry - Bundled pnpm entry handed to the Host as the launcher-provided
+   *   `profileContext.packageManager` (offline plugin/package operations).
    */
   constructor(
     private readonly node: string,
@@ -124,6 +126,7 @@ export class DesktopHostProcess {
     private readonly onStdout?: (line: string) => void,
     private readonly onStderr?: (line: string) => void,
     private readonly onExit?: (code: number | null, signal: NodeJS.Signals | null) => void,
+    private readonly pnpmEntry?: string,
   ) {}
 
   /** Start the child once and resolve only after its complete composition is active. */
@@ -138,6 +141,8 @@ export class DesktopHostProcess {
       this.runtimeDir,
       this.projectDir,
       ...(this.inspectPort === undefined ? [] : ['--allow-linked-profile']),
+      // 随包 pnpm：官方插件管理器（dsh-plugin-manager）通过它执行包操作，不依赖系统 pnpm。
+      ...(this.pnpmEntry === undefined ? [] : ['--pnpm', this.pnpmEntry]),
     ], {
       cwd: this.projectDir,
       env: Object.fromEntries(Object.entries(this.environment).filter(([name]) => (

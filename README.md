@@ -8,7 +8,9 @@
 
 ## 设计架构
 
-**完全对齐官方 [DeepSeek Harness 桌面端](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop) 的架构**（同一套传输、运行时、插件与版本模型），壳只保留桌面原生能力（窗口、托盘、深链、快捷键、通知/徽标、自动更新、局域网/浏览器版），界面是官方 Web UI 原样。
+**对齐官方 [DeepSeek Harness 桌面端](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop) 的运行时、插件与版本模型**：同一个绑定版本单元、同一套 profile/组合包语义、同一套官方插件系统（Web 侧边栏「插件」页 + `plugin_manager` 工具，包操作走随包 pnpm）。壳只保留桌面原生能力（窗口、托盘、深链、快捷键、通知/徽标、自动更新、局域网/浏览器版），界面是官方 Web UI 原样。
+
+> 传输层是本壳**有意保留的差异**：官方桌面已改为「认证 Web Host（默认 19387）+ Electron 转发请求并注入」；本壳用 `dsh-app://` 特权方案直连 Host 字节管道，因此本机没有任何 harness 监听端口。逐条差距与后续对齐计划见 [docs/OFFICIAL-ALIGNMENT-REVIEW.md](docs/OFFICIAL-ALIGNMENT-REVIEW.md)。
 
 ```
 Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（Host 子进程，进程内引导 dsh profile）
@@ -31,7 +33,7 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（Host 子进程
 | Web UI 远端流 | 原本是 WebSocket mux（自定义方案开不了 WS）：Host 在入口文档注入 `__DSH_TRANSPORT__`（`ownsHost: true` + `openStream`），客户端改走 `/.dsh/remote-stream` 的 NDJSON；壳侧只透传 |
 | 运行时 | `extraResources` 直接随包两棵树：`resources/runtime`（便携 Node + pnpm）与 `resources/dsh`（`npm install @deepseek-ai/dsh` 的完整生产闭包 + 第一方包），**不再首启解压**；`resources/dsh/desktop-runtime.json` 记录每个文件的 sha256 与发行身份（壳版本 + dsh 版本 + Node/pnpm 版本 + 协议版本），启动时校验，对不上直接拒绝启动 |
 | 版本模型 | **一个签名更新单元**：壳 / dsh / Node / pnpm 由 `desktop-runtime.json` 绑死，随桌面端一起发版；不再有「单独更新 harness」的通道（历史上的整树刷新、兼容探测、tar.gz 解压与不兼容清单全部删除） |
-| 插件 | profile（`$DSH_HOME/profiles/dsh-workbench`）承载组合：`dsh.profile.bundles` 列出启用的组合包，第一方包（bridge / host / dsh）以 **junction 共享包**链接进 profile `node_modules`，第三方插件用**随包 pnpm**（`--save-exact --ignore-scripts` + 官方 `allowBuilds` 白名单）装进 profile 依赖，事务期间持有 `<profile>/lock` 与 `desktop-packages-pending` 标记，失败保留部分改动、不自动回滚（官方语义） |
+| 插件 | **官方插件系统原样运行**：Host 向 dsh 提供官方「启动器信息」（`profileContext`，含随包 pnpm 作为 `packageManager`），`plugin-manager` 与 HMR 因此激活——侧边栏「插件」页与 `plugin_manager` 工具可在本壳里安装/启停/卸载。profile（`$DSH_HOME/profiles/dsh-workbench`）承载组合：`dsh.profile.bundles` 是有序启用列表，第一方包（bridge / host / dsh）以 **junction 共享包**链接进 profile `node_modules`，第三方插件由官方管理器用**随包 pnpm**装进 profile 依赖，事务期间持有 `<profile>/lock` 与 `desktop-packages-pending` 标记；安装失败按官方语义回滚 `package.json` + `pnpm-lock.yaml`，依赖脚本待批准时给出「允许并重试」 |
 | 签名 | Windows：EV 证书 + SafeNet 令牌（`signtoolOptions.sign` → `scripts/windows-sign.mjs`，未配置签名环境时显式跳过）；macOS：Developer ID 签名 + `notarytool` 公证 + stapling（`scripts/package-macos.mjs`，`resources/dsh`/`resources/runtime` 排除签名）。逐项说明见 [docs/SIGNING.md](docs/SIGNING.md) |
 
 ### 本壳相对官方的**有意差异**
@@ -55,9 +57,9 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（Host 子进程
 |---|
 | ![主界面](docs/screenshots/主界面.png) |
 
-### 加载页面（首次启动解压运行时）
+### 加载页面（Harness 引导中的过渡页）
 
-首次启动会自动解压内置运行时（约 40 秒，二次启动免解压），期间显示加载页。
+窗口先显示这个过渡页，随后端（内嵌 harness 组合，约 2 秒）就绪后自动切到工作台；运行时随包分发，不解压、不联网。
 
 | 加载页面 |
 |---|
@@ -65,7 +67,10 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（Host 子进程
 
 ### 托盘菜单
 
-关闭窗口默认最小化到托盘；右键托盘图标可看到 Harness/桥接状态、最近会话与待审批（点击直达）、重启 Harness、API Key 自检状态、桌面插件管理、切换工作区、查看日志、检查更新、开机自启、开关通知、查看全局快捷键。
+关闭窗口默认最小化到托盘；右键托盘图标可看到 Harness/桥接状态、最近会话与待审批（点击直达）、重启 Harness、API Key 自检状态、桌面插件（**在官方插件页管理** + 安全模式）、切换工作区、查看日志、重新修复旧会话日志、检查更新、开机自启、开关通知、查看全局快捷键。
+
+> 插件管理只有一处入口：应用内左侧边栏的**「插件」页**（官方共享插件管理器）。
+> 安装、启停、卸载、依赖脚本授权、pnpm 诊断都在那里；托盘不再复制一套。
 
 | 托盘菜单 |
 |---|
@@ -111,7 +116,7 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（Host 子进程
 
 1. 从 [Releases](https://github.com/Plocr/dsh-desktop/releases) 下载最新安装包（Windows：`DSH.Desktop-x.x.x-setup.exe`）
 2. 双击运行，按向导完成安装（可选择安装目录）
-3. 首次启动会自动解压内置运行时（约 40 秒，二次启动免解压），并创建桌面 profile
+3. 首次启动创建桌面 profile 并引导内嵌 harness（约 2 秒，无需解压、无需联网）
 
 > 安装包自包含：内置便携 Node 与 dsh 运行时，**无需**预先安装 Node.js 或全局 dsh。
 
@@ -192,7 +197,8 @@ npm run dist:mac          # macOS dmg（需在 macOS 上执行，arm64/x64）
 - `scripts/build.mjs`：esbuild 打包 main/preload → `dist/`
 - `scripts/make-icons.mjs`：生成应用图标（png / ico / icns）
 - `scripts/setup-runtime.mjs`：构建随包运行时两棵树——`resources/runtime`（便携 Node + pnpm）与 `resources/dsh`（`npm install @deepseek-ai/dsh` + 第一方包 tgz + `desktop-runtime.json` 逐文件 sha256 清单）；源码哈希未变时秒过不联网
-  - 可用环境变量：`DSH_RUNTIME_DSH_VERSION`（默认 `0.1.5-rc.2`，即 npm 已发布版本里的最新版；本壳 profile 为自有名 `dsh-workbench`，不受官方 desktop 守卫影响）、`DSH_RUNTIME_NODE_VERSION`（默认 `v24.15.0`）、`DSH_RUNTIME_NODE_ARCH`（目标便携 Node 架构，交叉构建时显式指定）
+  - 可用环境变量：`DSH_RUNTIME_DSH_VERSION`（默认取 `package.json` 的 `dshRuntime.dsh`，当前 `0.1.6-alpha.2`——与官方桌面端同版；本壳 profile 为自有名 `dsh-workbench`，不受官方 desktop 守卫影响）、`DSH_RUNTIME_NODE_VERSION`（默认 `v24.15.0`）、`DSH_RUNTIME_NODE_ARCH`（目标便携 Node 架构，交叉构建时显式指定）
+  - **载荷策略**：`DSH_DESKTOP_OFFICE_RUNTIME=1` 才把 Office→PDF 原生引擎（LibreOffice，win32-x64 ≈ 325 MB / 2050 文件）打进包——默认不带，安装包因此小 ~80 MB、装机文件少数千个；代价是应用内 docx/xlsx/pptx 预览不可用（第一次转换会以 `unavailable` 明确报错）。文档类 `.md`（保留 LICENSE/NOTICE）与便携 Node 自带的 npm 目录也在打包时剔除。
 - `scripts/merge-mac-manifest.mjs`：合并 macOS arm64/x64 两个 `latest-mac.yml` 为一份（多架构自动更新）
 
 CI（`.github/workflows/build-release.yml`）：master/PR 跑 `check`（typecheck + 单测）与 `e2e`（Windows：真实 dsh 运行时 + Host 管道 + 桥接契约，`npm run e2e:bridge`）；打 `v*` tag 或手动触发时跑三平台安装包构建并上传到对应 Release。mac 的 arm64 构建在 x64 runner 上交叉进行，便携 Node 目标架构经 `DSH_RUNTIME_NODE_ARCH` 显式指定。

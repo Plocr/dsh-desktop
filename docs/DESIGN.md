@@ -51,10 +51,12 @@
 | D4 | 桥接传输 = **本地 WebSocket + 一次性 token**，经 `dsh desktop:` stdout 行发现 | 无固定端口冲突；stdout 行是既有稳定发现机制；token 防本机劫持 |
 | D5 | ~~`--port 0` + 解析打印的 URL~~ → **历史**（D27 后 harness 不监听端口；只有 bridge 的 WS 用 `port 0`，见 D4） | 官方支持 `port 0`，杜绝端口冲突 |
 | D26 | **渲染层不直连 harness 端口**：窗口加载特权方案 `dsh-app://app/`，HTTP 全量由主进程代理到回环端口；Remote 流（原 WebSocket mux）由主进程持有 WS 并以 NDJSON 转发，页面靠注入的 `__DSH_TRANSPORT__` 接管 | 对齐官方桌面壳「开不了/不开监听端口」的设计：端口、token 与会话 cookie 不进渲染层，页面里任何内容（第三方插件 client、模型输出渲染）都够不到 harness 的 HTTP 面；官方那套 framed-pipe 传输是私有包（`@deepseek-ai/dsh-desktop-host` 未发布），本壳用「同源特权方案 + 主进程代理」拿到同等隔离 |
-| D27 | **完全采用官方桌面端架构**：Host 子进程（`packages/host`，官方 apps/desktop-host 的移植）在随包 Node 里引导 dsh；壳与 Host 之间只有 fd3/fd4 **字节管道**（协议 v3，13 字节帧头，64 KiB 数据帧，desiredSize 背压）；渲染层只经 `dsh-app://` 特权方案访问 —— **本机不存在 harness 的监听端口** | 官方 README 的核心决策（端口归属/认证/CORS/暴露风险），并且是唯一能让 Web UI 在自定义方案下正常工作的形状（远端流从 WS mux 改走 NDJSON，Host 注入 `__DSH_TRANSPORT__`） |
+| D27 | **采用官方桌面端的 Host 子进程形态**：Host 子进程（`packages/host`，官方 apps/desktop-host 的移植）在随包 Node 里引导 dsh；壳与 Host 之间只有 fd3/fd4 **字节管道**（协议 v3，13 字节帧头，64 KiB 数据帧，desiredSize 背压）；渲染层只经 `dsh-app://` 特权方案访问 —— **本机不存在 harness 的监听端口**（后续官方已换成认证 Web Host：见 D36） | 官方 2026-09-02 版 README 的核心决策（端口归属/认证/CORS/暴露风险），并且是让 Web UI 在自定义方案下正常工作的形状（远端流从 WS mux 改走 NDJSON，Host 注入 `__DSH_TRANSPORT__`） |
 | D28 | **运行时随包两棵树**：`resources/runtime`（便携 Node + pnpm）+ `resources/dsh`（dsh 闭包 + 第一方包 + `desktop-runtime.json`），`extraResources` 分发、不再解压 | 官方 prepare-runtime / prepare-dsh 的形状；`desktop-runtime.json`（每文件 sha256 + sharedPackages + release 身份）在启动时校验，`resources/dsh/node_modules` 需要单独一条 extraResources 映射（electron-builder 会剔除源目录根的 node_modules，官方同款处理） |
 | D29 | **版本绑定 = 一个签名更新单元**：壳版本 + dsh 版本 + Node + pnpm + 协议版本写进 `desktop-runtime.json`；壳启动校验 `release.version === app.getVersion()` 且 dsh 共享包版本一致 | 官方 release.ts / verifyDesktopRuntime 的语义。**删除**：应用内 harness 整树刷新、npm registry 版本检测、启动兼容探测、tar.gz 解压与 marker、不兼容版本清单（历史上为「解耦更新」付出的全部复杂度） |
-| D30 | **插件全部走随包 pnpm + profile 组合**：`dsh.profile.bundles` 决定加载什么；第一方包以 junction 共享包链接；第三方插件 `pnpm add --save-exact --ignore-scripts`，依赖脚本只认官方 `allowBuilds` 白名单；事务持有 `<profile>/lock` + `desktop-packages-pending`，失败保留部分改动、不回滚 | 官方 project-manager 语义。bridge 因此改为**标准 bundle 包**（`dsh.bundle.patch`），token 由插件自持并只经 stdout 发现行交给壳（bundle 模型下没有 config 注入点） |
+| D30 | **插件全部走随包 pnpm + profile 组合**：`dsh.profile.bundles` 决定加载什么；第一方包以 junction 共享包链接；第三方插件 `pnpm add --save-exact --ignore-scripts`，依赖脚本只认官方 `allowBuilds` 白名单；事务持有 `<profile>/lock` + `desktop-packages-pending`（失败语义已被 D37 更新） | 官方 project-manager 语义。bridge 因此改为**标准 bundle 包**（`dsh.bundle.patch`），token 由插件自持并只经 stdout 发现行交给壳（bundle 模型下没有 config 注入点） |
+| D36 | **官方桌面 Host 已换代（本壳保留旧形态，待单独决策）**：官方 master 的 `apps/desktop-host` 用 `runProfile` 起**真实 Web Host**（`--port 19387`），把认证 URL 与 index 注入片段经 Node IPC 交给 Electron，由 Electron 转发应用请求；本壳仍是 D27 的字节管道 + `dsh-app://` 直连 | 传输换代牵动 `appProtocol.ts` / `hostProtocol.ts` / `lanServer.ts` 三条路径，并推翻"本机无监听端口"这条自证安全边界（README 与设计文档都把它当卖点）——属于产品级取舍，必须单独一轮决策而不是顺手改。差距逐条见 [OFFICIAL-ALIGNMENT-REVIEW.md](OFFICIAL-ALIGNMENT-REVIEW.md) |
+| D37 | **插件系统交给官方共享管理器**：绑定运行时升到 `dsh 0.1.6-alpha.2`；Host 提供官方「启动器信息」`profileContext`（`packageManager` = 随包 Node + 随包 pnpm，`overlays` 承载本壳自有 patch 层），`plugin-manager` 与 HMR 因此激活；启停的唯一事实来源是 `dsh.profile.bundles`（启动期只清理失效条目，**绝不重新启用**用户停用的组合包），安装失败回滚 `package.json` + `pnpm-lock.yaml` 快照，依赖脚本被 pnpm 11 拦下时走「允许这些脚本并重试」，每次 pnpm 输出落 `<profile>/.plugin-manager/logs/operation-*/pnpm.log` | `dsh-base` 的 `plugin-manager` / `hmr` 两行就是 `disabled: !!js "!ctx.get('profileContext')"`，而 `dsh-plugin-manager` 从 `0.1.6-alpha.2` 起才进 dsh 依赖闭包：不给启动器信息、不升版本，官方插件页与 `plugin_manager` 工具根本不会出现。旧 D30 的"失败保留部分改动"是更早的官方语义，已被官方失败表（安装回滚、卸载保留）取代 |
 | D31 | **签名按官方流程**：Windows EV/SafeNet 令牌签名（`scripts/windows-sign.mjs`，环境不备则显式跳过、配一半则硬报错）；macOS Developer ID + notarytool + stapling（`scripts/package-macos.mjs`，`resources/dsh`、`resources/runtime` 排除签名） | 官方 build pipeline 的等价物；细节与所需环境变量见 docs/SIGNING.md |
 | D32 | **桥接握手带协议版本**：`auth` 带 `protocolVersion`，插件在 `authed` 里回自己那版 + 最新诊断；两端不一致时壳记 error、通知一次并在托盘标注，但**不掐断** | profile 层允许用户替换 bundle，跨版本不一致必须可诊断；增量字段是加法式的，降级比拒绝更符合"桌面至少能用" |
 | D33 | **诊断通道 `bridge.diag`**：插件把 `ws.listening`/`jobs.present|absent`/`auth.rejected`/`loader.rejected`/`protocol.mismatch` 既打 stdout 也推给已鉴权连接，最新一条随 `authed` 给壳；壳落日志并显示「桥接：已连接 · jobs present」 | 桥接失效的表现是"通知不响"，此前只能翻与 harness 混流的 stdout；诊断通道让"连上了吗 / jobs 在不在"变成一眼可见的托盘状态 |
@@ -92,8 +94,8 @@ cordis.patch.yml  []（用户补丁层，壳不写它）
 - **加载什么由 `dsh.profile.bundles` 决定**（D30）：官方基线在前、用户 bundle 居中、bridge 永远最后；
   `ensureProfileBundles` 只做"缺失即补齐"，已满足时不写盘。
 - 第一方包（`@deepseek-ai/dsh`、`dsh-desktop-host`、`dsh-desktop-bridge`）以 **junction 共享包** 链接进
-  profile 的 `node_modules`（`profilePackages.linkDesktopHostPackages`）；第三方插件走随包 pnpm
-  事务安装（`pluginTransactions.ts`）。
+  profile 的 `node_modules`（`profilePackages.linkDesktopHostPackages`）；第三方插件由 **Host 进程里的
+  官方共享插件管理器**用随包 pnpm 装进 profile 依赖（D37；壳不再自建 pnpm 事务）。
 - 安全模式把 bundles 收窄到「官方基线 + bridge」（`isolateProfileForSafeMode`，带备份可恢复）。
 - bridge 不再需要 config 注入（token 由插件自持并只经 stdout 发现行交给壳）：历史 `--patch`
   overlay、`userData/overlay-*.yml`、`userData/plugins/` 那一套随架构迁移一并删除。
@@ -130,9 +132,9 @@ cordis.patch.yml  []（用户补丁层，壳不写它）
 | `bridgeEvents.ts` | 纯逻辑：发现行解析/脱敏、事件→通知/徽标、会话目录与待审批环、诊断解析（可单测） |
 | `appProtocol.ts` | `dsh-app://` 特权方案：`shell` 壳页面 + `app` 工作台；工作台请求经主进程转发到 Host 管道 fetch，入口注入 `__DSH_TRANSPORT__` |
 | `window.ts` | BrowserWindow + loading/error 过渡页 + 导航锁（只放行 `dsh-app://shell` / `dsh-app://app`） |
-| `tray.ts` | Harness/桥接状态行、最近会话、待审批、切换工作区、重启 Harness、API Key 状态、桌面插件、设置（更新/自启/通知/局域网）/日志/卸载/退出 |
+| `tray.ts` | Harness/桥接状态行、最近会话、待审批、切换工作区、重启 Harness、API Key 状态、桌面插件（官方插件页入口 + 安全模式）、设置（更新/自启/通知/局域网）/日志/卸载/退出 |
 | `runtime.ts` / `runtimeTree.ts` / `profilePackages.ts` | 运行时定位与描述符校验（dsh/host/**bridge** 三件共享包是硬前提）、profile 确保、bundle 组合、共享包 junction |
-| `pluginTransactions.ts` / `pluginfs.ts` | 第三方插件的 pnpm 事务安装/卸载、cordis.patch.yml 残留清理、保留名保护 |
+| `pluginfs.ts` | profile 组合对账（只清理失效条目）与安全模式隔离/恢复；插件安装/启停/卸载归官方插件管理器（D37） |
 | `maintenance.ts` | 清理日志；卸载（Windows NSIS 卸载器，保留用户数据） |
 | `notify.ts` | 系统通知（可带点击动作）+ `app.setBadgeCount` 徽标 |
 | `deepLink.ts` | dsh:// 深链解析（focus/new/session）；会话标题优先取本地会话目录，miss 再走 RPC |
@@ -145,12 +147,23 @@ cordis.patch.yml  []（用户补丁层，壳不写它）
 ### 4.4 插件机制（桌面壳 ↔ profile 组合）
 
 - **第一方包**：`packages/bridge`（桥接，必需）与 `packages/host`（Host 入口）随运行时树分发，
-  以 junction 链接进 profile；bridge 在 `dsh.profile.bundles` 里且**永不可卸**（`isReservedPluginName`）。
-- **第三方插件**：官方模型——`dsh plugin --profile dsh-workbench add <spec>`（或托盘「安装插件…」）走
-  随包 pnpm 事务（`pluginTransactions.ts`：profile 锁 + pending 记录 + `--ignore-scripts` + 官方 allowBuilds 白名单）。
-- **启停**：托盘「桌面插件」可勾选（bundle 取消挂载 = 移出 `dsh.profile.bundles`，代码保留可恢复）或卸载；
-  改动前先停 Host（避免热监听回滚 manifest），成功后重启生效。
-- **安全模式**：连续启动失败达阈值 → bundles 收窄到官方基线 + bridge（带备份），应用保底可打开。
+  以 junction 链接进 profile；bridge 在 `dsh.profile.bundles` 里且**永不可卸**（安全模式隔离也保留它）。
+- **官方插件系统（D37）**：Host 向 dsh 提供启动器信息 `profileContext`（`packages/host/src/index.ts` 的
+  `desktopProfileContext`），其中 `packageManager` 是随包 Node + 随包 pnpm 入口。官方 `dsh-base` 的
+  `plugin-manager` 与 `hmr` 两行据此激活，于是 **Web 侧边栏「插件」页与 `plugin_manager` 工具在本壳里
+  原生可用**：安装/启停/卸载、`inspect` 预检、安装日志流、失败回滚、待批准依赖脚本都由官方管理器负责。
+  启动层序统一由官方 `readProfilePatches` 计算，本壳自有的 patch 层（`config/desktop.cordis.patch.yml`
+  + agent 预设根）放进 `profileContext.overlays`，保证插件管理器/HMR 重算时与启动时逐层一致。
+- **唯一管理入口**：托盘「桌面插件」只留「在插件页管理（官方）…」与安全模式两项——壳**不再**维护
+  自己的插件列表、启停开关、安装/卸载对话框与 pnpm 事务（曾经的 `pluginTransactions.ts` 已删除）。
+  官方桌面端就是这样：Electron 不提供插件管理 IPC 或独立页面，安装/启停/卸载/授权/诊断全部由
+  共享插件管理器承担；离线可用性由「启动器提供随包 pnpm」保证，与托盘无关。
+- **启停**：唯一事实来源是 `dsh.profile.bundles`（关闭 = 移出列表、依赖保留、可再开启）。壳在启动期
+  **只清理已卸载的失效条目**（`pruneStaleProfileBundles`），绝不重新启用用户停用的组合包；
+  安装之后的「默认启用」也由官方管理器自己完成。
+- **安全模式**：连续启动失败达阈值 → bundles 收窄到官方基线 + bridge，同时把用户 patch 层
+  `cordis.patch.yml` 移出（`*.safemode.bak`）；两者都只在首次进入时建立还原点，
+  「退出安全模式」时一起还原——坏插件与坏 patch 都是组合树起不来的来源（官方 `sanitizeProfile` 语义）。
 - 历史形态（`resources/plugins/` 内置复制、`--patch` overlay、`userData/plugins/`）已随 D28/D30 架构迁移删除。
 
 ### 4.5 加载页：粒子鲸鱼动画（shell-pages/loading.html）
@@ -209,7 +222,7 @@ E2E（`scripts/e2e-turn.mjs`，需 `DSH_DESKTOP_ELECTRON_ARGS=--remote-debugging
 - 通知/徽标由事件驱动；连接/重连后由 `dashboard.snapshot` 整份对齐（徽标 / 会话目录 / 待审批），因此跨 Host 重启不会留下旧计数。
 - **macOS**：dmg 打包（arm64/x64）、`dsh://` 深链（Info.plist protocols + open-url 事件 + 冷启动队列）、运行时路径走 `~/Library/Application Support` 已配置；**未实机验证**（打包须在 macOS 上执行 `npm run dist:mac`，且运行时 tar.gz 需在 mac 上重建）。
 - **Linux**：代码兼容（运行时路径走 `$XDG_DATA_HOME`），未提供打包配置。
-- harness 版本随壳绑定（当前 0.1.5-rc.2）；升级走框架发版，打包时由 setup-runtime.mjs 安装（`DSH_RUNTIME_DSH_VERSION` 可覆盖）。
+- harness 版本随壳绑定（当前 0.1.6-alpha.2）；升级走框架发版，打包时由 setup-runtime.mjs 安装（`DSH_RUNTIME_DSH_VERSION` 可覆盖）。
 - **更新机制（单链路）**：`src/main/updater.ts`（electron-updater + GitHub provider）负责框架更新，一次更新同时带走随包 dsh 运行时（D29）。历史的两层模型（含应用内 harness 整树刷新与 npm 版本检测）已删除。
 - **macOS 多架构自动更新**：arm64 与 x64 运行时 tar.gz 各自平台生成，CI 分两个 job 各产一个 dmg（含各自 `.blockmap`）。electron-updater 的 GitHub provider 读取单一 `latest-mac.yml`，按其 `files[]` 中 url 是否含 `process.arch` 挑选 dmg——因此由独立的 `merge-mac-manifest` job（`scripts/merge-mac-manifest.mjs`）把两份 dmg 的 url/sha512/size 合并为一份 `latest-mac.yml` 上传，两个架构的用户都能应用内更新。
 - 更新安装依赖 NSIS 安装器（`quitAndInstall` 静默执行）；`oneClick: false` 下更新流程已验证到"就绪"事件，安装动作留待真实发布后人工确认。

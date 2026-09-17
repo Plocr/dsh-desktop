@@ -34,6 +34,11 @@ const DSH_VERSION = process.env.DSH_RUNTIME_DSH_VERSION ?? dshRuntime.dsh
 const NODE_VERSION = process.env.DSH_RUNTIME_NODE_VERSION ?? dshRuntime.node
 const PNPM_VERSION = process.env.DSH_RUNTIME_PNPM_VERSION ?? dshRuntime.pnpm
 const HOST_PROTOCOL_VERSION = 3
+/**
+ * Office→PDF 原生引擎（LibreOffice，win32-x64 ≈ 325 MB / 2000 文件）默认随包**不**带：
+ * 它只服务应用内文档预览，是本壳体积的绝对大头。需要预览的构建设 `DSH_DESKTOP_OFFICE_RUNTIME=1`。
+ */
+const OFFICE_RUNTIME = process.env.DSH_DESKTOP_OFFICE_RUNTIME === '1'
 if (!DSH_VERSION || !NODE_VERSION || !PNPM_VERSION) {
   throw new Error('package.json 缺少 dshRuntime.{dsh,node,pnpm}（运行时版本绑定的唯一事实来源）')
 }
@@ -243,14 +248,18 @@ function walkFiles(dir, base = dir, out = []) {
   return out
 }
 
-/** 按官方文件策略裁剪运行时树（只删构建/诊断残留，运行时资源一律保留）。 */
+/** 按文件策略裁剪运行时树（只删构建/诊断残留与可选大件，运行时资源一律保留）。 */
 function pruneRuntimeTree(target) {
   const nm = path.join(dshDir, 'node_modules')
   if (!existsSync(nm)) return
   let removed = 0
   const reasons = new Map()
   for (const rel of walkFiles(nm)) {
-    const reason = desktopRuntimeFileExclusion(`node_modules/${rel}`, { platform: target.platform, arch: target.arch })
+    const reason = desktopRuntimeFileExclusion(
+      `node_modules/${rel}`,
+      { platform: target.platform, arch: target.arch },
+      { officeRuntime: OFFICE_RUNTIME },
+    )
     if (reason === undefined) continue
     try {
       const size = statSync(path.join(nm, rel)).size
@@ -403,6 +412,10 @@ const CACHE_FILE = path.join(root, 'resources', '.dsh-runtime-cache.json')
 
 async function main() {
   const target = { platform: process.platform, arch: NODE_ARCH }
+  console.log(
+    `[runtime] office PDF engine: ${OFFICE_RUNTIME ? 'included' : 'excluded'}`
+      + (OFFICE_RUNTIME ? '' : '（默认剔除；需要应用内 docx/xlsx/pptx 预览时设 DSH_DESKTOP_OFFICE_RUNTIME=1）'),
+  )
   const bridgeHash = sourceHash(path.join(root, 'packages', 'bridge'))
   const hostHash = sourceHash(path.join(root, 'packages', 'host'))
   const key = {
@@ -413,6 +426,8 @@ async function main() {
     bridge: bridgeHash,
     host: hostHash,
     shell: pkg.version,
+    // 打包策略也进缓存键：切换 Office 引擎随包与否必须重建，不能命中旧树。
+    officeRuntime: OFFICE_RUNTIME,
   }
 
   // 先备齐便携 Node + pnpm：npm 操作要用便携 Node 自带的 npm-cli.js（不依赖系统 npm）

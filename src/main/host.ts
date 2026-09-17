@@ -39,6 +39,12 @@ export interface HostOptions {
   runtimeDir: string
   /** Electron 托管的 profile 目录（$DSH_HOME/profiles/<profile>）。 */
   projectDir: string
+  /**
+   * 随包 pnpm 入口（`resources/runtime/pnpm/bin/pnpm.cjs`）。
+   * 交给 Host 后成为官方插件管理器的 `profileContext.packageManager`——插件安装/删除
+   * 走随包 pnpm，离线机器不需要系统 pnpm，也不受用户 npmrc 影响（官方语义）。
+   */
+  pnpmEntry?: string
   /** 工作区开发用回环 inspector 端口；给出时 Host 额外允许 workspace 链接的 bundle。 */
   inspectPort?: number
   /** 崩溃重启退避上限（缺省 30s）。 */
@@ -256,6 +262,7 @@ export class HostManager {
       (line) => { this.emitLog('stdout', line) },
       (line) => { this.emitLog('stderr', line) },
       (code, signal) => { this.onHostExit(gen, code, signal) },
+      this.opts.pnpmEntry,
     )
     this.child = host
     log('info', `host spawn ${this.opts.node} ${this.opts.runtimeDir} (project=${this.opts.projectDir}${this.opts.inspectPort === undefined ? '' : `, inspect=${String(this.opts.inspectPort)}`})`)

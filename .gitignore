@@ -1,6 +1,7 @@
 node_modules/
 dist/
-release/
+# electron-builder 产物（release/ 为标准输出；release-final/ 等变体一并忽略）
+release*/
 # 随包运行时（setup-runtime.mjs 生成：便携 Node + pnpm / dsh 闭包 + 第一方包）
 resources/dsh/
 resources/runtime/

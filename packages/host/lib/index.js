@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import { readFile } from "node:fs/promises";
-import { dirname, extname, join, normalize, resolve, sep } from "node:path";
+import { delimiter, dirname, extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   boot,
@@ -13,8 +13,12 @@ import {
   healProfilesModuleFallback,
   loadLayeredEnv,
   loadProfileDirectory,
-  loadOverlayPatches
+  loadOverlayPatches,
+  PROFILE_PATCH_FILENAME,
+  readProfileManifest,
+  readProfilePatches
 } from "@deepseek-ai/dsh-app-boot";
+import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { provideCmdline } from "@deepseek-ai/dsh-cmdline";
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from "@deepseek-ai/dsh-launch-environment";
 import { renderIndexInjections } from "@deepseek-ai/dsh-host-webserver";
@@ -210,23 +214,28 @@ async function healModuleFallback(runtimeDir, projectDir) {
   const profile = loadProfileDirectory("dsh desktop", projectDir, installAnchor);
   await healProfilesModuleFallback({ installAnchor, profile });
 }
-function desktopPatches(runtimeDir, projectDir, allowLinkedPackages) {
-  const dshRoot = dirname(packageManifestPath(runtimeDir, "@deepseek-ai/dsh"));
-  const profile = loadProfileDirectory("dsh desktop", projectDir, join(dshRoot, "package.json"));
+var DESKTOP_PROFILE_NAME = "dsh-workbench";
+function dshInstallAnchor(runtimeDir) {
+  return packageManifestPath(runtimeDir, "@deepseek-ai/dsh");
+}
+function desktopOverlays(runtimeDir, projectDir, allowLinkedPackages) {
+  const installAnchor = dshInstallAnchor(runtimeDir);
+  const dshRoot = dirname(installAnchor);
+  const profile = loadProfileDirectory("dsh desktop", projectDir, installAnchor);
   for (const layer of profile.layers) {
     if (!allowLinkedPackages && !isProjectPath(projectDir, layer.packageDir) && !isProjectPath(runtimeDir, layer.packageDir)) {
       throw new Error(`dsh desktop: profile bundle ${JSON.stringify(layer.packageName)} resolved outside the Desktop runtime and profile`);
     }
   }
-  const layers = [
+  const overlays = [loadOverlayPatches("dsh desktop", DESKTOP_PATCH)];
+  const rows = new Map(composeEntries([
     ...profile.layers.map((layer) => layer.patches),
     profile.patches,
-    loadOverlayPatches("dsh desktop", DESKTOP_PATCH)
-  ];
-  const rows = new Map(composeEntries(layers).flatMap((row) => typeof row.id === "string" ? [[row.id, row]] : []));
+    ...overlays
+  ]).flatMap((row) => typeof row.id === "string" ? [[row.id, row]] : []));
   const agentPresets = rows.get("agent-presets");
   if (agentPresets !== void 0) {
-    layers.push([{
+    overlays.push([{
       id: "agent-presets",
       config: {
         ...agentPresets.config ?? {},
@@ -234,7 +243,59 @@ function desktopPatches(runtimeDir, projectDir, allowLinkedPackages) {
       }
     }]);
   }
-  return layers.flat();
+  return overlays;
+}
+function desktopProfileContext(runtimeDir, projectDir, allowLinkedPackages, packageManager) {
+  const installAnchor = dshInstallAnchor(runtimeDir);
+  return {
+    name: DESKTOP_PROFILE_NAME,
+    dir: projectDir,
+    patchPath: join(projectDir, PROFILE_PATCH_FILENAME),
+    installAnchor,
+    cwd: process.cwd(),
+    home: resolveDshHome(),
+    startedBundles: [...readProfileManifest("dsh desktop", projectDir).dsh?.profile?.bundles ?? []],
+    overlays: desktopOverlays(runtimeDir, projectDir, allowLinkedPackages),
+    telemetryDisabledEnv: process.env.DSH_TELEMETRY_DISABLED,
+    ...packageManager === void 0 ? {} : { packageManager }
+  };
+}
+function desktopPackageManager(pnpmEntry) {
+  if (pnpmEntry === void 0) return void 0;
+  const nodeDir = dirname(process.execPath);
+  return {
+    command: process.execPath,
+    args: ["--expose-internals", resolve(pnpmEntry)],
+    env: {
+      DSH_DESKTOP_NODE_EXECUTABLE: process.execPath,
+      PATH: `${nodeDir}${delimiter}${process.env.PATH ?? ""}`
+    }
+  };
+}
+function createAppReady() {
+  let ready = false;
+  const listeners = /* @__PURE__ */ new Set();
+  return {
+    service: {
+      onReady(listener) {
+        if (ready) {
+          listener();
+          return () => {
+          };
+        }
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      }
+    },
+    commit() {
+      if (ready) return;
+      ready = true;
+      for (const listener of [...listeners]) listener();
+      listeners.clear();
+    }
+  };
 }
 function dshVersion(runtimeDir) {
   const manifest = readManifest(packageManifestPath(runtimeDir, "@deepseek-ai/dsh"));
@@ -331,17 +392,22 @@ async function runDesktopHost(runtimeDir, projectDir, writeResponse, options = {
   writeFileSync(rootConfig, ROOT_CONFIG);
   const environment = loadLayeredEnv("dsh desktop");
   await healModuleFallback(resolve(runtimeDir), absoluteProject);
-  let current;
-  const ctx = await boot("dsh desktop", rootConfig, structuredClone(desktopPatches(
+  const profileContext = desktopProfileContext(
     resolve(runtimeDir),
     absoluteProject,
-    options.allowLinkedPackages === true
-  )), (hostCtx) => {
+    options.allowLinkedPackages === true,
+    desktopPackageManager(options.pnpmEntry)
+  );
+  const appReady = createAppReady();
+  let current;
+  const ctx = await boot("dsh desktop", rootConfig, readProfilePatches("dsh desktop", profileContext), (hostCtx) => {
     current = hostCtx;
     hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment);
+    hostCtx.provide("profileContext", profileContext);
     provideCmdline(hostCtx, { args: [], exit: () => {
-    } });
+    }, ready: appReady.service });
   });
+  if (ctx.fiber.state === 2 && ctx.get("loader") !== void 0) appReady.commit();
   current = ctx;
   const connection = ctx.get("connection");
   const clientModules = ctx.get("clientModules");
@@ -420,9 +486,23 @@ async function main() {
   if (runtimeDir === void 0 || projectDir === void 0 || process.send === void 0) {
     throw new Error("dsh desktop: expected runtime and profile directories, byte pipes, and a Node IPC channel");
   }
-  const option = process.argv[4];
-  if (option !== void 0 && option !== "--allow-linked-profile") {
-    throw new Error(`dsh desktop: unsupported internal option ${JSON.stringify(option)}`);
+  let allowLinkedPackages = false;
+  let pnpmEntry;
+  const argv = process.argv.slice(4);
+  for (let index = 0; index < argv.length; index += 1) {
+    const flag = argv[index];
+    if (flag === "--allow-linked-profile") {
+      allowLinkedPackages = true;
+      continue;
+    }
+    if (flag === "--pnpm") {
+      const value = argv[index + 1];
+      if (value === void 0) throw new Error("dsh desktop: --pnpm requires a path");
+      pnpmEntry = value;
+      index += 1;
+      continue;
+    }
+    throw new Error(`dsh desktop: unsupported internal option ${JSON.stringify(flag)}`);
   }
   const requestPipe = createReadStream("", { fd: DESKTOP_REQUEST_PIPE_FD, autoClose: false });
   const responsePipe = createWriteStream("", { fd: DESKTOP_RESPONSE_PIPE_FD, autoClose: false });
@@ -443,7 +523,10 @@ async function main() {
       if (error.code !== "ERR_IPC_CHANNEL_CLOSED") throw error;
     }
   };
-  const controller = await runDesktopHost(runtimeDir, projectDir, writeResponse, { allowLinkedPackages: option !== void 0 });
+  const controller = await runDesktopHost(runtimeDir, projectDir, writeResponse, {
+    allowLinkedPackages,
+    ...pnpmEntry === void 0 ? {} : { pnpmEntry }
+  });
   send({
     type: "ready",
     protocolVersion: DESKTOP_HOST_PROTOCOL_VERSION,

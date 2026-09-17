@@ -14,7 +14,7 @@ import { createRequire } from 'node:module'
 import { closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { once } from 'node:events'
 import { readFile } from 'node:fs/promises'
-import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
+import { delimiter, dirname, extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
@@ -25,7 +25,13 @@ import {
   loadLayeredEnv,
   loadProfileDirectory,
   loadOverlayPatches,
+  PROFILE_PATCH_FILENAME,
+  readProfileManifest,
+  readProfilePatches,
+  type ProfileContext,
+  type ProfilePnpmInvocation,
 } from '@deepseek-ai/dsh-app-boot'
+import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 import type {} from '@deepseek-ai/dsh-api-gateway'
@@ -170,23 +176,43 @@ async function healModuleFallback(runtimeDir: string, projectDir: string): Promi
   await healProfilesModuleFallback({ installAnchor, profile })
 }
 
-function desktopPatches(runtimeDir: string, projectDir: string, allowLinkedPackages: boolean): PatchOptions[] {
-  const dshRoot = dirname(packageManifestPath(runtimeDir, '@deepseek-ai/dsh'))
-  const profile = loadProfileDirectory('dsh desktop', projectDir, join(dshRoot, 'package.json'))
+/** 本壳 profile 名；必须与 `src/main/desktopProfile.ts` 的 DESKTOP_PROFILE 一致。 */
+const DESKTOP_PROFILE_NAME = 'dsh-workbench'
+
+/** 随包 dsh 安装锚点（`<runtimeDir>/node_modules/@deepseek-ai/dsh/package.json`）。 */
+function dshInstallAnchor(runtimeDir: string): string {
+  return packageManifestPath(runtimeDir, '@deepseek-ai/dsh')
+}
+
+/**
+ * 本壳自有的额外 patch 层，作为 `profileContext.overlays` 交给启动器。
+ *
+ * 为什么必须走 overlays 而不是自己拼一份列表：官方插件管理器与 HMR 在配置变化时
+ * 会用 `readProfilePatches(binName, profileContext)` 重算整棵组合树。只有把自有层
+ * 放进 `overlays`，重算结果才与本进程启动时的层序**逐层一致**——否则任何一次
+ * 「装插件/改 patch」都会把自有覆盖（例如 agent 预设根）悄悄丢掉。
+ *
+ * 层内容与移植前等价：随包 `config/desktop.cordis.patch.yml` + agent 预设根指向
+ * 随包 dsh 的 `config/agent-presets`（后者按组合树里 `agent-presets` 行的现有配置追加）。
+ */
+function desktopOverlays(runtimeDir: string, projectDir: string, allowLinkedPackages: boolean): PatchOptions[] {
+  const installAnchor = dshInstallAnchor(runtimeDir)
+  const dshRoot = dirname(installAnchor)
+  const profile = loadProfileDirectory('dsh desktop', projectDir, installAnchor)
   for (const layer of profile.layers) {
     if (!allowLinkedPackages && !isProjectPath(projectDir, layer.packageDir) && !isProjectPath(runtimeDir, layer.packageDir)) {
       throw new Error(`dsh desktop: profile bundle ${JSON.stringify(layer.packageName)} resolved outside the Desktop runtime and profile`)
     }
   }
-  const layers = [
+  const overlays: PatchOptions[] = [loadOverlayPatches('dsh desktop', DESKTOP_PATCH)]
+  const rows = new Map(composeEntries([
     ...profile.layers.map(layer => layer.patches),
     profile.patches,
-    loadOverlayPatches('dsh desktop', DESKTOP_PATCH),
-  ]
-  const rows = new Map(composeEntries(layers).flatMap(row => typeof row.id === 'string' ? [[row.id, row] as const] : []))
+    ...overlays,
+  ]).flatMap(row => typeof row.id === 'string' ? [[row.id, row] as const] : []))
   const agentPresets = rows.get('agent-presets')
   if (agentPresets !== undefined) {
-    layers.push([{
+    overlays.push([{
       id: 'agent-presets',
       config: {
         ...(agentPresets.config ?? {}) as Record<string, unknown>,
@@ -194,7 +220,92 @@ function desktopPatches(runtimeDir: string, projectDir: string, allowLinkedPacka
       },
     }])
   }
-  return layers.flat()
+  return overlays
+}
+
+/**
+ * 官方「启动器信息」：桌面壳作为 profile 的拥有者，把启动期事实交给 dsh。
+ *
+ * 这些字段决定官方 `dsh-plugin-manager` 与 `dsh-hmr` 是否激活——`dsh-base` 的
+ * patch 里两行的开关就是 `disabled: !!js "!ctx.get('profileContext')"`。因此
+ * 「随包 pnpm + 真 profile 上下文」不是可选增强，而是官方插件系统的前置条件：
+ * 缺了它，Web 端「插件」页只会报自己不可用，插件管理只能退回壳自研实现。
+ *
+ * `packageManager` 是启动器提供的内置包管理器调用（离线前提）：命令用随包 Node，
+ * 参数是随包 pnpm 入口，环境只作用于包操作子进程（官方 `ProfilePnpmInvocation` 语义）。
+ */
+function desktopProfileContext(
+  runtimeDir: string,
+  projectDir: string,
+  allowLinkedPackages: boolean,
+  packageManager: ProfilePnpmInvocation | undefined,
+): ProfileContext {
+  const installAnchor = dshInstallAnchor(runtimeDir)
+  return {
+    name: DESKTOP_PROFILE_NAME,
+    dir: projectDir,
+    patchPath: join(projectDir, PROFILE_PATCH_FILENAME),
+    installAnchor,
+    cwd: process.cwd(),
+    home: resolveDshHome(),
+    startedBundles: [...(readProfileManifest('dsh desktop', projectDir).dsh?.profile?.bundles ?? [])],
+    overlays: desktopOverlays(runtimeDir, projectDir, allowLinkedPackages),
+    telemetryDisabledEnv: process.env.DSH_TELEMETRY_DISABLED,
+    ...(packageManager === undefined ? {} : { packageManager }),
+  }
+}
+
+/**
+ * 随包 pnpm 的启动器调用形式：`<随包 Node> --expose-internals <pnpm 入口> <子命令…>`。
+ * `PATH` 前缀让 pnpm 内部再 spawn `node` 时仍命中随包 Node；其余环境由官方
+ * `runProfilePnpm` 自行清理（`extendEnv: false` + scrubbedParentEnv）。
+ */
+function desktopPackageManager(pnpmEntry: string | undefined): ProfilePnpmInvocation | undefined {
+  if (pnpmEntry === undefined) return undefined
+  const nodeDir = dirname(process.execPath)
+  return {
+    command: process.execPath,
+    args: ['--expose-internals', resolve(pnpmEntry)],
+    env: {
+      DSH_DESKTOP_NODE_EXECUTABLE: process.execPath,
+      PATH: `${nodeDir}${delimiter}${process.env.PATH ?? ''}`,
+    },
+  }
+}
+
+/**
+ * 启动器就绪信号（与官方 `@deepseek-ai/dsh/profile-boot` 的 `createAppReady` 同语义）。
+ *
+ * 为什么必须有：`dsh-hmr` 在 `profileContext` 在场时会 `ctx.get('appReady')`，拿不到就直接
+ * 抛 `Profile HMR requires application readiness`（组合树启动失败）。官方 launcher 在树
+ * 安定（fiber ACTIVE + loader 在场）后 `commit()`；我们照同判据提交。
+ */
+function createAppReady(): {
+  readonly service: { readonly onReady: (listener: () => void) => () => void }
+  readonly commit: () => void
+} {
+  let ready = false
+  const listeners = new Set<() => void>()
+  return {
+    service: {
+      onReady(listener: () => void): () => void {
+        if (ready) {
+          listener()
+          return () => {}
+        }
+        listeners.add(listener)
+        return () => {
+          listeners.delete(listener)
+        }
+      },
+    },
+    commit(): void {
+      if (ready) return
+      ready = true
+      for (const listener of [...listeners]) listener()
+      listeners.clear()
+    },
+  }
 }
 
 function dshVersion(runtimeDir: string): string {
@@ -294,14 +405,15 @@ interface NodeRequestInit extends RequestInit {
  * @param runtimeDir - immutable dsh packages supplied by the Electron application.
  * @param projectDir - active or staged Electron-owned desktop profile.
  * @param writeResponse - serialized response-pipe writer that applies byte backpressure.
- * @param options - development-only allowance for workspace-linked bundle packages.
+ * @param options - development-only allowance for workspace-linked bundle packages, plus the
+ *   bundled pnpm entry that becomes the profile's launcher-provided package manager.
  * @returns controller after every Host and client-manifest row is active.
  */
 export async function runDesktopHost(
   runtimeDir: string,
   projectDir: string,
   writeResponse: (frame: Buffer) => Promise<void>,
-  options: { allowLinkedPackages?: boolean } = {},
+  options: { allowLinkedPackages?: boolean; pnpmEntry?: string } = {},
 ): Promise<DesktopHostController> {
   const absoluteProject = resolve(projectDir)
   mkdirSync(absoluteProject, { recursive: true })
@@ -310,16 +422,26 @@ export async function runDesktopHost(
   const environment = loadLayeredEnv('dsh desktop')
   // 见 healModuleFallback：全新 DSH_HOME 下 profile 的模块回退目录必须先就位
   await healModuleFallback(resolve(runtimeDir), absoluteProject)
-  let current: Context | undefined
-  const ctx = await boot('dsh desktop', rootConfig, structuredClone(desktopPatches(
+  const profileContext = desktopProfileContext(
     resolve(runtimeDir),
     absoluteProject,
     options.allowLinkedPackages === true,
-  )), (hostCtx) => {
+    desktopPackageManager(options.pnpmEntry),
+  )
+  const appReady = createAppReady()
+  let current: Context | undefined
+  // 层序由官方 `readProfilePatches` 计算：bundle 层 → profile patch → home patch → 自有 overlays。
+  // 与插件管理器/HMR 的重算入口同一个函数，保证运行中的树与磁盘配置永不漂移。
+  const ctx = await boot('dsh desktop', rootConfig, readProfilePatches('dsh desktop', profileContext), (hostCtx) => {
     current = hostCtx
     hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
-    provideCmdline(hostCtx, { args: [], exit: () => {} })
+    // 官方插件系统（dsh-plugin-manager / dsh-hmr）的激活条件；见 desktopProfileContext 的说明。
+    hostCtx.provide('profileContext', profileContext)
+    // appReady 同样是 dsh-hmr 的硬前提（缺了会以「Profile HMR requires application readiness」拒绝启动）。
+    provideCmdline(hostCtx, { args: [], exit: () => {}, ready: appReady.service })
   })
+  // 官方判据：树已安定（fiber ACTIVE = 2）且 loader 服务在场才提交就绪。
+  if (ctx.fiber.state === 2 && ctx.get('loader') !== undefined) appReady.commit()
   current = ctx
   const connection = ctx.get('connection')
   const clientModules = ctx.get('clientModules')
@@ -405,9 +527,25 @@ async function main(): Promise<void> {
   if (runtimeDir === undefined || projectDir === undefined || process.send === undefined) {
     throw new Error('dsh desktop: expected runtime and profile directories, byte pipes, and a Node IPC channel')
   }
-  const option = process.argv[4]
-  if (option !== undefined && option !== '--allow-linked-profile') {
-    throw new Error(`dsh desktop: unsupported internal option ${JSON.stringify(option)}`)
+  // 内部选项：`--allow-linked-profile`（开发：放行 workspace 链接的 bundle）、
+  // `--pnpm <入口>`（随包 pnpm，作为启动器提供的包管理器交给 profileContext）。
+  let allowLinkedPackages = false
+  let pnpmEntry: string | undefined
+  const argv = process.argv.slice(4)
+  for (let index = 0; index < argv.length; index += 1) {
+    const flag = argv[index]
+    if (flag === '--allow-linked-profile') {
+      allowLinkedPackages = true
+      continue
+    }
+    if (flag === '--pnpm') {
+      const value = argv[index + 1]
+      if (value === undefined) throw new Error('dsh desktop: --pnpm requires a path')
+      pnpmEntry = value
+      index += 1
+      continue
+    }
+    throw new Error(`dsh desktop: unsupported internal option ${JSON.stringify(flag)}`)
   }
   const requestPipe = createReadStream('', { fd: DESKTOP_REQUEST_PIPE_FD, autoClose: false })
   const responsePipe = createWriteStream('', { fd: DESKTOP_RESPONSE_PIPE_FD, autoClose: false })
@@ -430,7 +568,10 @@ async function main(): Promise<void> {
       if ((error as NodeJS.ErrnoException).code !== 'ERR_IPC_CHANNEL_CLOSED') throw error
     }
   }
-  const controller = await runDesktopHost(runtimeDir, projectDir, writeResponse, { allowLinkedPackages: option !== undefined })
+  const controller = await runDesktopHost(runtimeDir, projectDir, writeResponse, {
+    allowLinkedPackages,
+    ...(pnpmEntry === undefined ? {} : { pnpmEntry }),
+  })
   send({
     type: 'ready',
     protocolVersion: DESKTOP_HOST_PROTOCOL_VERSION,

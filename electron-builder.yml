@@ -22,6 +22,12 @@ files:
 extraResources:
   - from: resources/runtime
     to: runtime
+    # 便携 Node 里只保留 node 可执行文件：`node/node_modules/npm`（1739 文件 / 10 MB）
+    # 只在**构建期**被 scripts/setup-runtime.mjs 用来安装 dsh 闭包，运行期一律走随包 pnpm
+    # （pnpm/dist 自带 node-gyp）。剔除它显著减少安装包文件数 → NSIS 安装更快。
+    filter:
+      - '**/*'
+      - '!node/node_modules/npm/**'
   - from: resources/dsh
     to: dsh
   - from: resources/dsh/node_modules

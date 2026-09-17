@@ -107,7 +107,7 @@ async function rpc(ws, messages, id, method, params) {
   return waitFor(() => messages.find((m) => m.type === 'result' && m.id === id), `RPC ${method}`)
 }
 
-/** 一组足够真实的宿主服务 stub（形状对齐 dsh 0.1.5-rc.2）。 */
+/** 一组足够真实的宿主服务 stub（形状对齐 dsh 0.1.6-alpha.2）。 */
 function harnessStub({ sessionIds = ['s1'], jobs = undefined, loader = { await: () => Promise.resolve() } } = {}) {
   const liveSessions = () =>
     sessionIds.map((id) => ({

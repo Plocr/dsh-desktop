@@ -73,7 +73,7 @@ bridge 是**壳 ↔ harness 的唯一通道**：插件跑在 Host 进程内的 d
 | 插件契约（hermetic） | `node --test test/bridge-plugin.test.mjs` | 起真插件 + 真 vendored ws 客户端：发现行（含"只打一行"/无 loader/安定失败三条路径）、鉴权（错 token 4001 / 超时 4002）、全部 RPC、审批推送形状、任务去重、dispose 语义、服务全缺降级 |
 | 壳侧纯逻辑 | `node --test test/bridge-events.test.mjs` | 发现行前缀契约、非法/空 token 拒绝、日志脱敏、快照→徽标、通知文案 |
 | 运行时前提 | `node --test test/runtime-descriptor.test.mjs` | 三件共享包硬前提（dsh 版本 / host / bridge） |
-| 端到端（真实 harness） | `npm run e2e:bridge` | 真 Host + dsh 0.1.5-rc.2：发现行出现、鉴权、**协议版本一致 + diag（jobs.present）**、`workspace.register` 真建工作区、错/空 token 均被 4001 拒绝、未知方法报错、管道 fetch 与 LAN 门禁；CI 已接入（`e2e` job） |
+| 端到端（真实 harness） | `npm run e2e:bridge` | 真 Host + dsh 0.1.6-alpha.2：发现行出现、鉴权、**协议版本一致 + diag（jobs.present）**、`workspace.register` 真建工作区、错/空 token 均被 4001 拒绝、未知方法报错、管道 fetch 与 LAN 门禁；CI 已接入（`e2e` job） |
 
 全量：`npm run check`（typecheck + 90 项测试）。本轮修复均在真实 dsh 上跑过 `e2e:bridge`（含 `resources/dsh` 手工同步 0.4.0；**正式发行前需重跑 `npm run setup:runtime` 让 tgz 与 descriptor 一起重建**）。
 

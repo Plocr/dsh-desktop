@@ -6,7 +6,9 @@
  *  2. **字节管道**（fd3/fd4 + 13 字节帧头）能把 fetch 送到 Host 并把 Response 流回来，
  *     入口文档里带着 Host 注入的 `__DSH_TRANSPORT__`（远端流改走 NDJSON 的依据）；
  *  3. stdout 出现 bridge 的 `dsh desktop: {"port","token"}` 发现行，WS 鉴权 + 全部 RPC 可用；
- *  4. 对外门面（lanServer）把 HTTP 请求喂给同一条管道 fetch（局域网/浏览器版路径）。
+ *  4. 对外门面（lanServer）把 HTTP 请求喂给同一条管道 fetch（局域网/浏览器版路径）；
+ *  5. 官方插件系统已激活：`/api/pluginManager.listBundles` 经管道可达（= Host 提供了
+ *     启动器信息 profileContext，`dsh-base` 的 plugin-manager/hmr 两行因此打开）。
  *
  * 这里不经过 Electron：直接按壳的 spawn 契约起 Host，帧编解码复用 src/main/hostProtocol.ts
  * （与壳生产代码同一份实现，等于同时验证了 shell 侧的协议移植）。
@@ -37,6 +39,8 @@ const runtimeDir = path.join(root, 'resources', 'dsh')
 const nodeExe = path.join(root, 'resources', 'runtime', 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node')
 const templateDir = path.join(root, 'resources', 'profile-template', 'dsh-workbench')
 const hostEntry = path.join(runtimeDir, 'node_modules', 'dsh-desktop-host', 'lib', 'index.js')
+/** 随包 pnpm：与壳的 `runtime.pnpmEntry` 同一个入口（启动器提供的包管理器）。 */
+const pnpmEntry = path.join(root, 'resources', 'runtime', 'pnpm', 'bin', 'pnpm.cjs')
 
 const args = process.argv.slice(2)
 const sessionsArgIdx = args.indexOf('--sessions')
@@ -97,7 +101,7 @@ if (sessionsDir && existsSync(sessionsDir)) {
 
 /* ── 按壳的 spawn 契约起 Host：fd3=请求管道、fd4=响应管道、fd5=Node IPC ── */
 
-const child = spawn(nodeExe, [hostEntry, runtimeDir, profileDir], {
+const child = spawn(nodeExe, [hostEntry, runtimeDir, profileDir, '--pnpm', pnpmEntry], {
   cwd: profileDir,
   env: { ...process.env, DSH_HOME: home, DSH_DESKTOP: '1' },
   stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'ipc'],
@@ -349,6 +353,26 @@ try {
     // $events 的首行就是 ready（含 clientId 与 host 事实）
     ok: stream.status === 200 && parsed?.type === 'ready' && typeof parsed.clientId === 'string' && parsed.host !== undefined,
     detail: { status: stream.status, first: firstLine.slice(0, 100) },
+  })
+
+  // 2b. 官方插件系统：Host 提供了 profileContext → dsh-base 的 plugin-manager 行激活 →
+  //     插件管理器的 Remote 在 /api 上被认领。端点不存在时会得到 404 not found，
+  //     这正是「没有启动器信息」时官方插件页报「不可用」的根因。
+  const pluginManagerCall = await pipeFetch('http://dsh.internal/api/pluginManager/listBundles', {
+    method: 'POST',
+    headers: [['content-type', 'application/json']],
+    body: JSON.stringify({
+      type: 'client-request',
+      rpcId: 'e2e-plugin-manager',
+      method: 'pluginManager/listBundles',
+      payload: { args: {} },
+    }),
+  })
+  const pluginManagerText = pluginManagerCall.body.toString('utf8')
+  results.push({
+    name: 'pipe:/api/pluginManager/listBundles',
+    ok: pluginManagerCall.status !== 404 && pluginManagerText.includes('server-response'),
+    detail: { status: pluginManagerCall.status, body: pluginManagerText.slice(0, 200) },
   })
 
   // 3. bridge：发现行 + WS 鉴权 + RPC

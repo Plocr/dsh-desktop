@@ -11,7 +11,9 @@
  *    本机不存在 harness 的监听 socket（见 hostProtocol.ts / appProtocol.ts）；
  *  - 壳版本与随包 dsh/Node/pnpm 由 resources/dsh/desktop-runtime.json 绑定为一个签名更新单元，
  *    不存在「单独更新 harness」的通道；
- *  - 插件事务（安装/卸载/升级）只走随包 pnpm + profile 锁（见 pluginTransactions.ts）。
+ *  - 插件管理（安装/启停/卸载）由 Host 进程里的**官方共享插件管理器**负责
+ *    （Web 侧边栏「插件」页 / `plugin_manager` 工具），壳只提供 profile 与原生恢复
+ *    （安全模式隔离，见 pluginfs.ts）。
  */
 import { app, clipboard, dialog, session, shell, BrowserWindow } from 'electron'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from 'node:fs'
@@ -21,9 +23,7 @@ import { randomBytes } from 'node:crypto'
 import { initLogger, log, logDirPath } from './logger'
 import { loadSettings, saveSettings, type AppSettings } from './settings'
 import { appResourcesDir, ensureProfile, resolveRuntime, type RuntimeSpec } from './runtime'
-import { isValidPluginSpec, readProfileBundles, reconcileProfileBundles, isolateProfileForSafeMode, restoreProfileManifest, setBundleMounted, listInstalledBundleNames, isReservedPluginName, type DshPluginResult } from './pluginfs.ts'
-import { resolveDesktopPaths } from './paths.ts'
-import { PluginTransactions } from './pluginTransactions.ts'
+import { readProfileBundles, pruneStaleProfileBundles, isolateProfileForSafeMode, restoreProfileManifest } from './pluginfs.ts'
 import { isSafeMode, recordStartFailure, recordStartSuccess, exitSafeMode, activateSafeMode, SAFE_MODE_THRESHOLD, type SafeModeState } from './safeMode'
 import {
   apiKeyNeedsAttention,
@@ -62,7 +62,7 @@ import { parseDeepLink, extractDeepLinkFromArgv, type DeepLinkAction } from './d
 import { registerGlobalShortcut, currentShortcut, unregisterAllShortcuts } from './shortcut'
 import { initUpdater, checkNow, updateDownloadReady, installDownloadedUpdate, type UpdateProgress } from './updater'
 import { createLanProxy } from './lanServer'
-import { repairLegacySubagentDescriptors } from './sessionRepair.ts'
+import { repairLegacySubagentDescriptors, type SessionRepairReport } from './sessionRepair.ts'
 import { DESKTOP_PROFILE, desktopProfileDir as sharedDesktopProfileDir, migrateLegacyProfileDir } from './desktopProfile.ts'
 import { compareDots } from './version.ts'
 import { cleanLogs, uninstallApp } from './maintenance'
@@ -113,8 +113,6 @@ let host: HostManager
 let bridge: BridgeClient
 /** 随包运行时（Node + dsh 树 + pnpm；进程内只解析一次，随包不可变）。 */
 let runtime: RuntimeSpec | null = null
-/** 插件事务（随包 pnpm + profile 锁；见 pluginTransactions.ts）。 */
-let pluginTx: PluginTransactions | null = null
 let settings: AppSettings
 let settingsFile = ''
 let quitting = false
@@ -212,12 +210,69 @@ function safeModeFile(): string {
   return path.join(app.getPath('userData'), 'safe-mode.json')
 }
 
+/** 「旧会话修复已跑过」的标记文件（按随包 dsh 版本记，见 runLegacySessionRepair）。 */
+function sessionRepairMarkerFile(): string {
+  return path.join(app.getPath('userData'), 'session-repair.json')
+}
+
+/**
+ * 一次性旧会话修复：v0 日志里的 `subagent/descriptor` 版本过旧会让 dsh ≥ 0.1.3 的
+ * 迁移整条拒绝（历史会话打不开），这里做最小改写 + 备份（见 sessionRepair.ts）。
+ *
+ * 为什么要有标记：这是**历史迁移**，同一条日志修好后再扫也无可修。原先每次启动
+ * 都全量扫描（读 + 解压全部会话日志），是重用户机器上最拖启动的一项。
+ * 现在按随包 dsh 版本只跑一次；需要重扫时走托盘「设置 → 重新修复旧会话日志」。
+ *
+ * @param dshVersion - 随包 dsh 版本；与标记一致且未 force 时直接跳过。
+ * @param options.force - 忽略标记强制重扫（托盘入口用）。
+ * @returns 修复报告；跳过或失败返回 null。
+ */
+function runLegacySessionRepair(dshVersion: string, options: { force?: boolean } = {}): SessionRepairReport | null {
+  if (compareDots(dshVersion, '0.1.3-alpha.2') < 0) return null
+  const marker = sessionRepairMarkerFile()
+  if (options.force !== true) {
+    try {
+      const seen = JSON.parse(readFileSync(marker, 'utf8')) as { dshVersion?: unknown }
+      if (seen.dshVersion === dshVersion) return null
+    } catch {
+      /* 无标记 → 需要扫描 */
+    }
+  }
+  let report: SessionRepairReport
+  try {
+    report = repairLegacySubagentDescriptors(path.join(dshHome(), 'sessions'))
+  } catch (err) {
+    // 不写标记：下次启动重试（绝不在失败后假装已修复）
+    log('error', `sessions: legacy repair failed: ${err instanceof Error ? err.message : String(err)}`)
+    return null
+  }
+  try {
+    writeFileSync(
+      marker,
+      `${JSON.stringify({ dshVersion, scanned: report.scanned, repaired: report.repaired, scannedAt: new Date().toISOString() }, undefined, 2)}\n`,
+    )
+  } catch (err) {
+    log('error', `sessions: cannot write repair marker: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  if (report.repaired > 0) {
+    log('info', `sessions: repaired ${report.repaired}/${report.scanned} legacy logs (${report.repairedIds.slice(0, 5).join(', ')})`)
+  } else {
+    log('info', `sessions: legacy repair scanned ${report.scanned} logs, nothing to fix`)
+  }
+  return report
+}
+
 /**
  * 插件启停后把 profile 组合拉回一致：
  *  - 安全模式：bundles 只留官方基线 + bridge（`isolateProfileForSafeMode`，带备份可恢复）；
- *  - settings.disabledPlugins 里被停用的包从 bundles 移出（代码与依赖保留，随时可重新挂载）；
+ *  - 常规启动：只清理「已不再安装」的失效条目，**绝不重新启用**依赖；
  *  - 官方依赖（dsh-base/dsh-web-app）与 bridge 永不可停用。
  * 组合由 profile 的 package.json 承载，Host 启动时读取——不需要额外的 overlay 文件。
+ *
+ * 为什么启停不再由壳决定：`dsh.profile.bundles` 是启停的唯一事实来源，官方插件管理器
+ * （Web「插件」页 / `plugin_manager` 工具，由 Host 侧的 profileContext 激活）拥有写权——
+ * 连安装后的启用动作也由它完成。壳若在启动时按依赖重写列表，用户在官方页面停用的
+ * 组合包下次启动就会被悄悄打开。
  */
 function reconcilePluginBundles(): void {
   const profileDir = desktopProfileDir()
@@ -228,12 +283,8 @@ function reconcilePluginBundles(): void {
       log('info', `safe mode bundles ${isolated ? 'isolated' : 'already isolated'}`)
       return
     }
-    // 安装/卸载后先让 bundles 跟随 dependencies（官方 reconcile 的等价物）
-    reconcileProfileBundles(profileDir)
-    const disabled = new Set(settings.disabledPlugins)
-    for (const name of listInstalledBundleNames(profileDir)) {
-      setBundleMounted(profileDir, name, !disabled.has(name))
-    }
+    // 只清理失效条目（用户停用的组合包保持停用）
+    pruneStaleProfileBundles(profileDir)
     log('info', `profile bundles: ${readProfileBundles(profileDir).join(', ') || '(none)'}`)
   } catch (err) {
     log('error', `reconcilePluginBundles failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -327,22 +378,23 @@ async function resolveBestLanIp(): Promise<string | null> {
 }
 
 /**
- * 局域网访问：官方架构下**没有 harness 端口可转发**，对外服务把请求直接交给
- * Host 的管道 fetch（与桌面窗口同一实现），因此没有「宿主监听地址」需要保护——
- * 对外只有一个门面，门禁是设备授权 + 本次运行 token（见 lanServer.ts）。
+ * 依据当前设置启停对外服务（局域网 / 本机浏览器版共用同一个门面）。
+ * 官方架构下**没有 harness 端口可转发**：对外服务把请求直接交给 Host 的管道 fetch
+ * （与桌面窗口同一实现），因此没有「宿主监听地址」需要保护——对外只有一个门面，
+ * 门禁是设备授权 + 本次运行 token（见 lanServer.ts）。
+ *
+ * 局域网 IP 在这里**按需解析**（首选默认路由出口，失败回退网卡候选）：解析要发一次
+ * UDP connect，最坏 1.5s 超时——绝不能放在窗口/后端启动的关键路径上（只有开启
+ * 局域网共享的用户才付这笔钱，而且是在 Host ready 之后的异步路径里）。
  */
-async function applyLanNetwork(): Promise<void> {
-  lanIp = settings.lanShare ? await resolveBestLanIp() : null
-  if (settings.lanShare && lanIp === null) {
-    log('error', 'lanShare: 未发现局域网 IPv4，无法对外提供访问')
-  } else if (settings.lanShare && lanIp) {
-    log('info', `lanShare: 对外地址将在 ${lanIp} 上监听（设备需本机授权）`)
-  }
-}
-
-/** 依据当前设置启停对外服务（局域网 / 本机浏览器版共用同一个门面）。 */
 async function manageLanServer(): Promise<void> {
-  if (settings.lanShare && lanIp) {
+  if (settings.lanShare) {
+    lanIp = lanIp ?? await resolveBestLanIp()
+    if (lanIp === null) {
+      log('error', 'lanShare: 未发现局域网 IPv4，无法对外提供访问')
+      refreshTray()
+      return
+    }
     if (!lanHandle) {
       lanToken = lanToken ?? randomBytes(16).toString('hex')
       lanHandle = await createLanProxy({
@@ -358,6 +410,7 @@ async function manageLanServer(): Promise<void> {
     await lanHandle.stop()
     lanHandle = null
     lanUrl = null
+    lanIp = null
   }
   refreshTray()
 }
@@ -397,12 +450,11 @@ async function promptLanApproval(ip: string): Promise<boolean> {
   }
 }
 
-/** 重启 Host：先按当前设置把 profile 组合拉回一致（插件启停 / 安全模式），再重启。 */
+/** 重启 Host：先按当前设置把 profile 组合拉回一致（安全模式 / 失效条目），再重启。 */
 async function restartHarness(): Promise<void> {
   // 手动重启 = 新启动会话：重置 ready 标记，让本次启动的连续失败重新计数（坏插件崩溃可触发安全模式）
   harnessEverReady = false
   try {
-    await applyLanNetwork()
     if (runtime) {
       ensureProfile({
         dshHome: dshHome(),
@@ -622,153 +674,16 @@ async function stopHostBeforePluginOp(): Promise<void> {
   }
 }
 
-/** 插件操作完成后重启 Host（重新读取 profile 组合）。 */
-async function startHostAfterPluginOp(): Promise<void> {
-  await restartHarness()
-}
-
 /**
- * 插件安装弹窗：模态小窗让用户填写官方 spec（npm 包名 / github:user/repo / 本地目录 / .tgz）。
- * 用页面 <title> 回传输入（Electron 的 page-title-updated 事件），无需 preload/IPC。
+ * 托盘「在插件页管理（官方）…」：把工作台带到前台，并指出官方插件页在侧边栏。
+ *
+ * 官方桌面设计里 Electron **不提供**独立的插件管理页面；插件管理统一由共享的
+ * Web 插件管理器（侧边栏「插件」页 + `plugin_manager` 工具）承担，桌面壳只提供
+ * 原生恢复与包管理器。托盘的安装/卸载入口是为离线与救急保留的补充通道。
  */
-async function promptPluginSpec(): Promise<string | null> {
-  const parent = win?.win ?? null
-  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
-    body{font:13px system-ui,sans-serif;padding:16px;background:#1e1e1e;color:#e6e6e6;margin:0}
-    label{display:block;margin-bottom:6px;color:#bbb}
-    input{width:100%;box-sizing:border-box;padding:8px;font-size:13px;border:1px solid #444;border-radius:4px;background:#2a2a2a;color:#fff;outline:none}
-    input:focus{border-color:#4a9eff}
-    .hint{color:#888;font-size:11px;margin:6px 0 10px}
-    .row{display:flex;gap:8px;justify-content:flex-end}
-    button{padding:6px 16px;border:0;border-radius:4px;font-size:13px;cursor:pointer}
-    #ok{background:#2f6fdb;color:#fff}
-    #ok:hover{background:#3a7df0}
-    #cancel{background:#3a3a3a;color:#ccc}
-  </style></head><body>
-    <label for="spec">插件标识（按官方 dsh plugin add 格式）</label>
-    <input id="spec" autofocus placeholder="例如：@scope/my-plugin  或  dsh-hello-plugin  或  github:user/repo">
-    <div class="hint">支持 npm 包名 / github:user/repo / 本地目录 / .tgz 打包文件</div>
-    <div class="row"><button id="cancel">取消</button><button id="ok">安装</button></div>
-    <script>
-      const done = (v) => { document.title = 'dsh-spec:' + v };
-      const submit = () => { const v = document.getElementById('spec').value.trim(); if (v) done(v) };
-      document.getElementById('ok').onclick = submit;
-      document.getElementById('cancel').onclick = () => done('__CANCEL__');
-      document.getElementById('spec').addEventListener('keydown', (e) => { if (e.key === 'Enter') submit() });
-    </script>
-  </body></html>`
-  const pWin = new BrowserWindow({
-    width: 520,
-    height: 200,
-    resizable: false,
-    minimizable: false,
-    maximizable: false,
-    modal: !!parent,
-    parent: parent ?? undefined,
-    title: '安装插件',
-    autoHideMenuBar: true,
-    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
-  })
-  await pWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
-  return await new Promise<string | null>((resolve) => {
-    let settled = false
-    const finish = (v: string | null): void => {
-      if (settled) return
-      settled = true
-      resolve(v)
-      try {
-        pWin.destroy()
-      } catch {
-        /* ignore */
-      }
-    }
-    pWin.on('page-title-updated', (_e: Electron.Event, title: string) => {
-      if (title.startsWith('dsh-spec:')) {
-        const v = title.slice('dsh-spec:'.length)
-        finish(v === '__CANCEL__' || v === '' ? null : v)
-      }
-    })
-    pWin.on('closed', () => finish(null))
-  })
-}
-
-/** 插件包事务（随包 pnpm + profile 锁）。 */
-function transactions(): PluginTransactions {
-  if (pluginTx === null) throw new Error('插件事务未就绪：运行时尚未解析完成')
-  return pluginTx
-}
-
-/** 事务的 pnpm 诊断/错误摘要（对话框展示用）。 */
-function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
-
-/** 托盘「安装插件…」：输入 spec（npm/github/路径/tgz）→ 随包 pnpm add → 重启生效。 */
-async function installPluginFromDialog(): Promise<void> {
-  const spec = await promptPluginSpec()
-  if (!spec) return
-  if (!isValidPluginSpec(spec)) {
-    dialog.showErrorBox(
-      '插件安装失败',
-      `插件标识不合法：${spec}\n\n请填写 npm 包名（如 my-plugin 或 @scope/my-plugin）、github:user/repo、本地目录或 .tgz 路径。`,
-    )
-    return
-  }
-  notify('正在安装插件', `${spec} 安装中（随包 pnpm，官方事务流程）…`)
-  try {
-    await transactions().add(spec)
-  } catch (err) {
-    const message = errorText(err)
-    log('error', `plugin install failed: ${message}`)
-    const gitHint = /git\+|github:|\.git(?:#|$)/.test(spec)
-      ? `\n\n该插件来自 git 源：pnpm 可能拦截了它的构建脚本。请把 pnpm 提示的 key 加入 `
-        + `${path.join(desktopProfileDir(), 'pnpm-workspace.yaml')} 的 allowBuilds 后重试。`
-      : ''
-    dialog.showErrorBox(
-      '插件安装失败',
-      `pnpm add ${spec} 未成功。\n\n${message}\n\n`
-        + '常见原因：包名不存在、网络不可达、该包未声明 dsh.bundle（仅作普通依赖）。'
-        + '官方语义下失败会保留部分改动、不自动回滚；修正后可直接重试。'
-        + gitHint,
-    )
-    refreshTray()
-    return
-  }
-  // 组合列表统一由 reconcilePluginBundles 维护（restartHarness 内调用）
-  log('info', `plugin installed: ${spec}`)
-  notify('插件已安装', `${spec} 已安装，正在重启工作台生效…`)
-  refreshTray()
-}
-
-/** 托盘「卸载插件」：随包 pnpm remove（官方语义：失败保留部分改动）。 */
-async function uninstallPluginFromDialog(name: string): Promise<void> {
-  const w = win?.win ?? null
-  const opts = {
-    type: 'warning' as const,
-    buttons: ['卸载', '取消'],
-    defaultId: 1,
-    cancelId: 1,
-    title: '卸载插件',
-    message: `确定卸载插件「${name}」？`,
-    detail: '将从 profile 依赖中移除（pnpm remove）并重启工作台；预设的停用状态一并清理。',
-  }
-  const r = w ? await dialog.showMessageBox(w, opts) : await dialog.showMessageBox(opts)
-  if (r.response !== 0) return
-  try {
-    await transactions().remove(name)
-  } catch (err) {
-    dialog.showErrorBox('插件卸载失败', `pnpm remove ${name} 未成功。\n\n${errorText(err)}`)
-    refreshTray()
-    return
-  }
-  // 该包的停用记录不再需要（下次 boot 不会再有这个 bundle）
-  if (settings.disabledPlugins.includes(name)) {
-    settings.disabledPlugins = settings.disabledPlugins.filter((x) => x !== name)
-    saveSettings(settingsFile, settings)
-  }
-  log('info', `plugin uninstalled: ${name}`)
-  notify('插件已卸载', `${name} 已卸载，正在重启工作台生效…`)
-  refreshTray()
+function openPluginPage(): void {
+  showWindow()
+  notify('插件页', '在左侧边栏打开「插件」页：安装、启停、卸载与依赖脚本授权都在那里。')
 }
 
 /** 托盘「进入安全模式」：停用全部插件（先停 Host，避免热监听把 manifest 改动回滚）。 */
@@ -1052,12 +967,6 @@ async function main(): Promise<void> {
   // 版本绑定校验失败会在这里直接抛出——绝不带着未知组合启动。
   runtime = resolveRuntime()
   harnessVersion = runtime.dshVersion
-  // 插件事务（随包 pnpm + profile 锁）：Profile 就绪后即可用
-  pluginTx = new PluginTransactions(runtime, resolveDesktopPaths(dshHome()), {
-    beforeChange: () => stopHostBeforePluginOp(),
-    afterChange: () => startHostAfterPluginOp(),
-  })
-  pluginTx.assertSettled()
 
   // 确保 profile（模板 + pnpm workspace + bundles + 共享包链接）就绪
   ensureProfile({
@@ -1067,22 +976,15 @@ async function main(): Promise<void> {
   })
 
   // 旧会话修复：v0 日志里的 subagent descriptor 版本过旧会让 dsh ≥ 0.1.3 的迁移整条拒绝
-  // （历史会话打不开）。按随包 dsh 版本判断，纯本地最小改写 + 备份。
-  {
-    const v = runtime.dshVersion
-    if (compareDots(v, '0.1.3-alpha.2') >= 0) {
-      try {
-        const rep = repairLegacySubagentDescriptors(path.join(dshHome(), 'sessions'))
-        if (rep.repaired > 0) {
-          log('info', `sessions: repaired ${rep.repaired}/${rep.scanned} legacy logs (${rep.repairedIds.slice(0, 5).join(', ')})`)
-        }
-      } catch (err) {
-        log('error', `sessions: legacy repair failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    }
-  }
+  // （历史会话打不开）。纯本地最小改写 + 备份。
+  //
+  // **一次性**：这是历史迁移，按随包 dsh 版本记标记，同一个版本只扫一次。
+  // 原来每次启动都全量扫描（读+解压全部会话日志），是重用户机器上最拖启动的一项；
+  // 需要重新扫描时走托盘「设置 → 重新修复旧会话日志」。
+  runLegacySessionRepair(runtime.dshVersion)
 
   // 插件启停 / 安全模式 → profile 组合
+  // 启动期只清理失效条目：bundles 列表由官方插件管理器拥有，不在这里重新启用任何依赖。
   reconcilePluginBundles()
 
   host = new HostManager(
@@ -1090,6 +992,8 @@ async function main(): Promise<void> {
       node: runtime.node,
       runtimeDir: runtime.runtimeDir,
       projectDir: desktopProfileDir(),
+      // 随包 pnpm → Host 的 profileContext.packageManager：官方插件管理器据此工作（离线可用）
+      pnpmEntry: runtime.pnpmEntry,
       // Host 在随包 Node 里引导 profile：DSH_HOME 必须显式传入（官方 Host 不读壳的设置）
       env: { ...process.env, DSH_HOME: dshHome(), DSH_DESKTOP: '1' },
     },
@@ -1151,9 +1055,8 @@ async function main(): Promise<void> {
     },
   )
 
-  // 局域网访问：目标地址在 Host ready 后才会启用
-  await applyLanNetwork()
-
+  // 局域网访问：不在这里解析目标地址——那要发一次 UDP connect（最坏 1.5s 超时），
+  // 会拖慢「窗口出来 → 后端启动」这一段。改为 Host ready 后由 manageLanServer 按需解析。
   bridge = new BridgeClient(
     () => (bridgeTarget !== null ? bridgeTarget : null),
     {
@@ -1252,52 +1155,25 @@ async function main(): Promise<void> {
     showWindow,
     openBrowser,
     pickWorkspace: () => void pickWorkspace(),
-    // 插件列表 = profile 里已安装的组合包（官方模型：dependencies + bundles）：
-    // bridge 与官方基线永不可卸；其余可停用（移出 bundles，代码保留）或卸载（pnpm remove）
-    getPlugins: () => {
-      const mounted = new Set(readProfileBundles(desktopProfileDir()))
-      const versionOf = (name: string): string | undefined => {
-        try {
-          const p = JSON.parse(
-            readFileSync(path.join(desktopProfileDir(), 'node_modules', name, 'package.json'), 'utf8'),
-          ) as { version?: unknown }
-          return typeof p.version === 'string' ? p.version : undefined
-        } catch {
-          return undefined
-        }
-      }
-      return listInstalledBundleNames(desktopProfileDir()).map((name) => ({
-        name,
-        version: versionOf(name),
-        source: 'bundle' as const,
-        enabled: mounted.has(name),
-        locked: isReservedPluginName(name),
-      }))
-    },
-    togglePlugin: (name, enabled) => {
-      if (isReservedPluginName(name)) return
-      if (enabled) settings.disabledPlugins = settings.disabledPlugins.filter((x) => x !== name)
-      else if (!settings.disabledPlugins.includes(name)) settings.disabledPlugins.push(name)
-      saveSettings(settingsFile, settings)
-      refreshTray()
-      void restartHarness()
-    },
-    // 组合包（bundle）插件的快捷挂载开关：取消挂载=移出 bundles（保留代码可恢复）
-    toggleBundleMount: (name, mounted) =>
-      void (async () => {
-        // 先停 Host：Host 常驻时改动 profile manifest 会被热监听覆盖回滚
-        await stopHostBeforePluginOp()
-        const ok = setBundleMounted(desktopProfileDir(), name, mounted)
-        log('info', `bundle ${name} mounted=${ok}`)
-        refreshTray()
-        await restartHarness()
-      })(),
-    installPlugin: () => void installPluginFromDialog(),
-    uninstallPlugin: (name) => void uninstallPluginFromDialog(name),
+    openPluginPage: () => openPluginPage(),
     exitSafeMode: () => void exitSafeModeFromTray(),
     enterSafeMode: () => void enterSafeModeFromTray(),
     restartHarness: () => void restartHarness(),
     openLogs: () => void shell.openPath(logDirPath()),
+    // 一次性迁移的强制重跑：按菜单点击先返回，扫描在下一个 tick 做（避免卡住托盘）
+    repairSessions: () => {
+      setTimeout(() => {
+        const version = harnessVersion ?? runtime?.dshVersion ?? ''
+        const report = runLegacySessionRepair(version, { force: true })
+        notify(
+          '旧会话修复完成',
+          report === null
+            ? '本次未扫描（dsh 版本不支持或扫描失败，详见日志）。'
+            : `扫描 ${report.scanned} 个会话日志，修复 ${report.repaired} 个。`,
+        )
+        refreshTray()
+      }, 0)
+    },
     cleanLogs: () => cleanLogs(),
     uninstall: () => uninstallApp(),
     // 手动「检查并更新…」：官方桌面端只有一个更新单元（壳 + dsh 运行时一起换），
@@ -1334,8 +1210,9 @@ async function main(): Promise<void> {
         return
       }
       void (async () => {
-        await applyLanNetwork()
+        lanIp = await resolveBestLanIp()
         if (lanIp === null) {
+          log('error', 'lanShare: 未发现局域网 IPv4，无法对外提供访问')
           notify('局域网访问已开启', '未发现局域网网卡 IPv4，无法对外提供服务。', () => showWindow())
           refreshTray()
           return
