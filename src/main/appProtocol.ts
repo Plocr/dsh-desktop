@@ -47,7 +47,7 @@ export function registerAppScheme(): void {
 /* ── 壳页面（dsh-app://shell/…） ─────────────────────────────────────── */
 
 /** 壳页面白名单：只服务这几个文件，从根上排除目录穿越。 */
-const SHELL_FILES = new Set(['/loading.html', '/error.html'])
+const SHELL_FILES = new Set(['/loading.html', '/error.html', '/phone.html'])
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',

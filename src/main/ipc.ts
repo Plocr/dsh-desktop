@@ -25,6 +25,10 @@ export interface IpcDeps {
   boot: () => { injections: readonly unknown[]; streamBaseUrl: string }
   /** 工作台自报启动失败（官方 `dshDesktopBoot.failed`）：走原生恢复。 */
   bootFailed: (message: string) => void
+  /** 「手机连接」页：按需拉起局域网门面并把地址编码成二维码（state 由主进程持有）。 */
+  phoneConnect: () => Promise<unknown>
+  /** 「手机连接」页：复制手机访问地址（页面本身没有 clipboard 能力）。 */
+  copyPhoneLink: () => boolean | Promise<boolean>
 }
 
 /** 仅放行壳页面（dsh-app://shell 的 loading/error 页）；其他来源拒绝。 */
@@ -36,6 +40,15 @@ function fromShellPage(e: IpcMainInvokeEvent): boolean {
 function fromAppPage(e: IpcMainInvokeEvent): boolean {
   const url = e.senderFrame?.url ?? ''
   return url.startsWith(APP_ORIGIN) && e.senderFrame === e.sender.mainFrame
+}
+
+/**
+ * 仅放行「手机连接」页：`dsh:phone-connect` 会**开启局域网监听**（对外开端口），
+ * 因此不能只按 shell 来源放行——loading/error 页也不该有这个能力。
+ */
+function fromPhonePage(e: IpcMainInvokeEvent): boolean {
+  const url = e.senderFrame?.url ?? ''
+  return url.startsWith(`${SHELL_ORIGIN}/phone.html`) && e.senderFrame === e.sender.mainFrame
 }
 
 export function registerIpc(deps: IpcDeps): void {
@@ -110,6 +123,18 @@ export function registerIpc(deps: IpcDeps): void {
     if (!fromAppPage(e)) throw new Error('forbidden: application page only')
     deps.bootFailed(typeof message === 'string' ? message : 'unknown boot failure')
     return true
+  })
+
+  // 手机连接（局域网门面 + 二维码）：只有壳自带的 phone.html 能触发
+  ipcMain.handle('dsh:phone-connect', async (e) => {
+    if (!fromPhonePage(e)) throw new Error('forbidden: phone connect page only')
+    return deps.phoneConnect()
+  })
+
+  ipcMain.handle('dsh:copy-phone-link', (e) => {
+    if (!fromPhonePage(e)) throw new Error('forbidden: phone connect page only')
+    // 不接收页面传参：复制的内容由主进程自己算（页面无法借壳复制任意文本）
+    return deps.copyPhoneLink()
   })
 
   // 保留：无窗口时也能触发的原生对话框兜底

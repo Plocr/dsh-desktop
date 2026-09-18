@@ -22,7 +22,10 @@ export interface AppSettings {
   globalShortcut: string
   /** 启动后自动检查更新（总开关：外壳下载 + 框架本地替换一起管） */
   autoUpdate: boolean
-  /** 局域网访问：harness web 绑定到本机局域网 IP，同网段设备可用 http://<LAN-IP>:<port> 访问 */
+  /**
+   * 「手机连接」（原「局域网访问」）：壳开一个对外门面（0.0.0.0，托盘点二维码时按需开启，
+   * 状态持久化），同网段设备扫码 → 本机授权 → 用浏览器访问这个工作台。
+   */
   lanShare: boolean
   /** 已下载但尚未安装的更新版本（跨重启保留，下次启动提示一键安装；装完/当前版本即清） */
   pendingUpdateVersion: string | null

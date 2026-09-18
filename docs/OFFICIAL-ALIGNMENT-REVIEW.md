@@ -220,3 +220,47 @@ Host 引导分解（随包 Node + 真实 profile，3 次取稳定值）：
 `__DSH_BOOT_READY__`、`authenticateWebHost` 拿到 cookie、`forwardWebRequest` 打通
 `/api/pluginManager/listBundles` 且拒绝外来 Origin、bridge 全 RPC（含坏 token 4001）、
 局域网 HTTP 与 **WS 升级 101**（门禁后代理）。
+
+---
+
+## 8. 第四轮：托盘重设计（手机连接二维码）+ 全项目 bug 审查（2026-09-18）
+
+### 8.1 要求 → 落地
+
+| 要求 | 落地 | 证据 |
+|---|---|---|
+| 托盘：手机连接改成**扫描二维码自动跳转浏览器链接** | 一级菜单 `手机连接（扫描二维码）…` → 按需拉起对外门面（`0.0.0.0:46123`，占用回退随机）→ `dsh-app://shell/phone.html` 把地址画成二维码；扫码即打开浏览器版（首次访问仍在本机授权）。开启后菜单多出「断开手机连接」 | `src/main/qr.ts`、`resources/shell-pages/phone.html`、`src/main/phoneWindow.ts`、`test/phone-connect.test.mjs` |
+| 去除桌面插件管理，仅保留「进入安全模式」 | 删除「桌面插件」子菜单（连「在插件页管理（官方）…」一起删）；`进入安全模式（停用全部插件）` 升为一级项，安全模式下换成 `退出安全模式（恢复全部插件）` | `src/main/trayMenu.ts`、`test/tray-menu.test.mjs` |
+| 去除「切换工作区」 | 托盘入口删除（`dsh:pick-workspace` 仍给壳页面用，Web UI 内添加/切换工作区不变） | 同上 |
+| 精简托盘设置中的二级菜单 | `设置 ▸` 从 14 行减到 6–7 行：自动更新（含双版本号）/ 检查更新… / 开机自启 / 系统通知 / 打开日志目录 / 清理日志 / 卸载（Windows）；**不再有二级嵌套**（全局快捷键行、重新修复旧会话日志、局域网开关与地址行全部移除） | 单测断言设置子菜单标签集合与"无 `submenu`" |
+
+顺带清掉的历史包袱：`最近会话 / 待审批 / API Key 状态行 / 任务数`（0.8.1 已从托盘删除，
+本轮把残留的死状态与未使用导入一并清掉）。
+
+### 8.2 本轮审查发现并修掉的 bug
+
+| 位置 | 问题 | 修法 |
+|---|---|---|
+| `hostProcess.ts` | Host 的 stderr **无上限累加**（`this.stderr += chunk`）：长期运行的 Host 打日志就是持续内存增长，与文档/官方「保留最后 64 Ki 字符」不符 | 加 `STDERR_TAIL_LIMIT = 64 Ki` 截尾；顺手合并重复注册的 `data` 监听 |
+| `notify.ts` | `Notification` 句柄未持有引用，主进程 GC 后部分平台会取消/丢失通知与点击回调（偶发"通知不出现"） | 保留引用集合，`close`/`failed` 或 10 分钟兜底后释放 |
+| `index.ts` | `apiKeyStatus` 在托盘状态行删除后变成**只写不读**的死状态；`latestApproval/recentSessions/sessionLabel` 变成未使用导入 | 删除死状态；文件回退结论直接进日志与通知文案；清理未使用导入 |
+| `index.ts` | `manageLanServer()` 失败（端口耗尽/权限）会冒泡成未处理 rejection，且托盘不刷新、`手机连接` 页只显示"没有网卡地址" | 内部 try/catch → 记日志 + `lanError`；`手机连接` 页据此显示真实原因（"对外服务启动失败：…"） |
+| `index.ts`（文案） | 安全模式通知仍写「托盘「桌面插件 → 退出安全模式」」——托盘里那个路径已不存在 | 改成「在托盘菜单点「退出安全模式」即可恢复」 |
+| `README.md` / `docs/DESIGN.md` | 与实现漂移：托盘仍在描述最近会话/待审批/桌面插件/局域网开关；托盘截图是 0.8.1 旧菜单 | 文档按新结构重写；截图处显式标注待补（不拿旧图冒充） |
+
+### 8.3 验证
+
+- `npm run check`：typecheck + **107** 项单测全绿。新增：
+  - `test/qr.test.mjs`：二维码编码器用**独立解码器**（jsqr，仅 devDependency）回读——8 种掩码、
+    版本边界、非 ASCII、超容量抛错；
+  - `test/tray-menu.test.mjs`：托盘模板结构（手机连接入口、被删项不得复现、设置子菜单精简、安全模式互换）；
+  - `test/tray-status.test.mjs`：状态行语义（连接/任务可用/协议不匹配/诊断码）；
+  - `test/phone-connect.test.mjs`：门面发地址 → 二维码回读出同一地址 → token 换 cookie → 带 cookie
+    打开工作台 → 裸访问 401 → 断开即失效。
+- Electron 模板实机校验：用 `Menu.buildFromTemplate` 跑 4 种状态（默认/手机连接开启/安全模式/桥接断开），
+  菜单项与顺序符合预期、无异常。
+- `npm run e2e:bridge`：官方传输契约（Host ready / 注入 / cookie 转发 / 局域网 HTTP + WS 升级）继续全绿。
+
+> 关于二维码为什么自研而不用依赖：托盘二维码是**离线**能力（打包机与用户机都不该为它拉包），
+> 而编码器只需字节模式 + 纠错 M + 版本 1–10（本机地址 ≈60–70 字节，落在版本 5–6），
+> 实现规模可控且用第三方解码器回读校验；用现成库会把一份运行时依赖塞进 150 MB 的签名更新单元里。

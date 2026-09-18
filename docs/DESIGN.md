@@ -1,6 +1,6 @@
 # DSH Desktop — DeepSeek Harness 桌面工作台 设计文档
 
-版本：0.7.20 ｜ 状态：已实现（官方 Host 架构：壳只保留桌面原生能力，仅 bridge 插件） ｜ 平台：Windows 优先（macOS 配置就绪）
+版本：0.8.2 ｜ 状态：已实现（官方 Host 架构：壳只保留桌面原生能力，仅 bridge 插件） ｜ 平台：Windows 优先（macOS 配置就绪）
 
 ## 1. 背景与目标
 
@@ -58,6 +58,7 @@
 | D36 | **官方桌面 Host 已换代**：官方 master 的 `apps/desktop-host` 用 `runProfile` 起**真实 Web Host**（`--port 19387`），把认证 URL 与 index 注入片段经 Node IPC 交给 Electron，由 Electron 转发应用请求 → **本壳已落地，见 D38** | 传输换代牵动 `appProtocol.ts` / `hostProtocol.ts` / `lanServer.ts` 三条路径，需要单独一轮决策而不是顺手改；差距逐条见 [OFFICIAL-ALIGNMENT-REVIEW.md](OFFICIAL-ALIGNMENT-REVIEW.md) |
 | D38 | **传输层 = 官方形态**：Host 用官方 `runProfile`（`patchFiles: []`，`args: ['--no-open','--port','19387']`）起真实 Web Host，ready 事件带回**认证 URL + index 注入**；窗口从 `dsh-app://app/` 加载随包 dist（官方 `serveWebDocument` 注入 `__DSH_BOOT_READY__`），其余请求经 `forwardWebRequest` 带 Host cookie 转发；远端流用官方 WebSocket mux（主进程按官方补 Origin/cookie，局域网门面新增 WS 升级代理）；preload 暴露官方 `dshDesktopBoot.ready()/failed()`。自研管道/帧协议（`wire.ts`、`hostProtocol.ts`）与自研 `__DSH_TRANSPORT__` NDJSON 通道全部删除 | 官方桌面端就是这个形状：同一套认证、注入、目录选择与流；官方插件管理器、HMR、`injections` 都按同一契约工作。附带修掉三个真 bug：overlays 传层而非行导致桌面补丁被静默丢弃（→ webserver 抢 3080、自动开浏览器、冲突时反复重启=闪屏）、日志落盘未脱敏 token；并补上端口冲突自动换随机端口、`showLoading` 幂等与按 Host 世代重载的闪屏护栏 |
 | D37 | **插件系统交给官方共享管理器**：绑定运行时升到 `dsh 0.1.6-alpha.2`；Host 提供官方「启动器信息」`profileContext`（`packageManager` = 随包 Node + 随包 pnpm，`overlays` 承载本壳自有 patch 层），`plugin-manager` 与 HMR 因此激活；启停的唯一事实来源是 `dsh.profile.bundles`（启动期只清理失效条目，**绝不重新启用**用户停用的组合包），安装失败回滚 `package.json` + `pnpm-lock.yaml` 快照，依赖脚本被 pnpm 11 拦下时走「允许这些脚本并重试」，每次 pnpm 输出落 `<profile>/.plugin-manager/logs/operation-*/pnpm.log` | `dsh-base` 的 `plugin-manager` / `hmr` 两行就是 `disabled: !!js "!ctx.get('profileContext')"`，而 `dsh-plugin-manager` 从 `0.1.6-alpha.2` 起才进 dsh 依赖闭包：不给启动器信息、不升版本，官方插件页与 `plugin_manager` 工具根本不会出现。旧 D30 的"失败保留部分改动"是更早的官方语义，已被官方失败表（安装回滚、卸载保留）取代 |
+| D39 | **托盘只留动作，插件管理回归官方、手机连接改二维码**：一级菜单 = 显示工作台 / 打开浏览器版 / 手机连接（扫描二维码）… [/ 断开手机连接] / 一行状态 / 重启 Harness / 进入（退出）安全模式 / 设置 ▸（自动更新 · 检查更新 / 开机自启 · 系统通知 / 打开日志目录 · 清理日志 / 卸载）/ 退出。删除：桌面插件子菜单（含「在插件页管理」）、切换工作区、最近会话、待审批、API Key 状态行、任务数、全局快捷键行、旧会话日志手动重跑、局域网三行（开关 + 地址 + 复制）。结构由 `trayMenu.ts`（纯逻辑，单测锁住）描述 | 官方桌面端没有插件管理 IPC/独立页面（D37），托盘再留一份入口只是把人往同一个页面带；会话/审批/工作区在 Web UI 里更完整，托盘副本只会长期显示过期状态。局域网三行是"配好才能用"的旧交互——**扫码即用**才符合手机场景（`src/main/qr.ts` 自研字节模式编码器，测试用 jsqr 回读校验；`phone.html` 只拿矩阵，端口/cookie 不出主进程） |
 | D31 | **签名按官方流程**：Windows EV/SafeNet 令牌签名（`scripts/windows-sign.mjs`，环境不备则显式跳过、配一半则硬报错）；macOS Developer ID + notarytool + stapling（`scripts/package-macos.mjs`，`resources/dsh`、`resources/runtime` 排除签名） | 官方 build pipeline 的等价物；细节与所需环境变量见 docs/SIGNING.md |
 | D32 | **桥接握手带协议版本**：`auth` 带 `protocolVersion`，插件在 `authed` 里回自己那版 + 最新诊断；两端不一致时壳记 error、通知一次并在托盘标注，但**不掐断** | profile 层允许用户替换 bundle，跨版本不一致必须可诊断；增量字段是加法式的，降级比拒绝更符合"桌面至少能用" |
 | D33 | **诊断通道 `bridge.diag`**：插件把 `ws.listening`/`jobs.present|absent`/`auth.rejected`/`loader.rejected`/`protocol.mismatch` 既打 stdout 也推给已鉴权连接，最新一条随 `authed` 给壳；壳落日志并显示「桥接：已连接 · jobs present」 | 桥接失效的表现是"通知不响"，此前只能翻与 harness 混流的 stdout；诊断通道让"连上了吗 / jobs 在不在"变成一眼可见的托盘状态 |
@@ -155,8 +156,9 @@ cordis.patch.yml  []（用户补丁层，壳不写它）
   原生可用**：安装/启停/卸载、`inspect` 预检、安装日志流、失败回滚、待批准依赖脚本都由官方管理器负责。
   启动层序统一由官方 `readProfilePatches` 计算，本壳自有的 patch 层（`config/desktop.cordis.patch.yml`
   + agent 预设根）放进 `profileContext.overlays`，保证插件管理器/HMR 重算时与启动时逐层一致。
-- **唯一管理入口**：托盘「桌面插件」只留「在插件页管理（官方）…」与安全模式两项——壳**不再**维护
-  自己的插件列表、启停开关、安装/卸载对话框与 pnpm 事务（曾经的 `pluginTransactions.ts` 已删除）。
+- **唯一管理入口**：插件管理只有 Web 侧边栏「插件」页（官方共享管理器），**托盘没有插件入口**——
+  0.8.2 起连「在插件页管理（官方）…」也删了（D39），托盘只留「进入安全模式」这个原生恢复动作。
+  壳**不再**维护自己的插件列表、启停开关、安装/卸载对话框与 pnpm 事务（曾经的 `pluginTransactions.ts` 已删除）。
   官方桌面端就是这样：Electron 不提供插件管理 IPC 或独立页面，安装/启停/卸载/授权/诊断全部由
   共享插件管理器承担；离线可用性由「启动器提供随包 pnpm」保证，与托盘无关。
 - **启停**：唯一事实来源是 `dsh.profile.bundles`（关闭 = 移出列表、依赖保留、可再开启）。壳在启动期
@@ -171,7 +173,44 @@ cordis.patch.yml  []（用户补丁层，壳不写它）
 
 启动/重启/崩溃恢复时的过渡页（白底 + 粒子鲸鱼，自研实现）。**随壳分发**（harness 未启动时展示，无法是插件）。
 
-### 4.6 构建与分发
+### 4.6 托盘与手机连接（二维码）
+
+**托盘**（`src/main/trayMenu.ts` 纯逻辑 / `tray.ts` Electron 壳）：
+
+```
+显示工作台
+打开浏览器版
+手机连接（扫描二维码）…
+断开手机连接                     ← 仅在手机连接开启时出现
+───
+Harness：运行中 · 桥接：已连接 · 任务可用     ← 一行状态（禁用项，只读）
+───
+重启 Harness
+进入安全模式（停用全部插件）          ← 安全模式下换成：⚠ 状态行 + 最近失败 + 退出安全模式
+───
+设置 ▸  自动更新（框架 v… · 官方 Harness v…） / 检查更新… / 开机自启 / 系统通知 /
+        打开日志目录 / 清理日志 / 卸载 DSH Desktop…（Windows）
+───
+退出
+```
+
+菜单结构本身就是交付项，所以模板是纯函数并被打进单测（`test/tray-menu.test.mjs`：
+手机连接存在且点击可达、被删项不得复现、设置子菜单无二级嵌套、安全模式进出互换）。
+
+**手机连接**（扫码即用）：
+
+1. 点「手机连接（扫描二维码）…」→`ensurePhoneAccess()`：解析默认路由出口 IP（失败回退网卡候选），
+   打开对外门面 `createLanProxy({ bindHost: '0.0.0.0', port: 46123 })`（被占自动回退随机端口），
+   地址 `http://<lanIp>:<port>/?token=<本次运行随机值>`；
+2. 主进程用 `src/main/qr.ts`（自研字节模式编码器，纠错 M，版本 1–10）把地址编成模块矩阵，
+   交给 `dsh-app://shell/phone.html` 画成二维码；页面拿不到端口与 cookie，**只能看到矩阵与地址文本**；
+3. 手机扫码 → 首次访问弹本机授权框（按设备 IP 记一次，本次运行有效）→ token 换 HttpOnly cookie
+   （303 跳干净路径）→ 之后就是浏览器版工作台（手机端"看起来像新页面"属正常，选工作区即可）。
+
+验证：`test/qr.test.mjs`（jsqr 独立回读全部 8 种掩码与版本边界）、`test/phone-connect.test.mjs`
+（门面发地址 → 二维码回读出同一地址 → token 换 cookie → 带 cookie 打开工作台 → 裸访问 401 → 断开即失效）。
+
+### 4.7 构建与分发
 
 - `scripts/build.mjs`：main/preload（esbuild → CJS）→ `dist/`。
 - `scripts/setup-runtime.mjs`：便携 Node + pnpm → `resources/runtime`；`npm install @deepseek-ai/dsh@<version>` +

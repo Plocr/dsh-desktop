@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />
+<title>手机连接 — DSH Desktop</title>
+<style>
+  :root { --bg: #ffffff; --ink: #0f1115; --sub: #6b7280; --panel: #f6f7f9; --border: #e4e7ec; --brand: #3964fe; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) { --bg: #151517; --ink: #f9fafb; --sub: #9aa0a6; --panel: #1e1e21; --border: #2e2f33; --brand: #4d7cfe; }
+  }
+  :root[data-theme="dark"] { --bg: #151517; --ink: #f9fafb; --sub: #9aa0a6; --panel: #1e1e21; --border: #2e2f33; --brand: #4d7cfe; }
+  :root[data-theme="light"] { --bg: #ffffff; --ink: #0f1115; --sub: #6b7280; --panel: #f6f7f9; --border: #e4e7ec; --brand: #3964fe; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink); font-family: "Segoe UI", system-ui, sans-serif; }
+  .wrap { box-sizing: border-box; min-height: 100%; padding: 18px 20px 20px; display: flex; flex-direction: column; align-items: center; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  .sub { font-size: 12px; color: var(--sub); text-align: center; line-height: 1.6; margin: 0 0 14px; }
+  .qrbox { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 12px; line-height: 0; }
+  canvas { display: block; }
+  .status { margin-top: 14px; font-size: 12px; color: var(--sub); text-align: center; min-height: 16px; }
+  .url {
+    margin-top: 10px; width: 100%; box-sizing: border-box;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; font: 11px/1.5 ui-monospace, Consolas, monospace;
+    word-break: break-all; user-select: all; max-height: 66px; overflow: auto;
+  }
+  .row { display: flex; gap: 8px; margin-top: 12px; width: 100%; }
+  button {
+    flex: 1; border: 1px solid var(--border); background: var(--panel); color: var(--ink);
+    border-radius: 8px; padding: 8px 10px; font: 13px/1.4 system-ui, sans-serif; cursor: pointer;
+  }
+  button.primary { background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .hint { margin-top: 14px; font-size: 11px; color: var(--sub); line-height: 1.6; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>手机连接</h1>
+    <p class="sub">用手机相机扫描下方二维码，直接在浏览器打开这台电脑上的工作台。</p>
+    <div class="qrbox"><canvas id="qr" width="1" height="1"></canvas></div>
+    <div class="status" id="status">正在准备二维码…</div>
+    <div class="url" id="url"></div>
+    <div class="row">
+      <button id="copy">复制链接</button>
+      <button id="close">关闭</button>
+    </div>
+    <div class="hint">
+      二维码里是本次运行的访问地址（含一次性令牌）。手机首次访问时，
+      这台电脑会弹出「允许访问」确认框，允许后即可像浏览器版一样使用。<br />
+      关闭软件或断开手机连接后地址失效，重新扫码即可。
+    </div>
+  </div>
+<script>
+  const q = new URLSearchParams(location.search)
+  const theme = q.get('theme')
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme
+
+  const canvas = document.getElementById('qr')
+  const statusEl = document.getElementById('status')
+  const urlEl = document.getElementById('url')
+  const copyBtn = document.getElementById('copy')
+  const ctx = canvas.getContext('2d')
+  let currentUrl = ''
+  let currentMatrix = null
+  let retryTimer = null
+  let retries = 0
+
+  /** 把主进程给的模块矩阵画到画布上（含 4 模块静默区，按 devicePixelRatio 取整避免虚边）。 */
+  function draw(matrix) {
+    const quiet = 4
+    const side = matrix.size + quiet * 2
+    // 可用宽度：窗口可缩放，二维码跟着变（远离屏幕也能扫）
+    const available = Math.max(200, Math.min(320, (window.innerWidth || 400) - 96))
+    const scale = Math.max(2, Math.floor(available / side))
+    const ratio = window.devicePixelRatio || 1
+    canvas.width = Math.round(side * scale * ratio)
+    canvas.height = canvas.width
+    canvas.style.width = side * scale + 'px'
+    canvas.style.height = side * scale + 'px'
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    ctx.fillStyle = '#000000'
+    for (let row = 0; row < matrix.size; row++) {
+      for (let col = 0; col < matrix.size; col++) {
+        if (!matrix.modules[row][col]) continue
+        ctx.fillRect(
+          Math.round((col + quiet) * scale * ratio),
+          Math.round((row + quiet) * scale * ratio),
+          Math.ceil(scale * ratio),
+          Math.ceil(scale * ratio),
+        )
+      }
+    }
+  }
+
+  function setStatus(text) {
+    statusEl.textContent = text
+  }
+
+  async function load() {
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null }
+    const api = window.dshDesktop
+    if (!api || typeof api.phoneConnect !== 'function') {
+      setStatus('壳接口不可用（请重启应用）')
+      return
+    }
+    let info
+    try {
+      info = await api.phoneConnect()
+    } catch (err) {
+      setStatus('获取连接信息失败：' + (err && err.message ? err.message : String(err)))
+      return
+    }
+    if (info && info.status === 'ready' && info.qr) {
+      retries = 0
+      currentMatrix = info.qr
+      draw(info.qr)
+      currentUrl = info.url || ''
+      urlEl.textContent = currentUrl
+      copyBtn.disabled = false
+      setStatus('手机扫码后在本机确认授权即可访问')
+      return
+    }
+    // Host 还没就绪 / 没有局域网地址：给用户一句能读懂的话，并在启动中自动重试
+    setStatus((info && info.detail) || '暂时无法生成二维码')
+    copyBtn.disabled = true
+    if (info && info.status === 'starting' && retries < 40) {
+      retries += 1
+      retryTimer = setTimeout(load, 1500)
+    }
+  }
+
+  copyBtn.disabled = true
+  window.addEventListener('resize', () => {
+    if (currentMatrix) draw(currentMatrix)
+  })
+  copyBtn.addEventListener('click', async () => {
+    const api = window.dshDesktop
+    if (!api || typeof api.copyPhoneLink !== 'function' || !currentUrl) return
+    const ok = await api.copyPhoneLink()
+    setStatus(ok ? '已复制到剪贴板' : '复制失败（请手动选中上方地址）')
+    setTimeout(load, 1200)
+  })
+  document.getElementById('close').addEventListener('click', () => window.close())
+
+  load()
+</script>
+</body>
+</html>

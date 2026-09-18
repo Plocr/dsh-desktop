@@ -25,6 +25,13 @@ const shellApi = {
   getInfo: (): Promise<unknown> => ipcRenderer.invoke('dsh:get-info'),
   openDevConsole: (): Promise<boolean> => ipcRenderer.invoke('dsh:open-dev-console'),
   openSession: (sessionId: string): Promise<unknown> => ipcRenderer.invoke('dsh:open-session', sessionId),
+  /**
+   * 「手机连接」二维码页（dsh-app://shell/phone.html）专用：
+   * 取回本次运行的对手机地址 + 已编码好的二维码矩阵（主进程按需拉起局域网门面）。
+   */
+  phoneConnect: (): Promise<unknown> => ipcRenderer.invoke('dsh:phone-connect'),
+  /** 把手机访问地址复制到剪贴板（页面拿不到 clipboard 能力，走壳）。 */
+  copyPhoneLink: (): Promise<boolean> => ipcRenderer.invoke('dsh:copy-phone-link'),
   /** 更新下载完成后，由右上角卡片按钮触发：让壳重启并安装更新。 */
   installUpdate: (): void => ipcRenderer.send('dsh:update-install'),
 }

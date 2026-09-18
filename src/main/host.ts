@@ -10,9 +10,9 @@
  *    时仍有硬超时兜底，绝不让退出/重启流程死等；
  *  - `killNow()` 同步强杀（更新安装与应用退出兜底，不等待、不优雅停机）。
  *
- * 与旧实现的差异：Host 在进程内引导 profile（无 CLI、无监听端口、无 webserver），
- * ready 事实来自子进程 IPC `ready` 事件（只带 dshVersion），因此不再有
- * url/port/token/bridgePort；stdout/stderr 行仍逐行回调给 onLog
+ * 与旧实现的差异：Host 在进程内引导 profile（无 CLI），ready 事实来自子进程 IPC
+ * `ready` 事件——**带认证 URL 与 index 注入片段**（官方形态：Host 起真实 Web Host，
+ * 默认端口 19387），因此不存在 fd 管道；stdout/stderr 行仍逐行回调给 onLog
  * （bridge 发现行由调用方在 onLog 里自行嗅探）。
  */
 import { log } from './logger.ts'

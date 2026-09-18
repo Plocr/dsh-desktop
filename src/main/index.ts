@@ -44,13 +44,10 @@ import {
   handleBridgeEvent,
   handleBridgeSnapshot,
   diagOf,
-  latestApproval,
   parseBridgeDiscovery,
-  recentSessions,
   redactBridgeLine,
   runningJobCount,
   sessionIndexFrom,
-  sessionLabel,
   withApproval,
   withoutApproval,
   type ApprovalIndex,
@@ -62,6 +59,8 @@ import { parseDeepLink, extractDeepLinkFromArgv, type DeepLinkAction } from './d
 import { registerGlobalShortcut, currentShortcut, unregisterAllShortcuts } from './shortcut'
 import { initUpdater, checkNow, updateDownloadReady, installDownloadedUpdate, type UpdateProgress } from './updater'
 import { createLanProxy } from './lanServer'
+import { tryEncodeQr } from './qr'
+import { closePhoneWindow, showPhoneWindow, type PhoneConnectInfo } from './phoneWindow'
 import { repairLegacySubagentDescriptors, type SessionRepairReport } from './sessionRepair.ts'
 import { DESKTOP_PROFILE, desktopProfileDir as sharedDesktopProfileDir, migrateLegacyProfileDir } from './desktopProfile.ts'
 import { compareDots } from './version.ts'
@@ -108,7 +107,7 @@ registerAppScheme()
 
 let win: WindowHandle | null = null
 let trayHandle: TrayHandle | null = null
-/** Host 子进程管理器（官方桌面架构：字节管道 + 进程内引导 dsh profile）。 */
+/** Host 子进程管理器（官方桌面架构：进程内引导 dsh profile + 认证 Web Host）。 */
 let host: HostManager
 let bridge: BridgeClient
 /** 随包运行时（Node + dsh 树 + pnpm；进程内只解析一次，随包不可变）。 */
@@ -221,22 +220,20 @@ function sessionRepairMarkerFile(): string {
  *
  * 为什么要有标记：这是**历史迁移**，同一条日志修好后再扫也无可修。原先每次启动
  * 都全量扫描（读 + 解压全部会话日志），是重用户机器上最拖启动的一项。
- * 现在按随包 dsh 版本只跑一次；需要重扫时走托盘「设置 → 重新修复旧会话日志」。
+ * 现在按随包 dsh 版本只跑一次（0.8.2 起托盘不再挂手动重跑入口——扫描失败时不写标记，
+ * 下次启动会自己重试）。
  *
- * @param dshVersion - 随包 dsh 版本；与标记一致且未 force 时直接跳过。
- * @param options.force - 忽略标记强制重扫（托盘入口用）。
+ * @param dshVersion - 随包 dsh 版本；与标记一致时直接跳过。
  * @returns 修复报告；跳过或失败返回 null。
  */
-function runLegacySessionRepair(dshVersion: string, options: { force?: boolean } = {}): SessionRepairReport | null {
+function runLegacySessionRepair(dshVersion: string): SessionRepairReport | null {
   if (compareDots(dshVersion, '0.1.3-alpha.2') < 0) return null
   const marker = sessionRepairMarkerFile()
-  if (options.force !== true) {
-    try {
-      const seen = JSON.parse(readFileSync(marker, 'utf8')) as { dshVersion?: unknown }
-      if (seen.dshVersion === dshVersion) return null
-    } catch {
-      /* 无标记 → 需要扫描 */
-    }
+  try {
+    const seen = JSON.parse(readFileSync(marker, 'utf8')) as { dshVersion?: unknown }
+    if (seen.dshVersion === dshVersion) return null
+  } catch {
+    /* 无标记 → 需要扫描 */
   }
   let report: SessionRepairReport
   try {
@@ -300,6 +297,8 @@ let lanUrl: string | null = null
 let lanHandle: import('./lanServer').LanProxyHandle | null = null
 /** 本次运行的访问 token（手机书签 / 本机浏览器版都用它换 cookie）。 */
 let lanToken: string | null = null
+/** 最近一次对外门面启停失败的原因（「手机连接」页据此给出可读提示）。 */
+let lanError: string | null = null
 /** 授权弹窗串行锁（多设备同时来不叠弹窗）。 */
 let lanApprovalLock = false
 /** 本次进程启动以来 harness 是否成功 ready 过（用于安全模式失败计数判定）。 */
@@ -309,8 +308,6 @@ let harnessEverReady = false
  * 工作台必须重载才能重新握手；同一世代内的重复 ready 则不重载（避免闪屏）。
  */
 let hostGeneration = 0
-/** API Key 自检结果（null=尚未检测；托盘展示用）。 */
-let apiKeyStatus: ApiKeyCheckResult | null = null
 /** 是否已就当前 key 状态提示过用户（避免每次 ready 重复弹通知）。 */
 let apiKeyNotified = false
 /** 桥接协议不匹配只提示一次（每次重连都弹会很吵）。 */
@@ -384,42 +381,54 @@ async function resolveBestLanIp(): Promise<string | null> {
 
 /**
  * 依据当前设置启停对外服务（局域网 / 本机浏览器版共用同一个门面）。
- * 官方架构下**没有 harness 端口可转发**：对外服务把请求直接交给 Host 的管道 fetch
- * （与桌面窗口同一实现），因此没有「宿主监听地址」需要保护——对外只有一个门面，
- * 门禁是设备授权 + 本次运行 token（见 lanServer.ts）。
+ * 对外服务用的是**壳自己的 forward**（与桌面窗口同一实现：带 Host cookie 转发），
+ * 不是再开一个指向 harness 的反向代理——对外只有这一个门面，门禁是设备授权 +
+ * 本次运行 token（见 lanServer.ts）。默认关闭，托盘点「手机连接（扫描二维码）…」
+ * 时按需开启；开启状态持久化（下次启动 host ready 后自动恢复）。
  *
  * 局域网 IP 在这里**按需解析**（首选默认路由出口，失败回退网卡候选）：解析要发一次
  * UDP connect，最坏 1.5s 超时——绝不能放在窗口/后端启动的关键路径上（只有开启
  * 局域网共享的用户才付这笔钱，而且是在 Host ready 之后的异步路径里）。
  */
 async function manageLanServer(): Promise<void> {
-  if (settings.lanShare) {
-    lanIp = lanIp ?? await resolveBestLanIp()
-    if (lanIp === null) {
-      log('error', 'lanShare: 未发现局域网 IPv4，无法对外提供访问')
-      refreshTray()
-      return
+  try {
+    if (settings.lanShare) {
+      lanIp = lanIp ?? await resolveBestLanIp()
+      if (lanIp === null) {
+        log('error', '手机连接: 未发现局域网 IPv4，无法对外提供访问')
+        refreshTray()
+        return
+      }
+      if (!lanHandle) {
+        lanToken = lanToken ?? randomBytes(16).toString('hex')
+        lanHandle = await createLanProxy({
+          bindHost: '0.0.0.0',
+          // 局域网门面：请求来自别的设备（Origin 不是 dsh-app://app），
+          // 但已经过本壳自己的设备授权 + 本次运行 token 门禁，因此放行来源校验。
+          forward: (request) => host.fetch(request, { allowForeignOrigin: true }),
+          // WebSocket 流（官方 mux）也要经门面转发：浏览器里客户端连的是门面自身的地址。
+          upgrade: (request, socket, head) => host.proxyWebSocket(request, socket, head),
+          requestApproval: (ip) => promptLanApproval(ip),
+          token: lanToken,
+        })
+        lanUrl = `http://${lanIp}:${lanHandle.port}/?token=${lanToken}`
+        lanError = null
+        log('info', `手机连接: serving on ${lanIp}:${lanHandle.port}（设备首访需本机授权）`)
+      }
+    } else if (lanHandle) {
+      await lanHandle.stop()
+      lanHandle = null
+      lanUrl = null
+      lanIp = null
+      lanError = null
     }
-    if (!lanHandle) {
-      lanToken = lanToken ?? randomBytes(16).toString('hex')
-      lanHandle = await createLanProxy({
-        bindHost: '0.0.0.0',
-        // 局域网门面：请求来自别的设备（Origin 不是 dsh-app://app），
-        // 但已经过本壳自己的设备授权 + 本次运行 token 门禁，因此放行来源校验。
-        forward: (request) => host.fetch(request, { allowForeignOrigin: true }),
-        // WebSocket 流（官方 mux）也要经门面转发：浏览器里客户端连的是门面自身的地址。
-        upgrade: (request, socket, head) => host.proxyWebSocket(request, socket, head),
-        requestApproval: (ip) => promptLanApproval(ip),
-        token: lanToken,
-      })
-      lanUrl = `http://${lanIp}:${lanHandle.port}/?token=${lanToken}`
-      log('info', `lanShare: serving on ${lanIp}:${lanHandle.port}（设备首访需本机授权）`)
-    }
-  } else if (lanHandle) {
-    await lanHandle.stop()
+  } catch (err) {
+    // 端口被占满/权限不足等：门面起不来不能带走整个壳（托盘照常可用，用户可重试）
+    const reason = err instanceof Error ? err.message : String(err)
+    log('error', `手机连接: 启停门面失败: ${reason}`)
+    lanError = reason
     lanHandle = null
     lanUrl = null
-    lanIp = null
   }
   refreshTray()
 }
@@ -617,20 +626,29 @@ function showWindow(): void {
 
 /**
  * 在系统浏览器打开工作台。
- * 官方架构下后端没有监听端口（Host 走字节管道），所以本机浏览器版复用对外门面：
- * 已开启局域网访问 → 直接开回环地址（回环免设备授权，仍需本次运行 token）；
- * 未开启 → 明确提示先开启（不偷偷为本机再开一个长期监听口）。
+ * 官方传输下 Host 自己就是 Web 应用（回环 19387，认证 URL 带本次运行 token），
+ * 所以直接把该地址交给系统浏览器即可（与 `dsh web` 同语义，一次 token 换 cookie）；
+ * 未就绪时给一句可读提示，绝不偷偷另开监听口。
  */
 function openBrowser(): void {
   // 官方传输下 Host 本身就是 Web 应用：**用户手动点托盘**时直接把这个回环地址交给
   // 默认浏览器（一次 token 换 cookie，和 `dsh web` 同语义）。启动时绝不自动打开。
+  const open = (url: string): void => {
+    void shell.openExternal(url).catch((err: unknown) => {
+      // 打开失败（没有可用浏览器/关联失效）不该只是静默 reject：给用户一句可读提示
+      const reason = err instanceof Error ? err.message : String(err)
+      log('error', `openExternal failed: ${reason}`)
+      notify('打开浏览器版失败', `无法调用系统浏览器：${reason}`, () => showWindow())
+    })
+  }
   const hostUrl = host?.getUrl()
   if (hostUrl !== undefined && hostUrl !== '') {
-    void shell.openExternal(hostUrl)
+    open(hostUrl)
     return
   }
   if (lanHandle && lanToken) {
-    void shell.openExternal(`http://127.0.0.1:${lanHandle.port}/?token=${lanToken}`)
+    // 兜底：Host 地址还没拿到（刚重启）但门面在 → 走门面的回环地址
+    open(`http://127.0.0.1:${lanHandle.port}/?token=${lanToken}`)
     return
   }
   notify('打开浏览器版', 'Harness 还没就绪（或已停止）。先「重启 Harness」，或稍后再试。', () => showWindow())
@@ -642,7 +660,7 @@ function currentInfo(): unknown {
     harnessState: host?.state ?? 'stopped',
     url: lanUrl,
     dshHome: dshHome(),
-    transport: 'byte-pipes (dsh-app://app)',
+    transport: 'authenticated web host (dsh-app://app forwards)',
     runningJobs,
     appData: app.getPath('userData'),
     logsDir: logDirPath(),
@@ -690,16 +708,85 @@ async function stopHostBeforePluginOp(): Promise<void> {
   }
 }
 
+/* ── 手机连接（局域网门面 + 二维码） ──────────────────────────────────── */
+
 /**
- * 托盘「在插件页管理（官方）…」：把工作台带到前台，并指出官方插件页在侧边栏。
+ * 确保「手机连接」可用：按需开启局域网门面，返回手机应访问的地址。
  *
- * 官方桌面设计里 Electron **不提供**独立的插件管理页面；插件管理统一由共享的
- * Web 插件管理器（侧边栏「插件」页 + `plugin_manager` 工具）承担，桌面壳只提供
- * 原生恢复与包管理器——所以这里只把人带到那个页面，不在托盘复制第二套管理界面。
+ * 与旧「局域网访问」勾选项的区别只在交互：这里**点一下即开启**并直接给二维码，
+ * 用户不需要先找开关、再复制地址。开启状态仍然持久化（settings.lanShare），
+ * 下次启动 host ready 后自动恢复门面。
+ *
+ * @returns 手机可访问的 URL；没有局域网 IPv4 时返回 null（页面会给出可读提示）。
  */
-function openPluginPage(): void {
-  showWindow()
-  notify('插件页', '在左侧边栏打开「插件」页：安装、启停、卸载与依赖脚本授权都在那里。')
+async function ensurePhoneAccess(): Promise<string | null> {
+  // 先解析地址：解析不出来就不要把开关留在「已开启」（否则每次启动都白试一遍）
+  lanIp = lanIp ?? await resolveBestLanIp()
+  if (lanIp === null) {
+    log('error', '手机连接：未发现局域网 IPv4，无法对外提供访问')
+    return null
+  }
+  if (!settings.lanShare) {
+    settings.lanShare = true
+    saveSettings(settingsFile, settings)
+  }
+  await manageLanServer()
+  return lanUrl
+}
+
+/** 「手机连接」页要的数据：地址 + 二维码矩阵（Host 未就绪时让页面自动重试）。 */
+async function phoneConnectInfo(): Promise<PhoneConnectInfo> {
+  if (host?.getUrl() === undefined) {
+    return { status: 'starting', url: null, qr: null, detail: '工作台正在启动，稍候自动重试…' }
+  }
+  let url: string | null = null
+  try {
+    url = await ensurePhoneAccess()
+  } catch (err) {
+    log('error', `手机连接：拉起门面失败：${err instanceof Error ? err.message : String(err)}`)
+  }
+  if (url === null) {
+    return {
+      status: 'unavailable',
+      url: null,
+      qr: null,
+      // 区分「没有网卡地址」与「门面起不来」（端口被占／权限），别让用户白等
+      detail: lanError !== null
+        ? `对外服务启动失败：${lanError}`
+        : '没有检测到局域网网卡地址（请连接 Wi-Fi / 网线后重试）',
+    }
+  }
+  const qr = tryEncodeQr(url)
+  if (qr === null) {
+    // 地址比二维码容量还长（正常不可能）：宁可明说，也不显示扫不出来的图
+    return { status: 'unavailable', url, qr: null, detail: '地址过长，无法生成二维码（可在下方复制链接）' }
+  }
+  refreshTray()
+  return {
+    status: 'ready',
+    url,
+    qr: { size: qr.size, modules: qr.modules.map((row) => [...row]) },
+    detail: '手机扫码后在本机确认授权即可访问',
+  }
+}
+
+/** 托盘「手机连接（扫描二维码）…」：打开二维码窗口（首次会顺带开启门面）。 */
+function openPhoneWindow(): void {
+  showPhoneWindow({
+    preloadPath: path.join(__dirname, '..', 'preload', 'index.cjs'),
+    resourcesDir: appResourcesDir(),
+    theme: () => resolveEffectiveTheme(dshHome()),
+  })
+}
+
+/** 托盘「断开手机连接」：停门面 + 关窗口（二维码里的地址随即失效）。 */
+async function stopPhoneAccess(): Promise<void> {
+  settings.lanShare = false
+  saveSettings(settingsFile, settings)
+  closePhoneWindow()
+  await manageLanServer()
+  refreshTray()
+  notify('手机连接已断开', '对外地址已停止服务，重新扫码需要再次开启。')
 }
 
 /** 托盘「进入安全模式」：停用全部插件（先停 Host，避免热监听把 manifest 改动回滚）。 */
@@ -710,7 +797,7 @@ async function enterSafeModeFromTray(): Promise<void> {
   if (isolateProfileForSafeMode(desktopProfileDir())) {
     log('info', 'safe mode: profile bundles isolated (only official bundles kept)')
   }
-  notify('已进入安全模式', '全部插件已停用（仅保留系统必需 bridge 与官方 bundle）。可在托盘「桌面插件 → 退出安全模式」恢复。')
+  notify('已进入安全模式', '全部插件已停用（仅保留系统必需 bridge 与官方 bundle）。在托盘菜单点「退出安全模式」即可恢复。')
   refreshTray()
   // 内部重新生成 overlay（安全模式只注入 bridge）并按新状态重启
   await restartHarness()
@@ -752,12 +839,13 @@ async function checkApiKey(): Promise<{ result: ApiKeyCheckResult; via: 'bridge'
 async function runApiKeyCheck(): Promise<void> {
   try {
     const { result, via } = await checkApiKey()
-    apiKeyStatus = via === 'file' ? { ...result, detail: fileFallbackDetail(result) } : result
-    log(result.ok ? 'info' : 'error', `api key check (${via}): ${result.detail}`)
+    // 文件回退（非权威）时日志里标注清楚，免得排障时把「本地文件没有 key」当成官方判定
+    const detail = via === 'file' ? fileFallbackDetail(result) : result.detail
+    log(result.ok ? 'info' : 'error', `api key check (${via}): ${detail}`)
     refreshTray()
     if (apiKeyNeedsAttention(result, via) && !apiKeyNotified) {
       apiKeyNotified = true
-      notify('DeepSeek API Key 检测', `${result.detail}。更新后立即生效（无需重启应用）。`)
+      notify('DeepSeek API Key 检测', `${detail}。更新后立即生效（无需重启应用）。`)
     }
   } catch {
     /* 自检失败不影响主流程 */
@@ -1084,7 +1172,7 @@ async function main(): Promise<void> {
             }
             notify(
               'DSH Desktop 已进入安全模式',
-              `工作台连续 ${SAFE_MODE_THRESHOLD} 次启动失败，已停用全部插件（仅保留系统必需 bridge 与官方 bundle）。可在托盘「桌面插件 → 退出安全模式」恢复。`,
+              `工作台连续 ${SAFE_MODE_THRESHOLD} 次启动失败，已停用全部插件（仅保留系统必需 bridge 与官方 bundle）。在托盘菜单点「退出安全模式」即可恢复。`,
             )
             refreshTray()
           }
@@ -1176,19 +1264,16 @@ async function main(): Promise<void> {
   )
 
   trayHandle = createTray(path.join(resourcesDir, 'icons', 'tray.png'), {
-    getUrl: () => lanUrl,
     getState: () => ({
       autoStart: settings.autoStart,
       notifications: settings.notifications,
       autoUpdate: settings.autoUpdate,
-      lanShare: settings.lanShare,
-      lanUrl,
       harnessState: host?.state === 'ready' ? '运行中' : host?.state === 'starting' ? '启动中' : '已停止',
-      globalShortcut: currentShortcut(),
       appVersion: app.getVersion(),
       harnessVersion,
       safeMode: isSafeMode(safeModeFile()),
       lastHarnessError,
+      phoneOn: settings.lanShare,
       bridge: {
         connected: bridgeConnected,
         jobs: bridgeJobsState(),
@@ -1198,26 +1283,12 @@ async function main(): Promise<void> {
     }),
     showWindow,
     openBrowser,
-    pickWorkspace: () => void pickWorkspace(),
-    openPluginPage: () => openPluginPage(),
+    openPhone: () => openPhoneWindow(),
+    stopPhone: () => void stopPhoneAccess(),
     exitSafeMode: () => void exitSafeModeFromTray(),
     enterSafeMode: () => void enterSafeModeFromTray(),
     restartHarness: () => void restartHarness(),
     openLogs: () => void shell.openPath(logDirPath()),
-    // 一次性迁移的强制重跑：按菜单点击先返回，扫描在下一个 tick 做（避免卡住托盘）
-    repairSessions: () => {
-      setTimeout(() => {
-        const version = harnessVersion ?? runtime?.dshVersion ?? ''
-        const report = runLegacySessionRepair(version, { force: true })
-        notify(
-          '旧会话修复完成',
-          report === null
-            ? '本次未扫描（dsh 版本不支持或扫描失败，详见日志）。'
-            : `扫描 ${report.scanned} 个会话日志，修复 ${report.repaired} 个。`,
-        )
-        refreshTray()
-      }, 0)
-    },
     cleanLogs: () => cleanLogs(),
     uninstall: () => uninstallApp(),
     // 手动「检查并更新…」：官方桌面端只有一个更新单元（壳 + dsh 运行时一起换），
@@ -1241,45 +1312,6 @@ async function main(): Promise<void> {
       saveSettings(settingsFile, settings)
       refreshTray()
     },
-    // 局域网访问开关：开启 → 立即起对外门面（手机首访需本机授权）；关闭 → 立即断开。
-    // 后端无监听端口，因此不重启 Host、也不影响本机窗口。
-    setLanShare: (v) => {
-      settings.lanShare = v
-      saveSettings(settingsFile, settings)
-      if (!v) {
-        void manageLanServer().then(() => {
-          refreshTray()
-          notify('局域网访问已关闭', '对外地址已停止服务。', () => showWindow())
-        })
-        return
-      }
-      void (async () => {
-        lanIp = await resolveBestLanIp()
-        if (lanIp === null) {
-          log('error', 'lanShare: 未发现局域网 IPv4，无法对外提供访问')
-          notify('局域网访问已开启', '未发现局域网网卡 IPv4，无法对外提供服务。', () => showWindow())
-          refreshTray()
-          return
-        }
-        await manageLanServer()
-        refreshTray()
-        notify(
-          '局域网访问已开启',
-          `地址已复制到剪贴板：${lanUrl ?? ''}\n手机/其它设备首次访问需在本机确认授权。`,
-          () => showWindow(),
-        )
-        if (lanUrl) void clipboard.writeText(lanUrl)
-      })()
-    },
-    // 复制局域网地址到剪贴板（供同网段设备浏览器打开）
-    copyLanUrl: () => {
-      if (!lanUrl) {
-        notify('局域网访问', settings.lanShare ? '尚未就绪，稍后在托盘查看地址。' : '局域网访问未开启。', () => showWindow())
-        return
-      }
-      void clipboard.writeText(lanUrl)
-      notify('局域网地址已复制', lanUrl, () => showWindow())
-    },
     quit: () => app.quit(),
   })
 
@@ -1301,6 +1333,15 @@ async function main(): Promise<void> {
       log('error', `workspace boot failed: ${message}`)
       lastHarnessError = message.slice(0, 220)
       refreshTray()
+    },
+    // 手机连接（局域网门面 + 二维码）：只有壳页面 dsh-app://shell/phone.html 拿得到
+    phoneConnect: () => phoneConnectInfo(),
+    copyPhoneLink: async () => {
+      // 页面可能比「地址就绪」先一步点到复制：这里再兜一次（幂等，不会重复开门面）
+      const url = lanUrl ?? (await ensurePhoneAccess())
+      if (url === null) return false
+      clipboard.writeText(url)
+      return true
     },
   })
 

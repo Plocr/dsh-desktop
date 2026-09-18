@@ -104,43 +104,58 @@ const EXPECTED_ERROR = {
 
 /* ── 按壳的 spawn 契约起 Host：官方形态（stdio + Node IPC，没有字节管道）── */
 
-const startedAt = Date.now()
-const child = spawn(nodeExe, [hostEntry, runtimeDir, profileDir, '--pnpm', pnpmEntry], {
-  cwd: profileDir,
-  env: { ...process.env, DSH_HOME: home, DSH_DESKTOP: '1' },
-  stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-})
-
+let startedAt = Date.now()
+let child = null
 let ready = null
 let fatal = null
 let bridgeTarget = null
 let stdoutBuf = ''
 let stdoutText = ''
 let stderrText = ''
-child.on('message', (m) => {
-  if (m && m.type === 'ready') ready = m
-  else if (m && m.type === 'fatal') fatal = m
-})
-child.on('exit', (code, signal) => {
-  if (ready === null && fatal === null) console.error(`[e2e] Host 提前退出 code=${code} signal=${signal}`)
-})
-child.stdout.setEncoding('utf8')
-child.stdout.on('data', (chunk) => {
-  stdoutText += chunk
-  stdoutBuf += chunk
-  const lines = stdoutBuf.split(/\r?\n/)
-  stdoutBuf = lines.pop() ?? ''
-  for (const line of lines) {
-    if (!line.startsWith('dsh desktop: ')) continue
-    try {
-      bridgeTarget = JSON.parse(line.slice('dsh desktop: '.length))
-    } catch {
-      /* ignore */
+
+/**
+ * 起一个 Host（按壳的 spawn 契约）。默认端口 19387 可能与**正在运行的 DSH Desktop / dsh web**
+ * 撞车，撞了就按壳自己的兜底语义（host.ts 的 portFallbackUsed）改用临时端口重跑一次，
+ * 而不是让整份 e2e 挂在"本机已经开着应用"这种正常状态上。
+ */
+function startHost(extraArgs = []) {
+  ready = null
+  fatal = null
+  bridgeTarget = null
+  stdoutBuf = ''
+  startedAt = Date.now()
+  child = spawn(nodeExe, [hostEntry, runtimeDir, profileDir, '--pnpm', pnpmEntry, ...extraArgs], {
+    cwd: profileDir,
+    env: { ...process.env, DSH_HOME: home, DSH_DESKTOP: '1' },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  })
+  child.on('message', (m) => {
+    if (m && m.type === 'ready') ready = m
+    else if (m && m.type === 'fatal') fatal = m
+  })
+  child.on('exit', (code, signal) => {
+    if (ready === null && fatal === null) console.error(`[e2e] Host 提前退出 code=${code} signal=${signal}`)
+  })
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', (chunk) => {
+    stdoutText += chunk
+    stdoutBuf += chunk
+    const lines = stdoutBuf.split(/\r?\n/)
+    stdoutBuf = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.startsWith('dsh desktop: ')) continue
+      try {
+        bridgeTarget = JSON.parse(line.slice('dsh desktop: '.length))
+      } catch {
+        /* ignore */
+      }
     }
-  }
-})
-child.stderr.setEncoding('utf8')
-child.stderr.on('data', (chunk) => { stderrText += chunk })
+  })
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', (chunk) => { stderrText += chunk })
+}
+
+startHost()
 
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms) })
 const waitFor = async (pred, ms, label) => {
@@ -154,7 +169,7 @@ const waitFor = async (pred, ms, label) => {
 
 function cleanup() {
   try {
-    child.kill('SIGKILL')
+    child?.kill('SIGKILL')
   } catch {
     /* ignore */
   }
@@ -211,6 +226,17 @@ async function rpc(name, method, params, timeoutMs = 8000, report = true) {
 
 try {
   await waitFor(() => ready !== null || fatal !== null, 180_000, 'Host ready（IPC）')
+  // 默认端口被别的 DSH 实例占着（本机正开着应用）：按壳的兜底语义换临时端口再试一次
+  if (fatal !== null && /EADDRINUSE|address already in use/iu.test(String(fatal.message))) {
+    console.log('[e2e] 默认端口 19387 被占用 → 改用临时端口重跑 Host')
+    try {
+      child?.kill('SIGKILL')
+    } catch {
+      /* ignore */
+    }
+    startHost(['--port', '0'])
+    await waitFor(() => ready !== null || fatal !== null, 180_000, 'Host ready（IPC，临时端口）')
+  }
   if (fatal) throw new Error(`Host 报 fatal：${fatal.message}`)
   const bootMs = Date.now() - startedAt
   console.log(`[e2e] ✔ Host 引导成功（dsh ${ready.dshVersion}，${bootMs}ms，官方 runProfile + 认证 URL）`)

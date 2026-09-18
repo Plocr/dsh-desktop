@@ -13,6 +13,9 @@ import { authenticateWebHost, forwardWebRequest } from './webDocument.ts'
 /** 与 Host 之间变更过的 IPC 契约版本（结构变化时必须递增，壳据此拒绝不匹配的 Host）。 */
 export const DESKTOP_HOST_PROTOCOL_VERSION = 4
 
+/** 保留的 stderr 尾巴上限（UTF-16 代码单元；与官方桌面端一致的最后 64 Ki 字符）。 */
+export const STDERR_TAIL_LIMIT = 64 * 1024
+
 /** One `ready` event from the owned Host process. */
 export interface DesktopHostReady {
   readonly protocolVersion: typeof DESKTOP_HOST_PROTOCOL_VERSION
@@ -63,6 +66,10 @@ export class DesktopHostProcess {
     this.readyReject = reject
   })
   private exitPromise: Promise<void> | undefined
+  /**
+   * stderr 尾巴（启动失败诊断用）。**必须有上限**：长期运行的 Host 会不停打日志，
+   * 无上限累加等于内存泄漏（官方桌面端同样只保留最后 64 Ki 字符）。
+   */
   private stderr = ''
   private failureReported = false
   private shutdownSent = false
@@ -137,8 +144,10 @@ export class DesktopHostProcess {
     })
     this.child = child
     child.stderr?.setEncoding('utf8')
-    child.stderr?.on('data', (chunk: string) => { this.stderr += chunk })
-    child.stderr?.on('data', (chunk: string) => { this.acceptStderrChunk(chunk) })
+    child.stderr?.on('data', (chunk: string) => {
+      this.stderr = (this.stderr + chunk).slice(-STDERR_TAIL_LIMIT)
+      this.acceptStderrChunk(chunk)
+    })
     child.stdout?.setEncoding('utf8')
     child.stdout?.on('data', (chunk: string) => { this.acceptStdoutChunk(chunk) })
     child.on('message', (message: unknown) => { this.handleMessage(message) })
