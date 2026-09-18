@@ -106,6 +106,12 @@ test('手机连接：断开（stop）后地址立即失效', async () => {
   const ok = await rawRequest(handle.port, new URL(url).pathname + new URL(url).search)
   assert.equal(ok.status, 303)
   await handle.stop()
-  // 停机后连接被拒/被重置都算「地址失效」（Windows 上常见 ECONNRESET）
-  await assert.rejects(rawRequest(handle.port, '/'), /ECONNREFUSED|ECONNRESET/u)
+  // 停机后连接被拒/被重置/半途断开都算「地址失效」——各平台措辞不同：
+  // Windows 常见 "read ECONNRESET"，Linux CI 上是 "socket hang up"（code 仍是 ECONNRESET）。
+  // 这里按错误码判定，兜底再匹配文案，避免把平台差异当成产品行为。
+  await assert.rejects(rawRequest(handle.port, '/'), (err) => {
+    const code = typeof err?.code === 'string' ? err.code : ''
+    if (['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ECONNABORTED'].includes(code)) return true
+    return /socket hang up|ECONNREFUSED|ECONNRESET|EPIPE/iu.test(String(err?.message ?? err))
+  })
 })
