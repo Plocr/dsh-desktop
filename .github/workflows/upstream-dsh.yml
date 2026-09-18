@@ -7,10 +7,11 @@ name: upstream-dsh
 #   2. 有新版 → 同步 pin（package.json.dshRuntime.dsh + packages/host 里跟随 dsh 的依赖）并升壳版本；
 #   3. 重建随包运行时树 + typecheck + 单测 + e2e（真实 dsh + 官方认证 Web Host + bridge）；
 #   4. 全绿后：
-#        · 默认（publish=false）→ 推一个 `upstream/dsh-<版本>` 分支并尝试开 PR，等你 review；
-#        · publish=true（手动触发时勾选）→ 打 `v<壳版本>` tag 并**显式 dispatch** build-release.yml
-#          （用 GITHUB_TOKEN 推 tag 不会触发 push 事件，所以必须显式触发）→ 三平台出包 + 发布 Release，
-#          已装用户端由 electron-updater 自动更新。
+#        · 默认（定时 / 手动触发且勾选 publish）→ 写 `docs/release-notes/v<壳版本>.md`（更新日志写明
+#          "跟随官方最新 harness 同步"）→ 打 `v<壳版本>` tag → **显式 dispatch** build-release.yml
+#          （用 GITHUB_TOKEN 推 tag 不会触发 push 事件，所以必须显式触发）→ 三平台出包 + 发布 Release +
+#          上传安装包与 latest.yml → 已装用户端由 electron-updater 自动更新；
+#        · 取消勾选 publish → 只推 `upstream/dsh-<版本>` 分支并尝试开 PR，等你 review。
 #
 # 只在版本号层面自动化的部分：如果官方组合树/宿主 API 有破坏性变化，第 3 步的 e2e 会失败（不会发版），
 # 那种情况需要人工改 packages/host 或 packages/bridge 源码；`DESKTOP_HOST_PROTOCOL_VERSION`
@@ -21,9 +22,9 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: '同步并验证后直接打 tag 出包（不勾 = 只开 PR 等审）'
+        description: '同步并验证通过后直接出包发布（取消勾选 = 只开 PR 等审）'
         type: boolean
-        default: false
+        default: true
       version:
         description: '指定目标 dsh 版本（留空 = 自动取 npm 最高版本）'
         required: false
@@ -116,29 +117,56 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # 用 $LASTEXITCODE 显式判定成败（而不是让原生命令的非零退出直接抛），
+          # 这样「推送失败」「PR 创建失败」都能走到我们自己写的提示分支。
+          $PSNativeCommandUseErrorActionPreference = $false
           $pkg = Get-Content package.json -Raw | ConvertFrom-Json
           $dsh = $pkg.dshRuntime.dsh
           $ver = $pkg.version
           # 升级前的 pin（HEAD 还是 master 的提交，尚未 commit 本次改动）
           $prev = (git show HEAD:package.json | ConvertFrom-Json).dshRuntime.dsh
           $branch = "upstream/dsh-$dsh"
+          # 更新日志：跟代码一起提交，build-release 会用 docs/release-notes/<tag>.md 作为 Release 正文
+          $notesDir = Join-Path $PWD 'docs/release-notes'
+          New-Item -ItemType Directory -Force -Path $notesDir | Out-Null
+          $notesFile = Join-Path $notesDir "v$ver.md"
+          @(
+            ('# DSH Desktop v' + $ver),
+            '',
+            ('跟随官方最新 harness 同步：`@deepseek-ai/dsh` ' + $prev + ' → ' + $dsh + '。'),
+            '',
+            '- 随包运行时（dsh + Node + pnpm）按绑定版本重建，`verify:runtime` 逐文件 sha256 校验通过',
+            '- typecheck + 单元测试 + e2e（真实 dsh + 官方认证 Web Host + bridge 契约）全绿',
+            ('- 壳版本 patch+1（v' + $ver + '）：应用内「检查更新」即可自动下载安装，无需手动重装'),
+            '',
+            '> 本次更新由 `.github/workflows/upstream-dsh.yml` 自动巡检 npm 官方版本后触发（出包流水线：build-release）。'
+          ) -join "`n" | Out-File -FilePath $notesFile -Encoding utf8
           git config user.name 'dsh-upstream-bot'
           git config user.email 'actions@users.noreply.github.com'
-          git checkout -b $branch
-          git add package.json packages/host/package.json
-          git commit -m "chore(upstream): 升级官方 harness 到 $dsh（壳 v$ver）"
-          if ('${{ inputs.publish }}' -eq 'true') {
+          # 定时触发时 inputs.publish 为空 → 走自动出包；手动触发取消勾选才是 'false'（只开 PR）
+          if ('${{ inputs.publish }}' -ne 'false') {
+            # 自动出包：bump 直接落到默认分支（否则 master 的 pin 永远不动，天天重复发同一版；
+            # tag 已存在时下面的 git tag 会失败，天然挡住重复发布）
+            git add package.json packages/host/package.json docs/release-notes
+            git commit -m "chore(upstream): 升级官方 harness 到 $dsh（壳 v$ver）"
+            git push origin HEAD:master
+            if ($LASTEXITCODE -ne 0) {
+              "推送默认分支失败（master 可能有保护规则）——请手动合并后再打 tag v$ver。" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+              exit 1
+            }
             git tag "v$ver"
-            git push origin $branch
             git push origin "v$ver"
             # 显式触发三平台出包（build-release 的 workflow_dispatch 支持 inputs.tag）
-            gh workflow run build-release.yml --ref $branch -f tag="v$ver"
+            gh workflow run build-release.yml --ref master -f tag="v$ver"
             if ($LASTEXITCODE -eq 0) {
-              "已打 tag \`v$ver\` 并触发 build-release：三平台出包 + 发布 Release（已装用户随后自动更新）。" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+              "已合并到 master、打 tag \`v$ver\` 并触发 build-release：三平台出包 + 发布 Release（更新日志取 docs/release-notes/v$ver.md，已装用户随后自动更新）。" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             } else {
               "tag \`v$ver\` 已推送，但自动触发 build-release 失败——请手动触发（workflow_dispatch，tag 填 v$ver）。" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             }
           } else {
+            git checkout -b $branch
+            git add package.json packages/host/package.json docs/release-notes
+            git commit -m "chore(upstream): 升级官方 harness 到 $dsh（壳 v$ver）"
             git push -u origin $branch
             # 单引号字符串：反引号与 $ 都是字面量，不会被 PowerShell 展开
             $body = @(

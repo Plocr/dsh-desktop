@@ -184,8 +184,12 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（官方 runProf
 | 方式 | 怎么做 | 结果 |
 |---|---|---|
 | 手动 | `npm run upstream:dsh:check`（只报告）→ `npm run upstream:dsh -- --sync --write` → `npm run setup:runtime` → `npm run check` + `npm run e2e:bridge` → 打 tag | 本地一条龙 |
-| 半自动（默认） | `.github/workflows/upstream-dsh.yml` 每天 04:00（Asia/Shanghai）自动跑，发现新版就同步 pin、重建运行时、跑门禁与 e2e，全绿后推分支 + 开 PR | 你 review 后合并，再打 tag 出包 |
-| 全自动 | 手动触发同一个 workflow 并勾选 `publish` | 全绿后自动打 `v<壳版本>` tag 并触发 `build-release.yml`（三平台出包 + 发 Release）→ 已装用户自动更新 |
+| 自动（默认） | `.github/workflows/upstream-dsh.yml` 每天 04:00（Asia/Shanghai）自动跑，或手动触发（`publish` 默认勾选） | 检测到新版 → 同步 pin、重建运行时、跑门禁与 e2e → 全绿后写更新日志、推默认分支 + 打 `v<壳版本>` tag → 触发 `build-release.yml` 三平台出包并发布 Release → 已装用户自动更新 |
+| 只审不发（可选） | 手动触发同一 workflow 并**取消勾选** `publish` | 只推 `upstream/dsh-<版本>` 分支 + 开 PR，等你 review 后自己打 tag |
+
+**更新日志**：自动出包时会写一份 `docs/release-notes/v<壳版本>.md` 并随代码提交，正文开头就是
+"跟随官方最新 harness 同步：`@deepseek-ai/dsh` 旧版本 → 新版本"；`build-release.yml` 用它作为 Release 正文
+（没有对应文件时回退 GitHub 自动生成）。也就是说用户在应用里点「检查更新」看到的版本说明就是这一份。
 
 两个必须知道的细节：
 

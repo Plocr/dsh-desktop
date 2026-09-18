@@ -159,9 +159,16 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
-          # 若 release 尚不存在（刚打 tag 尚未建 release）则先创建，避免 upload 报 release not found
+          # 若 release 尚不存在（刚打 tag 尚未建 release）则先创建，避免 upload 报 release not found。
+          # 更新日志：优先用随代码提交的 docs/release-notes/<tag>.md（上游自动同步流程会写
+          # "跟随官方最新 harness 同步"那份），没有才退回 GitHub 自动生成。
+          NOTES="docs/release-notes/$RELEASE_TAG.md"
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes
+            if [ -f "$NOTES" ]; then
+              gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --notes-file "$NOTES"
+            else
+              gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes
+            fi
           fi
           # 上传安装包 + latest.yml（GitHub provider 的更新元数据，updater 依赖）
           gh release upload "$RELEASE_TAG" release/*.exe release/latest.yml --clobber
@@ -256,7 +263,12 @@ jobs:
           # 若 release 尚不存在（并发时 Windows 任务还没创建）则先创建，
           # 否则 gh release upload 会报 release not found（mac 任务跑得更快）
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes
+            NOTES="docs/release-notes/$RELEASE_TAG.md"
+            if [ -f "$NOTES" ]; then
+              gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --notes-file "$NOTES"
+            else
+              gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes
+            fi
           fi
           # 公证装订后 blockmap 会被删除（装订改变了 dmg 字节），存在才上传
           assets=(release/*arm64*.dmg)
@@ -345,7 +357,12 @@ jobs:
           # 若 release 尚不存在（并发时 Windows 任务还没创建）则先创建，
           # 否则 gh release upload 会报 release not found（mac 任务跑得更快）
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes
+            NOTES="docs/release-notes/$RELEASE_TAG.md"
+            if [ -f "$NOTES" ]; then
+              gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --notes-file "$NOTES"
+            else
+              gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes
+            fi
           fi
           # 公证装订后 blockmap 会被删除（装订改变了 dmg 字节），存在才上传
           assets=(release/*x64*.dmg)
