@@ -19,6 +19,7 @@
  * ws 为内联 vendored 副本（vendor/ws，无运行时依赖），插件完全自包含。
  */
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { createServer } from 'node:http'
 import { WebSocketServer } from '../vendor/ws/wrapper.mjs'
 
 export const name = 'dsh-desktop-bridge'
@@ -181,7 +182,32 @@ export function apply(ctx, config = {}) {
   // 壳解析后用于 WS 握手——本机其它进程无从获知。
   const token = typeof config.token === 'string' && config.token !== '' ? config.token : randomToken()
   // maxPayload：壳只发小帧（auth/call），1 MiB 足够；避免本机进程用超大帧把 harness 进程撑爆。
-  const wss = new WebSocketServer({ host: '127.0.0.1', port: 0, maxPayload: 1 << 20 })
+  //
+  // 自己持有 HTTP 监听句柄（noServer 模式）+ listen 后 **unref()**：
+  // 官方 `createProcessShutdown` 的"正常完成"路径只设 `process.exitCode` 并等事件循环**自然 drain**
+  // （不强制 exit）；只要还有一个 ref 的监听句柄，Node 就永远不会退出。实测（本仓探针）：
+  // 桥接在监听时，Host 收到 shutdown 后 60 秒仍活着、端口仍在监听，壳只能 SIGKILL——
+  // 用户体感就是"退出要等 5~8 秒 / 像没反应"，重启时旧进程还占着资源，下一次启动也跟着顿挫。
+  // unref 之后：桥接照常服务（进程活着期间连接照收），但不再阻碍进程退出；
+  // dispose 里仍会显式 close()，正常卸载路径照样干净。
+  const httpServer = createServer((req, res) => {
+    res.writeHead(426, { 'content-type': 'text/plain; charset=utf-8' })
+    res.end('upgrade required')
+  })
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1 << 20 })
+  httpServer.on('upgrade', (req, socket, head) => {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req)
+    })
+  })
+  httpServer.on('listening', () => {
+    try {
+      httpServer.unref()
+    } catch {
+      /* ignore */
+    }
+  })
+  httpServer.listen(0, '127.0.0.1')
   const clients = new Set()
   /** 未鉴权连接的存活上限：随机端口对任何本机进程可见，不能让它们白占连接。 */
   const authTimeoutMs = Number.isFinite(config.authTimeoutMs) ? Number(config.authTimeoutMs) : 10_000
@@ -527,6 +553,14 @@ export function apply(ctx, config = {}) {
 
   wss.on('connection', (ws) => {
     let authed = false
+    // 已接受的 socket 也是 ref 句柄：客户端连着时同样会让"dispose 完成 → 等事件循环 drain"
+    // 的退出路径卡住（实测：客户端开着时 Host 60s 不退出）。unref 只影响"是否拖住进程退出"，
+    // 不影响读写——桥接不该定义 Host 的生存期。
+    try {
+      ws._socket?.unref?.()
+    } catch {
+      /* ignore */
+    }
     // 未鉴权连接不得长期占用：随机端口对本机任何进程可见，但 token 只出现在 stdout 里。
     const authTimer = setTimeout(() => {
       if (authed) return
@@ -587,6 +621,10 @@ export function apply(ctx, config = {}) {
   })
   wss.on('error', (err) => {
     // 端口冲突/绑定失败等：不宣告发现行（壳保持断连），但要把原因留在 stdout 里
+    diag('error', 'ws.server.error', { message: err instanceof Error ? err.message : String(err) })
+  })
+  // 监听句柄现在归 httpServer（noServer 模式）：绑定失败的错误从这里来
+  httpServer.on('error', (err) => {
     diag('error', 'ws.server.error', { message: err instanceof Error ? err.message : String(err) })
   })
 
@@ -659,7 +697,7 @@ export function apply(ctx, config = {}) {
   /* ── 发现行：WS 开始监听 + Loader 安定后打印，供壳解析 ───────────────── */
 
   const print = () => {
-    const port = safe(() => wss.address()?.port, 0)
+    const port = safe(() => httpServer.address()?.port, 0)
     if (port) {
       // stdout 单行 JSON；壳按行解析（token 见 apply 顶部说明）。
       console.log(`dsh desktop: ${JSON.stringify({ port, token })}`)
@@ -676,9 +714,9 @@ export function apply(ctx, config = {}) {
       settledOnce = true
       resolve(ok)
     }
-    if (safe(() => wss.address()?.port, 0)) return done(true)
-    wss.once('listening', () => done(true))
-    wss.once('error', () => done(false))
+    if (safe(() => httpServer.address()?.port, 0)) return done(true)
+    httpServer.once('listening', () => done(true))
+    httpServer.once('error', () => done(false))
   })
 
   /**
@@ -739,6 +777,17 @@ export function apply(ctx, config = {}) {
     hardStop.unref?.()
     try {
       wss.close()
+    } catch {
+      /* ignore */
+    }
+    // 监听句柄显式关掉（unref 只是"不阻碍退出"，正常卸载仍应释放端口）
+    try {
+      httpServer.close()
+    } catch {
+      /* ignore */
+    }
+    try {
+      httpServer.unref()
     } catch {
       /* ignore */
     }

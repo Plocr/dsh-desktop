@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { trayMenuTemplate } from '../src/main/trayMenu.ts'
+import { trayMenuSignature, trayMenuTemplate } from '../src/main/trayMenu.ts'
 
 /**
  * 托盘菜单结构 = 用户这轮的验收项，所以直接把它锁进测试：
@@ -149,4 +149,21 @@ test('每个一级项要么是动作，要么是明确禁用的状态行，要�
     }
     assert.ok(typeof item.click === 'function' || item.enabled === false, `死项：${String(item.label)}`)
   }
+})
+
+test('菜单指纹：内容没变就不重建（避免开着菜单被替换导致点击丢失）', () => {
+  const base = trayMenuSignature(state())
+  // 与菜单无关的变化（会话/任务数/待审批这类 0.8.2 起已不在托盘里的信息）不影响指纹
+  assert.equal(trayMenuSignature(state({ harnessState: '运行中' })), base)
+  // 影响菜单内容的变化必须改变指纹
+  assert.notEqual(trayMenuSignature(state({ phoneOn: true })), base)
+  assert.notEqual(trayMenuSignature(state({ safeMode: true })), base)
+  assert.notEqual(trayMenuSignature(state({ lastHarnessError: 'Error: boom' })), base)
+  assert.notEqual(trayMenuSignature(state({ autoUpdate: false })), base)
+  assert.notEqual(trayMenuSignature(state({ harnessVersion: null })), base)
+  assert.notEqual(
+    trayMenuSignature(state({ bridge: { connected: false, jobs: null, protocol: 'unknown', lastCode: 'auth.rejected' } })),
+    base,
+  )
+  assert.notEqual(trayMenuSignature(state({ bridge: { connected: true, jobs: 'absent', protocol: 'ok', lastCode: null } })), base)
 })

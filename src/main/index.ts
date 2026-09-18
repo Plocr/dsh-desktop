@@ -66,6 +66,18 @@ import { DESKTOP_PROFILE, desktopProfileDir as sharedDesktopProfileDir, migrateL
 import { compareDots } from './version.ts'
 import { cleanLogs, uninstallApp } from './maintenance'
 
+/**
+ * 启动/退出分段计时（`[perf]` 前缀，只落日志）。
+ *
+ * 为什么常驻而不是临时打点：用户报的"打开/退出不流畅"只能靠真实机器上的数字定位——
+ * 窗口出现、Host ready、工作台加载这几段的耗时差别很大（分别是毫秒/秒级），
+ * 出问题时直接翻日志就能看出卡在哪一段，不用再改代码复现。
+ */
+const bootClock = Date.now()
+const perf = (label: string, from = bootClock): void => {
+  log('info', `[perf] ${label}: ${String(Date.now() - from)}ms（启动起 ${String(Date.now() - bootClock)}ms）`)
+}
+
 // dev 模式与已安装版隔离 userData（app 名解析为 productName → 默认同名目录，
 // 已安装版运行中时 dev 会因单实例锁冲突直接退出；隔离后两者可并行）
 if (process.defaultApp) {
@@ -115,6 +127,8 @@ let runtime: RuntimeSpec | null = null
 let settings: AppSettings
 let settingsFile = ''
 let quitting = false
+/** 最近一次 spawn Host 的时刻（Host ready 的分段计时基准）。 */
+let hostSpawnAt = Date.now()
 /** 用户点击「安装更新」后置位：before-quit 放行正常退出，让 electron-updater 执行安装。 */
 let quitForUpdateInstall = false
 /** 随包「官方 Harness」（@deepseek-ai/dsh）版本，托盘展示用；来自运行时描述符（不可单独更新）。 */
@@ -1042,6 +1056,7 @@ function webDistDir(): string {
 }
 
 async function main(): Promise<void> {
+  perf('main() 开始（早于窗口创建）')
   initLogger(path.join(app.getPath('userData'), 'logs'))
   settingsFile = path.join(app.getPath('userData'), 'settings.json')
   settings = loadSettings(settingsFile)
@@ -1056,6 +1071,7 @@ async function main(): Promise<void> {
     isAllowed: (url) => url.startsWith(SHELL_ORIGIN) || url.startsWith(APP_ORIGIN),
     theme: resolveEffectiveTheme(dshHome()),
   })
+  perf('窗口对象创建完成（尚未显示）')
   // dsh-app:// 处理器要装在窗口所在分区（Electron 的 protocol 模块只管默认分区）；
   // 入口文档与静态资源从随包 dist 直读（官方 serveWebDocument），其余请求带 cookie 转发给已认证 Host。
   installAppProtocol(
@@ -1094,6 +1110,7 @@ async function main(): Promise<void> {
     },
   )
   win.showLoading(undefined, resolveThemePreference(dshHome()))
+  win.win.webContents.once('did-finish-load', () => perf('加载页首帧完成'))
   win.win.on('close', (e) => {
     if (settings.trayOnClose && !quitting) {
       e.preventDefault()
@@ -1110,6 +1127,7 @@ async function main(): Promise<void> {
   // 版本绑定校验失败会在这里直接抛出——绝不带着未知组合启动。
   runtime = resolveRuntime()
   harnessVersion = runtime.dshVersion
+  perf('运行时解析（descriptor 校验）')
 
   // 确保 profile（模板 + pnpm workspace + bundles + 共享包链接）就绪
   ensureProfile({
@@ -1117,6 +1135,7 @@ async function main(): Promise<void> {
     templateDir: path.join(resourcesDir, 'profile-template', 'dsh-workbench'),
     runtime,
   })
+  perf('profile 就绪（共享包 junction + bundles）')
 
   // 旧会话修复：v0 日志里的 subagent descriptor 版本过旧会让 dsh ≥ 0.1.3 的迁移整条拒绝
   // （历史会话打不开）。纯本地最小改写 + 备份。
@@ -1125,10 +1144,12 @@ async function main(): Promise<void> {
   // 原来每次启动都全量扫描（读+解压全部会话日志），是重用户机器上最拖启动的一项；
   // 需要重新扫描时走托盘「设置 → 重新修复旧会话日志」。
   runLegacySessionRepair(runtime.dshVersion)
+  perf('旧会话修复检查')
 
   // 插件启停 / 安全模式 → profile 组合
   // 启动期只清理失效条目：bundles 列表由官方插件管理器拥有，不在这里重新启用任何依赖。
   reconcilePluginBundles()
+  perf('profile 组合对齐')
 
   host = new HostManager(
     {
@@ -1148,10 +1169,13 @@ async function main(): Promise<void> {
         recordStartSuccess(safeModeFile())
         harnessVersion = r.dshVersion
         hostGeneration += 1
+        perf('Host ready（组合树 boot 完成）', hostSpawnAt)
         // 对外服务（默认关闭）：官方架构下没有 harness 端口，门面直连 Host 管道 fetch
         void manageLanServer().then(() => refreshTray())
         // 切到工作台：dsh-app://app/ 的所有请求都由 Host 处理（含 __DSH_TRANSPORT__ 注入）
+        const loadStart = Date.now()
         win?.loadApp(hostGeneration)
+        win?.win.webContents.once('did-finish-load', () => perf('工作台页面加载完成', loadStart))
         refreshTray()
         // API Key 自检（异步，不阻塞）：失效时托盘/通知给出明确提示
         void runApiKeyCheck()
@@ -1439,6 +1463,8 @@ async function main(): Promise<void> {
     }, 1500)
   }
 
+  hostSpawnAt = Date.now()
+  perf('开始 spawn Host')
   host.start()
 }
 
@@ -1454,22 +1480,61 @@ app.on('before-quit', (e) => {
     }
     return
   }
-  if (quitting) return
+  // 已经在退出流程里也要继续拦：唯一的出口是下面 Host 停机完成 / 兜底到点时显式 app.exit(0)。
+  // 否则 Electron 会在 Host 还没停完时把进程收掉，留下**孤儿 Host**——它继续占着 19387，
+  // 下次启动就得走端口回退（多一点顿挫），也是"退出/打开都不顺"的来源之一。
   e.preventDefault()
+  if (quitting) return
   quitting = true
+  const quitAt = Date.now()
+  perf('收到退出请求（开始停机）', quitAt)
+  // 立刻给可见反馈，并让 Host 的停机少等两件事：
+  //  1) 撤托盘图标（否则要等 Host 停完才消失，看起来像"点了没反应" → 用户再点一次）
+  //  2) 拆掉主窗口：渲染层与 Host 的 WebSocket/请求随之断开，Host 优雅停机不用等它们超时
+  try {
+    trayHandle?.tray.destroy()
+  } catch {
+    /* ignore */
+  }
+  trayHandle = null
+  try {
+    win?.win.destroy()
+  } catch {
+    /* ignore */
+  }
+  win = null
+  perf('托盘与窗口已撤（用户可见的退出反馈）', quitAt)
   log('info', 'quitting: stopping host')
   unregisterAllShortcuts()
   // 停局域网代理，断开所有外部设备
   if (lanHandle) {
     const h = lanHandle
     lanHandle = null
-    void h.stop()
+    void h.stop().then(() => perf('对外门面已停', quitAt))
   }
   bridge?.stop()
+  // 兜底：整条退出链最多 6s。官方 harness 自己的停机上限是 5s（PROCESS_SHUTDOWN_TIMEOUT_MS），
+  // 正常情况实测 ~2s 就能干净退出（bridge 的监听句柄已 unref，见 packages/bridge/lib/index.js）；
+  // 把兜底放在 5s 之上，是为了让"官方有界停机"先跑完（干净退出 code=0），我们的 SIGKILL 只做最后兜底。
+  const quitWatchdog = setTimeout(() => {
+    log('error', '[perf] 退出超过 6s，强制结束（Host 卡在停机，先 SIGKILL 再退，避免留孤儿进程）')
+    try {
+      host?.killNow()
+    } catch {
+      /* ignore */
+    }
+    app.exit(0)
+  }, 6_000)
+  quitWatchdog.unref?.()
   void host
     ?.stop()
     .catch((err) => log('error', `stop failed: ${err instanceof Error ? err.message : String(err)}`))
-    .finally(() => app.exit(0))
+    .then(() => perf('Host 已停', quitAt))
+    .finally(() => {
+      clearTimeout(quitWatchdog)
+      perf('退出完成（app.exit）', quitAt)
+      app.exit(0)
+    })
 })
 
 app.on('window-all-closed', () => {

@@ -184,22 +184,30 @@ export class DesktopHostProcess {
   async stop(timeoutMs = 8_000): Promise<void> {
     const child = this.child
     if (child === undefined) return
+    const stopAt = Date.now()
+    const mark = (label: string): void => {
+      log('info', `[perf] host.stop ${label}: ${String(Date.now() - stopAt)}ms`)
+    }
     if (!this.shutdownSent) {
       this.shutdownSent = true
       try {
         child.send({ type: 'shutdown' })
+        mark('shutdown IPC 已发出')
       } catch {
         /* 通道已断：直接等 exit */
+        mark('shutdown IPC 发送失败（通道已断）')
       }
     }
     const settled = await Promise.race([
       this.exitPromise ??= new Promise<void>((resolve) => { child.once('close', () => { resolve() }) }),
       new Promise<'timeout'>((resolve) => { setTimeout(() => { resolve('timeout') }, timeoutMs).unref() }),
     ])
+    mark(settled === 'timeout' ? `等待 ${String(timeoutMs)}ms 超时（Host 未退）` : 'Host 已退出')
     if (settled === 'timeout') {
       log('error', 'dsh host did not stop in time; killing')
       this.kill('SIGKILL')
       await (this.exitPromise ?? Promise.resolve()).catch(() => undefined)
+      mark('SIGKILL 后进程结束')
     }
   }
 

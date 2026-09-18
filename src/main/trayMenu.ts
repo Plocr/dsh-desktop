@@ -119,3 +119,26 @@ export function trayMenuTemplate(s: TrayState, a: TrayActions): MenuItemConstruc
     { label: '退出', click: () => a.quit() },
   ]
 }
+
+/**
+ * 菜单「可见状态」的指纹：只有它变了才值得重建菜单。
+ *
+ * 为什么必须有：壳在很多事件里调 `refreshTray()`（bridge 事件、会话目录变化、诊断…），
+ * 而每次重建都会 `tray.setContextMenu(...)` —— **Windows 上菜单正开着时被替换，点击会丢**
+ * （用户体感就是"点了没反应，要再点一次"，比如点「退出」）。0.8.2 起托盘里不含会话/任务数，
+ * 那些事件其实完全不影响菜单内容，所以用指纹把它们挡掉。
+ */
+export function trayMenuSignature(s: TrayState): string {
+  return JSON.stringify([
+    trayStatusLine(s),
+    s.phoneOn,
+    s.safeMode,
+    s.lastHarnessError,
+    s.autoUpdate,
+    s.autoStart,
+    s.notifications,
+    s.appVersion,
+    s.harnessVersion,
+    process.platform === 'win32',
+  ])
+}

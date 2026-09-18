@@ -1,6 +1,6 @@
 # dsh-desktop-bridge：审查结论与迭代计划
 
-版本：1.1 ｜ 日期：2026-09-18（托盘部分随 0.8.2 重设计更新）｜ 对应代码：`packages/bridge@0.4.0`、壳 `0.8.2`
+版本：1.2 ｜ 日期：2026-09-19（新增 §2.3 的停机句柄修复）｜ 对应代码：`packages/bridge@0.4.1`、壳 `0.8.2`
 
 本文覆盖三件事：**（1）桥接插件的现状契约**（谁在用、谁没人用）、**（2）本轮审查发现的缺陷与修复**（含证据与验证方式）、**（3）下一阶段的迭代计划**（每条含理由、验收标准与代价）。设计层面的既定边界见 `DESIGN.md`（D25/D30）。
 
@@ -78,6 +78,22 @@ bridge 是**壳 ↔ harness 的唯一通道**：插件跑在 Host 进程内的 d
 全量：`npm run check`（typecheck + 90 项测试）。本轮修复均在真实 dsh 上跑过 `e2e:bridge`（含 `resources/dsh` 手工同步 0.4.0；**正式发行前需重跑 `npm run setup:runtime` 让 tgz 与 descriptor 一起重建**）。
 
 ---
+
+### 2.5 停机句柄（P0，性能/退出，0.4.1）
+
+**现象**：用户点「退出」要等 5–8 秒（有时以为没反应会再点一次）；`restart()` 会在 7s 超时后强制重建，
+旧进程还可能继续占着资源，让下一次启动更顿挫（用户日志里就有 `host restart: exit 事件超时，强制重建`）。
+
+**根因**：官方 `createProcessShutdown`（`@deepseek-ai/dsh` 的 profile-boot）在 dispose 完成后走的是
+`process.exitCode = code` + **等事件循环自然 drain**，并不强制 `process.exit()`（强制退出只留给 5s 超时兜底）。
+桥接用 `new WebSocketServer({ host, port: 0 })` 起的监听 socket 是 **ref 句柄** → drain 永不完成。
+实测：Host 收到 shutdown 后 **60 秒仍在、端口仍在监听**（插件 dispose 都没走到）；不加载桥接的对照只用了 2.1s。
+
+**修法**：桥接自持 HTTP server（`noServer` 模式），listen 后 `unref()`；每个已接受连接也 `unref()`；
+dispose 里仍显式 `close()`/`unref()`。语义是"桥接照常服务，但不定义 Host 的生存期"。
+
+**验证**：停机探针（真实 Host + 桥接）三种客户端状态——无客户端 2095ms / 客户端连着 2097ms /
+先断客户端 1836ms，全部 exit code 0（修复前：永不退出）；壳实机点退出 **105ms** 完成。详见对齐审查 §9。
 
 ## 3. 迭代计划
 
