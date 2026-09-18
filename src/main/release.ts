@@ -4,7 +4,7 @@
  * [ported] 与上游的差异（发行身份字段，校验语义/错误文案保持一致）：
  *  1. release 增加 `dshVersion`：官方 Electron 与 `@deepseek-ai/dsh` 同号，本壳是独立
  *     发版号——`version` = 本壳（Electron 应用）版本，`dshVersion` = 随包 dsh 版本；
- *  2. host-protocol 在本仓为 `./hostProtocol`（驼峰命名），导入路径随俗调整；
+ *  2. host-protocol 版本现在随 Host 的 IPC 契约定义在 `./hostProcess.ts`；
  *  3. 其余（schemaVersion 约束、semver 校验、错误文案）逐字保留。
  */
 
@@ -15,7 +15,7 @@
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore semver 无类型声明；只用到 valid()，运行时行为不受影响
 import { valid } from 'semver'
-import { DESKTOP_HOST_PROTOCOL_VERSION } from './hostProtocol.ts'
+import { DESKTOP_HOST_PROTOCOL_VERSION } from './hostProcess.ts'
 
 /** Release facts embedded in the bundled runtime descriptor. */
 export interface DesktopRelease {

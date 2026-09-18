@@ -47,7 +47,10 @@ export function parseBridgeDiscovery(line: string): { port: number; token: strin
  */
 export function redactBridgeLine(line: string): string {
   const target = parseBridgeDiscovery(line)
-  return target === null ? line : `${BRIDGE_DISCOVERY_PREFIX}{"port":${target.port},"token":"<redacted>"}`
+  if (target !== null) return `${BRIDGE_DISCOVERY_PREFIX}{"port":${target.port},"token":"<redacted>"}`
+  // Web Host 的启动行同样带一次性 token（`dsh web: http://127.0.0.1:19387/?token=…`）：
+  // 落盘前一并脱敏，日志里不留任何可用凭据。
+  return line.replace(/([?&]token=)[^\s&"']+/gu, '$1<redacted>')
 }
 
 /* ── 会话目录（托盘「最近会话」/ 深链标题） ─────────────────────────── */

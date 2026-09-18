@@ -1,26 +1,22 @@
 /**
- * dsh-app:// 特权方案 —— 桌面壳的应用面传输。
+ * dsh-app:// 特权方案 —— 桌面壳的应用面入口（官方桌面端形态）。
  *
- * 对齐官方 Electron 桌面壳的传输设计：**界面不开、也拿不到任何监听端口**。
- * 渲染层只看到两个同源地址：
+ * 渲染层只看得到两个同源地址：
  *  - `dsh-app://shell/<file>`  壳自带页面（loading/error），只读 resources/shell-pages
- *  - `dsh-app://app/<path>`    工作台：整份请求交给 Host 进程处理
+ *  - `dsh-app://app/<path>`    工作台：
+ *      · 入口文档与静态资源从**随包 dist** 直接读（官方 `serveWebDocument`，入口注入
+ *        `__DSH_BOOT_READY__` 等待器）；
+ *      · 其余请求（`/api`、插件 client bundle、WebSocket 流之外的 HTTP）带 Host 签发的
+ *        cookie 转发到已认证的 Host（`forwardWebRequest`）。
  *
- * 「交给 Host」不是 HTTP 转发，而是官方那套**字节管道**：Host 子进程里
- * `connection.createSharedFetchHandler('/api')` 负责 /api，静态资源与
- * `/.dsh/remote-stream`（NDJSON 远端流）也由同一个 Host 分发；shell 侧把
- * 请求编码成帧写进 fd 3、从 fd 4 读回 Response 帧（见 hostProtocol.ts / hostProcess.ts）。
- * 因此本机不存在 harness 的监听 socket，端口/鉴权 token 从概念上就不存在了。
- *
- * 由此还带来两个「顺带正确」的结果：
- *  - Web UI 的远端流（原本是 WebSocket mux）由 Host 注入 `__DSH_TRANSPORT__` 改走
- *    `/.dsh/remote-stream` 的 NDJSON —— 官方桌面壳的做法，自定义 scheme 也能跑；
- *  - 第三方插件 client 代码拿不到任何可直连的地址，只能走壳代理。
+ * 与官方完全一致：Host 是真正的 Web 应用（127.0.0.1:19387），Electron 只做本地窗口与转发。
+ * 登录凭据（cookie）只存在于主进程，渲染层拿不到。
  */
 import { protocol, type Session } from 'electron'
 import { createReadStream, statSync } from 'node:fs'
 import path from 'node:path'
 import { log } from './logger'
+import { serveWebDocument } from './webDocument.ts'
 
 export const APP_SCHEME = 'dsh-app'
 /** 壳页面 origin（loading/error 等壳自带文档）。 */
@@ -131,11 +127,13 @@ function backendUnavailable(reason: string): Response {
  * 在窗口所用 session 上安装 dsh-app:// 处理器。
  * @param target 窗口所在分区的 session —— Electron 的 `protocol` 模块只作用于默认分区。
  * @param shellPagesDir 壳页面目录（asar 内 resources/shell-pages）。
- * @param forward 工作台请求的转发目标（Host 进程的管道 fetch）。
+ * @param webDistDir 随包 Web 前端 dist（`@deepseek-ai/dsh-web-frontend/dist`）。
+ * @param forward 其余工作台请求的转发目标（已认证 Host，带 cookie）。
  */
 export function installAppProtocol(
   target: Session,
   shellPagesDir: string,
+  webDistDir: string,
   forward: (request: Request) => Promise<Response>,
 ): void {
   target.protocol.handle(APP_SCHEME, async (request) => {
@@ -147,6 +145,12 @@ export function installAppProtocol(
     }
     if (url.hostname === 'shell') return serveShellAsset(request, url, shellPagesDir)
     if (url.hostname !== 'app') return new Response('not found', { status: 404 })
+    // 官方桌面端：入口文档与静态资源从本地 dist 读（含 __DSH_BOOT_READY__ 注入），
+    // 其余请求才转发给 Host。这样加载页 → 工作台的切换不等网络，也少一次 cookie 转发。
+    if (url.pathname === '/' || url.pathname === '/index.html' || url.pathname.startsWith('/assets/')
+      || url.pathname === '/favicon.svg' || url.pathname === '/manifest.webmanifest') {
+      return serveWebDocument(request, webDistDir)
+    }
     try {
       return await forward(request)
     } catch (err) {

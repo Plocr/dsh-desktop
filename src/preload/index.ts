@@ -39,4 +39,17 @@ const origin = `${location.protocol}//${location.hostname}`
 const api = origin === SHELL_ORIGIN ? shellApi : origin === APP_ORIGIN ? appApi : null
 if (api) contextBridge.exposeInMainWorld('dshDesktop', api)
 
+/**
+ * 工作台的**桌面启动通道**（官方契约）：Web 客户端在 boot 时调用
+ * `window.dshDesktopBoot.ready()` 取回 `{ injections, streamBaseUrl }`，
+ * 应用注入片段后才真正启动；启动失败调用 `failed(message)` 让壳走原生恢复。
+ * 只有 dsh-app://app 文档拿得到它。
+ */
+if (origin === APP_ORIGIN) {
+  contextBridge.exposeInMainWorld('dshDesktopBoot', {
+    ready: (): Promise<unknown> => ipcRenderer.invoke('dsh:boot'),
+    failed: (message: string): Promise<void> => ipcRenderer.invoke('dsh:boot-failed', message),
+  })
+}
+
 export type DshDesktopApi = typeof shellApi

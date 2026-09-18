@@ -1,94 +1,61 @@
 /**
- * 移植自 `deepseek-ai/deepseek-harness` `apps/desktop/src/host-process.ts`（MIT）。
+ * Host 子进程（官方桌面端形态）：spawn → 等 Node IPC 的 `ready{url,injections}` →
+ * 之后所有应用请求都由主进程带 cookie 转发到该 URL。
  *
- * [ported] 与上游的差异（仅此五处，其余逐字保留）：
- *  1. 子进程入口路径按本壳的**非作用域**包名解析：
- *     `<runtimeDir>/node_modules/dsh-desktop-host/lib/index.js`；
- *  2. 上游的 `child.stdout?.pipe(process.stdout)` 换成可选回调 `onStdout(line)` +
- *     按字节切行的安全解码（多字节 UTF-8 不会被 chunk 边界切断），不再镜像到
- *     Electron 主进程的 stdout；
- *  3. 新增可选的按行 `onStderr(line)` 回调（stderr 的累加逻辑保持上游原样）；
- *  4. 新增可选 `onExit(code, signal)` 回调（HostManager 需要退出码/信号来决策重启）；
- *  5. 新增 `kill(signal)` 同步强杀（安装/退出兜底用）。
+ * 与旧实现（fd3/fd4 字节管道 + 自研帧协议）的差别：这里**没有管道**，Host 是真正的
+ * Web 应用（`runProfile` 起的 127.0.0.1:19387），Electron 只做「本地窗口 + 转发」。
  */
-
-/** Upstream-Node child lifecycle and streaming custom-protocol carrier. */
-
 import { spawn, type ChildProcess } from 'node:child_process'
-import { once } from 'node:events'
 import { join } from 'node:path'
-import { Readable, Writable } from 'node:stream'
-import {
-  DESKTOP_HOST_PROTOCOL_VERSION,
-  DESKTOP_PIPE_CHUNK_BYTES,
-  DESKTOP_REQUEST_PIPE_FD,
-  DESKTOP_RESPONSE_PIPE_FD,
-  DesktopHostResponseDecoder,
-  encodeDesktopRequestCancel,
-  encodeDesktopRequestData,
-  encodeDesktopRequestEnd,
-  encodeDesktopRequestStart,
-  type DesktopHostCommand,
-  type DesktopHostEvent,
-  type DesktopHostResponseFrame,
-} from './hostProtocol.ts'
+import { log } from './logger.ts'
+import { authenticateWebHost, forwardWebRequest } from './webDocument.ts'
 
-interface PendingResponse {
-  readonly resolve: (response: Response) => void
-  readonly reject: (error: Error) => void
-  responseStarted: boolean
-  uploadOpen: boolean
-  controller?: ReadableStreamDefaultController<Uint8Array>
-  requestReader?: ReadableStreamDefaultReader<Uint8Array>
-  removeAbort?: () => void
-}
+/** 与 Host 之间变更过的 IPC 契约版本（结构变化时必须递增，壳据此拒绝不匹配的 Host）。 */
+export const DESKTOP_HOST_PROTOCOL_VERSION = 4
 
-function isDesktopHostEvent(message: unknown): message is DesktopHostEvent {
-  if (typeof message !== 'object' || message === null || !('type' in message)) return false
-  const candidate = message as Record<string, unknown>
-  switch (candidate.type) {
-    case 'ready':
-      return candidate.protocolVersion === DESKTOP_HOST_PROTOCOL_VERSION && typeof candidate.dshVersion === 'string'
-    case 'fatal':
-      return typeof candidate.message === 'string'
-    default:
-      return false
-  }
-}
-
-function errorOf(reason: unknown, fallback: string): Error {
-  return reason instanceof Error ? reason : new Error(fallback)
-}
-
-async function exitsWithin(exit: Promise<void>, milliseconds: number): Promise<boolean> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<false>((resolve) => {
-    timer = setTimeout(() => { resolve(false) }, milliseconds)
-    timer.unref()
-  })
-  try {
-    return await Promise.race([exit.then(() => true), timeout])
-  } finally {
-    if (timer !== undefined) clearTimeout(timer)
-  }
-}
-
-/** Ready facts reported by one installed dsh child. */
+/** One `ready` event from the owned Host process. */
 export interface DesktopHostReady {
   readonly protocolVersion: typeof DESKTOP_HOST_PROTOCOL_VERSION
   readonly dshVersion: string
+  /** Authenticated base URL of the owned Web Host. */
+  readonly url: string
+  /** Index injections the application window must apply before boot. */
+  readonly injections: readonly unknown[]
 }
 
-/** One dsh backend running under the bundled upstream Node.js executable. */
+type HostMessage =
+  | { readonly type: 'ready'; readonly dshVersion?: unknown; readonly url?: unknown; readonly injections?: unknown }
+  | { readonly type: 'shutdown-complete' }
+  | { readonly type: 'fatal'; readonly message?: unknown }
+
+function messageType(value: unknown): string | null {
+  if (typeof value !== 'object' || value === null) return null
+  const type = (value as { type?: unknown }).type
+  return typeof type === 'string' ? type : null
+}
+
+/**
+ * One spawned Host process with its authenticated URL and cookie.
+ *
+ * Lifecycle: `start()` resolves after readiness; `fetch()` forwards application requests;
+ * `stop()` asks for a clean shutdown and waits for `shutdown-complete` before killing.
+ */
 export class DesktopHostProcess {
+  // 注意：这里不用 TypeScript 的「构造函数参数属性」——Node 的类型擦除（strip-only）
+  // 不支持该语法，而测试会直接 import 本模块（经 release.ts 的链路）。
+  private readonly node: string
+  private readonly runtimeDir: string
+  private readonly projectDir: string
+  private readonly inspectPort: number | undefined
+  private readonly environment: NodeJS.ProcessEnv
+  private readonly onFailure: ((error: Error) => void) | undefined
+  private readonly onStdout: ((line: string) => void) | undefined
+  private readonly onStderr: ((line: string) => void) | undefined
+  private readonly onExit: ((code: number | null, signal: NodeJS.Signals | null) => void) | undefined
+  private readonly pnpmEntry: string | undefined
+  private readonly allowLinkedPackages: boolean
+  private readonly port: number | undefined
   private child: ChildProcess | undefined
-  private requestPipe: Writable | undefined
-  private responsePipe: Readable | undefined
-  private readonly responseDecoder = new DesktopHostResponseDecoder()
-  private requestWriteTail: Promise<void> = Promise.resolve()
-  private nextStreamId = 1
-  private readonly pending = new Map<number, PendingResponse>()
-  private readonly blockedResponses = new Set<number>()
   private readyResolve!: (ready: DesktopHostReady) => void
   private readyReject!: (error: Error) => void
   private readonly readyPromise = new Promise<DesktopHostReady>((resolve, reject) => {
@@ -98,410 +65,226 @@ export class DesktopHostProcess {
   private exitPromise: Promise<void> | undefined
   private stderr = ''
   private failureReported = false
-  /** [ported] 未完成行的原始字节缓冲（跨 chunk 的多字节 UTF-8 序列不能被切断解码）。 */
-  private stdoutPartial: Buffer = Buffer.alloc(0)
-  /** [ported] 未完成行的 stderr 文本缓冲（stderr 走 setEncoding，已是解码后的字符串）。 */
+  private shutdownSent = false
+  private shutdownComplete = false
+  private url: string | undefined
+  private cookie: string | undefined
+  private injections: readonly unknown[] = []
+  private stdoutPartial = ''
   private stderrPartial = ''
 
   /**
-   * @param node - absolute bundled upstream Node.js executable.
+   * @param node - absolute bundled Node.js executable.
    * @param runtimeDir - immutable packages carried by the current application.
    * @param projectDir - active or staged desktop plugin profile.
    * @param inspectPort - optional loopback inspector port for workspace development.
    * @param environment - Child environment; runtime and package-manager overrides are removed.
    * @param onFailure - Receives the first fatal child or transport failure, including after readiness.
-   * @param onStdout - [ported] Receives every complete stdout line (CR stripped, empty lines dropped).
-   * @param onStderr - [ported] Receives every complete stderr line; accumulation below is unchanged.
-   * @param onExit - [ported] Receives the child's exit code and signal once the process is gone.
-   * @param pnpmEntry - Bundled pnpm entry handed to the Host as the launcher-provided
-   *   `profileContext.packageManager` (offline plugin/package operations).
+   * @param onStdout - Receives every complete stdout line (CR stripped, empty lines dropped).
+   * @param onStderr - Receives every complete stderr line; accumulation below is unchanged.
+   * @param onExit - Receives the child's exit code and signal once the process is gone.
+   * @param pnpmEntry - Bundled pnpm entry handed to the Host as its launcher-provided package manager.
+   * @param allowLinkedPackages - Development-only: allow workspace-linked bundle packages.
    */
   constructor(
-    private readonly node: string,
-    private readonly runtimeDir: string,
-    private readonly projectDir: string,
-    private readonly inspectPort?: number,
-    private readonly environment: NodeJS.ProcessEnv = process.env,
-    private readonly onFailure?: (error: Error) => void,
-    private readonly onStdout?: (line: string) => void,
-    private readonly onStderr?: (line: string) => void,
-    private readonly onExit?: (code: number | null, signal: NodeJS.Signals | null) => void,
-    private readonly pnpmEntry?: string,
-  ) {}
+    node: string,
+    runtimeDir: string,
+    projectDir: string,
+    inspectPort?: number,
+    environment: NodeJS.ProcessEnv = process.env,
+    onFailure?: (error: Error) => void,
+    onStdout?: (line: string) => void,
+    onStderr?: (line: string) => void,
+    onExit?: (code: number | null, signal: NodeJS.Signals | null) => void,
+    pnpmEntry?: string,
+    allowLinkedPackages = false,
+    port?: number,
+  ) {
+    this.node = node
+    this.runtimeDir = runtimeDir
+    this.projectDir = projectDir
+    this.inspectPort = inspectPort
+    this.environment = environment
+    this.onFailure = onFailure
+    this.onStdout = onStdout
+    this.onStderr = onStderr
+    this.onExit = onExit
+    this.pnpmEntry = pnpmEntry
+    this.allowLinkedPackages = allowLinkedPackages
+    this.port = port
+  }
 
-  /** Start the child once and resolve only after its complete composition is active. */
+  /** Start the child once and resolve only after its composition is serving requests. */
   async start(): Promise<DesktopHostReady> {
     if (this.child !== undefined) return this.readyPromise
-    // [ported] 本壳的 Host 包为**非作用域**名 `dsh-desktop-host`（见 packages/host/package.json），
-    // 与官方私有包 `@deepseek-ai/dsh-desktop-host` 的路径不同。
+    // 本壳的 Host 包为非作用域名（与官方私有包 @deepseek-ai/dsh-desktop-host 的路径不同）。
     const entry = join(this.runtimeDir, 'node_modules', 'dsh-desktop-host', 'lib', 'index.js')
     const child = spawn(this.node, [
       ...(this.inspectPort === undefined ? [] : [`--inspect=127.0.0.1:${String(this.inspectPort)}`]),
       entry,
       this.runtimeDir,
       this.projectDir,
-      ...(this.inspectPort === undefined ? [] : ['--allow-linked-profile']),
-      // 随包 pnpm：官方插件管理器（dsh-plugin-manager）通过它执行包操作，不依赖系统 pnpm。
+      ...(this.allowLinkedPackages ? ['--allow-linked-profile'] : []),
       ...(this.pnpmEntry === undefined ? [] : ['--pnpm', this.pnpmEntry]),
+      ...(this.port === undefined ? [] : ['--port', String(this.port)]),
     ], {
       cwd: this.projectDir,
       env: Object.fromEntries(Object.entries(this.environment).filter(([name]) => (
         name !== 'NODE_OPTIONS' && name !== 'NODE_PATH' && !/^DSH_DESKTOP_/u.test(name) && !/^(?:npm|pnpm|corepack)_/iu.test(name)
       ))),
-      stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'ipc'],
+      // 官方形态：只有 stdio + Node IPC，没有字节管道。
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     })
-    const requestPipe = child.stdio[DESKTOP_REQUEST_PIPE_FD]
-    const responsePipe = child.stdio[DESKTOP_RESPONSE_PIPE_FD]
-    if (!(requestPipe instanceof Writable) || !(responsePipe instanceof Readable)) {
-      child.kill('SIGTERM')
-      throw new Error('dsh desktop host did not expose the required byte pipes and IPC channel')
-    }
     this.child = child
-    this.requestPipe = requestPipe
-    this.responsePipe = responsePipe
     child.stderr?.setEncoding('utf8')
     child.stderr?.on('data', (chunk: string) => { this.stderr += chunk })
-    // [ported] 额外挂一个按行转发监听（上一行的累加逻辑与上游逐字一致；setEncoding 已保证多字节安全）。
     child.stderr?.on('data', (chunk: string) => { this.acceptStderrChunk(chunk) })
-    // [ported] 上游把 stdout 原样镜像到主进程 stdout；本壳改为按行回调（bridge 发现行
-    // 由 HostManager/index.ts 嗅探）。仍必须持续读取 stdout，否则子进程写满管道会阻塞。
-    child.stdout?.on('data', (chunk: Buffer) => { this.acceptStdoutBytes(chunk) })
-    responsePipe.on('data', (chunk: Buffer) => { this.acceptResponseBytes(chunk) })
-    responsePipe.once('end', () => {
-      try {
-        this.responseDecoder.finish()
-        this.fail(new Error('dsh desktop host response pipe ended'))
-      } catch (error) {
-        this.fail(errorOf(error, 'dsh desktop host response pipe failed'))
-      }
-    })
-    requestPipe.once('error', (error) => { this.fail(error) })
-    responsePipe.once('error', (error) => { this.fail(error) })
-    child.on('message', (message: unknown) => {
-      if (!isDesktopHostEvent(message)) {
-        this.fail(new Error('dsh desktop host sent an invalid IPC event'))
-        child.kill('SIGTERM')
-        return
-      }
-      this.handleMessage(message)
-    })
-    child.once('error', (error) => { this.fail(error) })
-    this.exitPromise = new Promise<void>((resolve) => {
-      child.once('close', (code, signal) => {
-        const suffix = this.stderr.trim() === '' ? '' : `: ${this.stderr.trim()}`
-        if (code !== 0 && code !== null) this.fail(new Error(`dsh desktop host exited with ${String(code)}${suffix}`))
-        else this.fail(new Error(`dsh desktop host stopped${suffix}`))
-        // [ported] 退出通知：listener 抛错不得让 exitPromise 永远悬着。
-        try {
-          this.onExit?.(code, signal)
-        } catch (listenerError) {
-          console.error('desktop host exit listener failed', listenerError)
-        }
-        resolve()
-      })
+    child.stdout?.setEncoding('utf8')
+    child.stdout?.on('data', (chunk: string) => { this.acceptStdoutChunk(chunk) })
+    child.on('message', (message: unknown) => { this.handleMessage(message) })
+    child.once('error', (error: unknown) => { this.fail(error instanceof Error ? error : new Error(String(error))) })
+    child.once('close', (code, signal) => {
+      this.child = undefined
+      const failure = code === 0 || this.shutdownSent
+        ? undefined
+        : new Error(`dsh desktop host exited unexpectedly (code=${String(code)} signal=${String(signal)})`)
+      if (failure !== undefined) this.fail(failure)
+      else this.readyReject(new Error('dsh desktop host exited before readiness'))
+      this.onExit?.(code, signal)
     })
     return this.readyPromise
   }
 
-  /** Forward one `dsh-app://app` request to the child without buffering its body. */
-  async fetch(request: Request): Promise<Response> {
-    await this.start()
-    const child = this.child
-    if (child === undefined || !child.connected || this.requestPipe === undefined) {
-      throw new Error('dsh desktop host is unavailable')
-    }
-    if (this.nextStreamId > 0xffff_ffff) throw new Error('dsh desktop host exhausted its request stream ids')
-    const streamId = this.nextStreamId++
-    const method = request.method.toUpperCase()
-    const hasBody = method !== 'GET' && method !== 'HEAD' && request.body !== null
-    return new Promise<Response>((resolve, reject) => {
-      const pending: PendingResponse = {
-        resolve,
-        reject,
-        responseStarted: false,
-        uploadOpen: hasBody,
-      }
-      const abort = (): void => {
-        if (!this.pending.has(streamId)) return
-        const error = errorOf(request.signal.reason, 'request aborted')
-        pending.uploadOpen = false
-        void pending.requestReader?.cancel(error).catch(() => undefined)
-        this.enqueueRequestFrame(encodeDesktopRequestCancel(streamId)).catch((pipeError: unknown) => {
-          this.fail(errorOf(pipeError, 'dsh desktop request pipe failed'))
-        })
-        if (pending.controller === undefined) pending.reject(error)
-        else pending.controller.error(error)
-        this.finishPending(streamId, false)
-      }
-      if (request.signal.aborted) {
-        reject(errorOf(request.signal.reason, 'request aborted'))
-        return
-      }
-      request.signal.addEventListener('abort', abort, { once: true })
-      pending.removeAbort = () => { request.signal.removeEventListener('abort', abort) }
-      this.pending.set(streamId, pending)
-      this.pumpRequest(streamId, request, hasBody).catch((error: unknown) => {
-        this.failPending(streamId, errorOf(error, 'dsh desktop request upload failed'))
-      })
-    })
+  /** Forward one application request to the authenticated Host. */
+  async fetch(request: Request, options: { allowForeignOrigin?: boolean } = {}): Promise<Response> {
+    const ready = await this.readyPromise
+    if (this.cookie === undefined) throw new Error('dsh host is not authenticated')
+    return forwardWebRequest(request, ready.url, this.cookie, options.allowForeignOrigin === true)
   }
 
-  /**
-   * [ported] 同步强杀子进程（不等优雅停机）：供安装/退出兜底与重启交接使用。
-   * @param signal - signal delivered to the child; defaults to SIGKILL.
-   */
-  kill(signal: NodeJS.Signals = 'SIGKILL'): void {
-    this.child?.kill(signal)
-  }
+  /** Index injections reported by the Host (applied by the window before client boot). */
+  getInjections(): readonly unknown[] { return this.injections }
 
-  /** Request graceful teardown, then wait for child exit. */
-  async stop(): Promise<void> {
+  /** Authenticated Host URL, or undefined before readiness. */
+  getUrl(): string | undefined { return this.url }
+
+  /** Host-issued cookie for raw protocol requests (WebSocket upgrade headers). */
+  getCookie(): string | undefined { return this.cookie }
+
+  /** Ask for a clean shutdown and wait for the child to report completion. */
+  async stop(timeoutMs = 8_000): Promise<void> {
     const child = this.child
     if (child === undefined) return
-    this.blockedResponses.clear()
-    this.responsePipe?.resume()
-    if (child.connected) this.send({ type: 'shutdown' })
-    // Closing the parent-owned write end releases the Host's pending Windows pipe read.
-    this.requestPipe?.destroy()
-    const exited = this.exitPromise ?? Promise.resolve()
-    if (!await exitsWithin(exited, 10_000)) child.kill('SIGTERM')
-    if (!await exitsWithin(exited, 5_000)) {
-      child.kill('SIGKILL')
-      if (!await exitsWithin(exited, 5_000)) {
-        throw new Error('dsh desktop host did not exit after SIGKILL')
+    if (!this.shutdownSent) {
+      this.shutdownSent = true
+      try {
+        child.send({ type: 'shutdown' })
+      } catch {
+        /* 通道已断：直接等 exit */
       }
     }
-    this.child = undefined
-    this.requestPipe = undefined
-    this.responsePipe = undefined
-  }
-
-  private async pumpRequest(streamId: number, request: Request, hasBody: boolean): Promise<void> {
-    await this.enqueueRequestFrame(encodeDesktopRequestStart(streamId, {
-      url: request.url,
-      method: request.method.toUpperCase(),
-      headers: [...request.headers.entries()],
-      hasBody,
-    }))
-    if (!hasBody) return
-    const body = request.body
-    if (body === null) throw new Error('dsh desktop request body disappeared before upload')
-    const reader = body.getReader()
-    const pending = this.pending.get(streamId)
-    if (pending === undefined) {
-      await reader.cancel()
-      return
-    }
-    pending.requestReader = reader
-    try {
-      for (;;) {
-        const next = await reader.read()
-        if (next.done) break
-        for (let offset = 0; offset < next.value.byteLength; offset += DESKTOP_PIPE_CHUNK_BYTES) {
-          if (!this.pending.has(streamId)) return
-          await this.enqueueRequestFrame(encodeDesktopRequestData(
-            streamId,
-            next.value.subarray(offset, offset + DESKTOP_PIPE_CHUNK_BYTES),
-          ))
-        }
-      }
-      const live = this.pending.get(streamId)
-      if (live !== undefined) {
-        await this.enqueueRequestFrame(encodeDesktopRequestEnd(streamId))
-        live.uploadOpen = false
-      }
-    } finally {
-      reader.releaseLock()
-      const live = this.pending.get(streamId)
-      if (live?.requestReader === reader) delete live.requestReader
+    const settled = await Promise.race([
+      this.exitPromise ??= new Promise<void>((resolve) => { child.once('close', () => { resolve() }) }),
+      new Promise<'timeout'>((resolve) => { setTimeout(() => { resolve('timeout') }, timeoutMs).unref() }),
+    ])
+    if (settled === 'timeout') {
+      log('error', 'dsh host did not stop in time; killing')
+      this.kill('SIGKILL')
+      await (this.exitPromise ?? Promise.resolve()).catch(() => undefined)
     }
   }
 
-  private enqueueRequestFrame(frame: Buffer): Promise<void> {
-    const write = this.requestWriteTail.then(async () => {
-      const pipe = this.requestPipe
-      if (pipe === undefined || pipe.destroyed) throw new Error('dsh desktop host request pipe is unavailable')
-      if (!pipe.write(frame)) await once(pipe, 'drain')
-    })
-    this.requestWriteTail = write.catch(() => undefined)
-    return write
+  /** Terminate immediately without waiting for a graceful stop. */
+  kill(signal: NodeJS.Signals = 'SIGKILL'): void {
+    this.killTree(signal)
   }
 
-  private send(message: DesktopHostCommand): void {
+  /** Accumulated stderr tail (diagnostics for startup failures). */
+  getStderr(): string { return this.stderr }
+
+  /** True once the child reported a completed shutdown. */
+  get isShutdownComplete(): boolean { return this.shutdownComplete }
+
+  private killTree(signal: NodeJS.Signals): void {
     const child = this.child
-    if (child === undefined || !child.connected) throw new Error('dsh desktop host IPC is unavailable')
-    child.send(message, (error) => { if (error !== null) this.fail(error) })
-  }
-
-  /**
-   * [ported] 按字节（0x0a）切行后再整体解码：UTF-8 多字节序列被 chunk 边界切开时
-   * 不会产生乱码（未读完的最后一行以原始字节留待下个 chunk）。
-   */
-  private acceptStdoutBytes(chunk: Buffer): void {
-    const buffer = this.stdoutPartial.byteLength === 0 ? chunk : Buffer.concat([this.stdoutPartial, chunk])
-    let start = 0
-    let index = buffer.indexOf(0x0a, start)
-    while (index !== -1) {
-      const line = buffer.subarray(start, index).toString('utf8').replace(/\r$/, '')
-      start = index + 1
-      index = buffer.indexOf(0x0a, start)
-      if (line !== '') this.onStdout?.(line)
-    }
-    this.stdoutPartial = start === 0 ? buffer : buffer.subarray(start)
-  }
-
-  /** [ported] stderr 按行转发（换行切分；`\r` 剥离，空行丢弃）。 */
-  private acceptStderrChunk(chunk: string): void {
-    const text = this.stderrPartial === '' ? chunk : this.stderrPartial + chunk
-    let start = 0
-    let index = text.indexOf('\n', start)
-    while (index !== -1) {
-      const line = text.slice(start, index).replace(/\r$/, '')
-      start = index + 1
-      index = text.indexOf('\n', start)
-      if (line !== '') this.onStderr?.(line)
-    }
-    this.stderrPartial = start === 0 ? text : text.slice(start)
-  }
-
-  private acceptResponseBytes(chunk: Buffer): void {
+    if (child === undefined || child.pid === undefined) return
     try {
-      for (const frame of this.responseDecoder.push(chunk)) this.handleResponseFrame(frame)
-    } catch (error) {
-      this.fail(errorOf(error, 'dsh desktop host response pipe failed'))
-      this.child?.kill('SIGTERM')
+      if (process.platform === 'win32') {
+        spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+      } else {
+        process.kill(-child.pid, signal)
+      }
+    } catch {
+      try {
+        child.kill(signal)
+      } catch {
+        /* 已退出 */
+      }
     }
   }
 
-  private handleResponseFrame(frame: DesktopHostResponseFrame): void {
-    const pending = this.pending.get(frame.streamId)
-    if (pending === undefined) {
-      if (frame.streamId >= this.nextStreamId) {
-        throw new Error(`dsh desktop host responded for unknown stream ${String(frame.streamId)}`)
+  private handleMessage(message: unknown): void {
+    const type = messageType(message)
+    if (type === 'ready') {
+      const payload = message as Extract<HostMessage, { type: 'ready' }>
+      if (typeof payload.dshVersion !== 'string' || typeof payload.url !== 'string' || !Array.isArray(payload.injections)) {
+        this.fail(new Error('dsh desktop host sent an invalid ready event'))
+        return
       }
+      const ready: DesktopHostReady = {
+        protocolVersion: DESKTOP_HOST_PROTOCOL_VERSION,
+        dshVersion: payload.dshVersion,
+        url: payload.url,
+        injections: payload.injections,
+      }
+      this.url = payload.url
+      this.injections = payload.injections
+      void authenticateWebHost(payload.url).then((cookie) => {
+        this.cookie = cookie
+        this.readyResolve(ready)
+      }, (error: unknown) => {
+        this.fail(error instanceof Error ? error : new Error(String(error)))
+      })
       return
     }
-    switch (frame.type) {
-      case 'start': {
-        if (pending.responseStarted) throw new Error(`dsh desktop host started stream ${String(frame.streamId)} twice`)
-        pending.responseStarted = true
-        let body: ReadableStream<Uint8Array> | null = null
-        if (frame.hasBody) {
-          body = new ReadableStream<Uint8Array>({
-            start: (controller) => { pending.controller = controller },
-            pull: () => {
-              this.blockedResponses.delete(frame.streamId)
-              this.resumeResponsePipe()
-            },
-            cancel: (reason) => { this.cancelResponse(frame.streamId, reason) },
-          })
-        }
-        pending.resolve(new Response(body, {
-          status: frame.status,
-          headers: new Headers(frame.headers.map(([name, value]) => [name, value] as [string, string])),
-        }))
-        return
-      }
-      case 'data': {
-        const controller = pending.controller
-        if (!pending.responseStarted || controller === undefined) {
-          throw new Error(`dsh desktop host sent body data before a body start for stream ${String(frame.streamId)}`)
-        }
-        controller.enqueue(frame.data)
-        if ((controller.desiredSize ?? 0) <= 0) {
-          this.blockedResponses.add(frame.streamId)
-          this.responsePipe?.pause()
-        }
-        return
-      }
-      case 'end':
-        if (!pending.responseStarted) {
-          throw new Error(`dsh desktop host ended stream ${String(frame.streamId)} before its response start`)
-        }
-        pending.controller?.close()
-        this.finishPending(frame.streamId, true)
-        return
-      case 'error':
-        this.failPending(frame.streamId, new Error(frame.message))
-        return
-      default:
-        frame satisfies never
+    if (type === 'shutdown-complete') {
+      this.shutdownComplete = true
+      return
     }
-  }
-
-  private cancelResponse(streamId: number, reason: unknown): void {
-    const pending = this.pending.get(streamId)
-    if (pending === undefined) return
-    pending.uploadOpen = false
-    void pending.requestReader?.cancel(reason).catch(() => undefined)
-    this.enqueueRequestFrame(encodeDesktopRequestCancel(streamId)).catch((error: unknown) => {
-      this.fail(errorOf(error, 'dsh desktop request pipe failed'))
-    })
-    this.finishPending(streamId, false)
-  }
-
-  private failPending(streamId: number, error: Error): void {
-    const pending = this.pending.get(streamId)
-    if (pending === undefined) return
-    pending.uploadOpen = false
-    void pending.requestReader?.cancel(error).catch(() => undefined)
-    if (pending.controller === undefined) pending.reject(error)
-    else pending.controller.error(error)
-    this.enqueueRequestFrame(encodeDesktopRequestCancel(streamId)).catch((pipeError: unknown) => {
-      this.fail(errorOf(pipeError, 'dsh desktop request pipe failed'))
-    })
-    this.finishPending(streamId, false)
-  }
-
-  private finishPending(streamId: number, cancelOpenUpload: boolean): void {
-    const pending = this.pending.get(streamId)
-    if (pending === undefined) return
-    if (cancelOpenUpload && pending.uploadOpen) {
-      pending.uploadOpen = false
-      void pending.requestReader?.cancel().catch(() => undefined)
-      this.enqueueRequestFrame(encodeDesktopRequestCancel(streamId)).catch((error: unknown) => {
-        this.fail(errorOf(error, 'dsh desktop request pipe failed'))
-      })
+    if (type === 'fatal') {
+      const detail = (message as Extract<HostMessage, { type: 'fatal' }>).message
+      this.fail(new Error(typeof detail === 'string' ? detail : 'dsh desktop host reported a fatal error'))
+      return
     }
-    pending.removeAbort?.()
-    this.pending.delete(streamId)
-    this.blockedResponses.delete(streamId)
-    this.resumeResponsePipe()
-  }
-
-  private resumeResponsePipe(): void {
-    if (this.blockedResponses.size === 0) this.responsePipe?.resume()
-  }
-
-  private handleMessage(message: DesktopHostEvent): void {
-    switch (message.type) {
-      case 'ready':
-        this.readyResolve(message)
-        return
-      case 'fatal':
-        this.fail(new Error(message.message))
-        return
-      default:
-        message satisfies never
-    }
+    this.fail(new Error('dsh desktop host sent an unknown IPC message'))
   }
 
   private fail(error: Error): void {
     this.readyReject(error)
-    if (!this.failureReported) {
-      this.failureReported = true
-      try { this.onFailure?.(error) } catch (listenerError) {
-        console.error('desktop host failure listener failed', listenerError)
-      }
+    if (this.failureReported) return
+    this.failureReported = true
+    this.onFailure?.(error)
+  }
+
+  private acceptStdoutChunk(chunk: string): void {
+    this.stdoutPartial += chunk.replace(/\r\n/gu, '\n')
+    while (true) {
+      const newline = this.stdoutPartial.indexOf('\n')
+      if (newline < 0) break
+      const line = this.stdoutPartial.slice(0, newline)
+      this.stdoutPartial = this.stdoutPartial.slice(newline + 1)
+      if (line !== '') this.onStdout?.(line)
     }
-    for (const pending of this.pending.values()) {
-      void pending.requestReader?.cancel(error).catch(() => undefined)
-      if (pending.controller === undefined) pending.reject(error)
-      else pending.controller.error(error)
-      pending.removeAbort?.()
+  }
+
+  private acceptStderrChunk(chunk: string): void {
+    this.stderrPartial += chunk.replace(/\r\n/gu, '\n')
+    while (true) {
+      const newline = this.stderrPartial.indexOf('\n')
+      if (newline < 0) break
+      const line = this.stderrPartial.slice(0, newline)
+      this.stderrPartial = this.stderrPartial.slice(newline + 1)
+      if (line !== '') this.onStderr?.(line)
     }
-    this.pending.clear()
-    this.blockedResponses.clear()
-    this.responsePipe?.resume()
   }
 }

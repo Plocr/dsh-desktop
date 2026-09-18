@@ -6,7 +6,7 @@
 import { BrowserWindow, nativeTheme, shell } from 'electron'
 import path from 'node:path'
 import { THEME_COLORS } from './theme'
-import { APP_ENTRY_URL, SHELL_ORIGIN } from './appProtocol'
+import { APP_ENTRY_URL, APP_ORIGIN, SHELL_ORIGIN } from './appProtocol'
 
 /** 窗口所用 session 分区（dsh-app:// 协议处理器必须装在这个分区上）。 */
 export const UI_PARTITION = 'persist:dsh-ui'
@@ -14,7 +14,12 @@ export const UI_PARTITION = 'persist:dsh-ui'
 export interface WindowHandle {
   win: BrowserWindow
   /** 切到工作台（harness 就绪后调用；地址固定为 dsh-app://app/）。 */
-  loadApp: () => void
+  /**
+   * 切到工作台。
+   * @param generation - Host 世代（每次 ready 递增）：同一世代且已经在工作台时**不重新加载**，
+   *   避免重启流程里反复 loadURL 造成的闪屏；Host 换代（新端口/新 cookie）时必须重载。
+   */
+  loadApp: (generation?: number) => void
   showLoading: (state?: string, theme?: 'light' | 'dark' | 'system') => void
   showError: (msg: string, theme?: 'light' | 'dark' | 'system') => void
   /**
@@ -68,7 +73,10 @@ export function createWindow(
   win.once('ready-to-show', () => win.show())
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:/i.test(url)) void shell.openExternal(url)
+    // 回环地址是壳自己的 Host（`http://127.0.0.1:<port>`），绝不丢到系统浏览器：
+    // 那里没有会话 cookie，打开只会得到 401，还会把内部地址暴露给浏览器历史。
+    const loopback = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:\/|$)/iu.test(url)
+    if (!loopback && /^https?:/i.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
 
@@ -84,6 +92,10 @@ export function createWindow(
   // 加载页最短显示时长：避免启动很快时 logo 一闪而过
   const MIN_LOADING_MS = 900
   let loadingShownAt = 0
+  /** 已加载的工作台对应的 Host 世代（见 loadApp 的重入判定）。 */
+  let appLoadedGeneration: number | undefined
+  /** 当前加载页显示的状态文案：重复调用被忽略，避免同一状态反复 loadURL。 */
+  let loadingState: string | undefined
 
   // 主题兜底 CSS：harness 的插件加载界面（"HARNESS / Loading plugins…"）颜色
   // 全部走 var(--dsw-alias-*, fallback)，插件树激活前变量未定义 → fallback 近白。
@@ -135,10 +147,14 @@ export function createWindow(
     })
   }
 
-  const loadApp = (): void => {
+  const loadApp = (generation?: number): void => {
     if (win.isDestroyed()) return
     const current = win.webContents.getURL()
+    // 已经在工作台、且 Host 世代没变 → 什么都不做（重启流程里的重复调用不再重载页面，
+    // 消除「已经可用了又闪一下加载页」的观感）。
+    if (current.startsWith(APP_ORIGIN) && generation !== undefined && generation === appLoadedGeneration) return
     const doSwitch = (): void => {
+      appLoadedGeneration = generation
       if (current.startsWith(SHELL_ORIGIN)) {
         // 加载页先淡出（0.35s），再切换——转场不突变
         void win.webContents
@@ -166,6 +182,13 @@ export function createWindow(
 
   const showLoading = (state?: string, themeArg?: 'light' | 'dark' | 'system'): void => {
     if (win.isDestroyed()) return
+    // 幂等：已经在加载页且状态未变时不再 loadURL（重启/崩溃回调会重复调用它，
+    // 每次重载都会让加载页从头播动画 —— 那正是「闪屏」的主要来源）。
+    const current = win.webContents.getURL()
+    const themeUnchanged = themeArg === undefined || themeArg === currentBootTheme
+    if (current.startsWith(`${SHELL_ORIGIN}/loading.html`) && state === loadingState && themeUnchanged) return
+    loadingState = state
+    appLoadedGeneration = undefined
     loadingShownAt = Date.now()
     // 记录/注入当前主题（dom-ready 时会再次注入到 harness 文档）
     currentBootTheme = themeArg ?? theme

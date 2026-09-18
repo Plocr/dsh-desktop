@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { readDesktopRuntime } from '../src/main/runtimeTree.ts'
-import { DESKTOP_HOST_PROTOCOL_VERSION } from '../src/main/hostProtocol.ts'
+import { DESKTOP_HOST_PROTOCOL_VERSION } from '../src/main/hostProcess.ts'
 
 /**
  * 随包运行时的**发行前提**校验（不触碰真实文件树：descriptor 是唯一输入）。

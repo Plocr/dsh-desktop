@@ -15,6 +15,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { once } from 'node:events'
 import { Readable } from 'node:stream'
+import type { Duplex } from 'node:stream'
 // 显式 .ts：既满足 esbuild 打包，也便于 Node 直跑单测
 import { log } from './logger.ts'
 
@@ -29,6 +30,11 @@ export const DSH_LAN_PORT = (() => {
 export interface LanProxyOptions {
   /** 转发目标：Host 进程的管道 fetch。 */
   forward: (request: Request) => Promise<Response>
+  /**
+   * WebSocket 升级转发（官方传输下客户端用 WS mux 拉流；门面必须一并代理）。
+   * 门禁（设备授权 + token cookie）在调用它之前已经校验过。
+   */
+  upgrade?: (request: IncomingMessage, socket: Duplex, head: Buffer) => void
   /** 监听地址（默认 0.0.0.0；本机浏览器版可传 127.0.0.1）。 */
   bindHost?: string
   /** 监听端口；缺省 DSH_LAN_PORT（占用自动回退随机）。传 0 = 随机。 */
@@ -140,6 +146,54 @@ export async function createLanProxy(opts: LanProxyOptions): Promise<LanProxyHan
   const server = createServer((req, res) => {
     void handle(req, res)
   })
+
+  /**
+   * 升级请求同样要过两道门（设备授权 + token cookie）：否则任何设备都能绕过
+   * 门禁直接开一条 WebSocket。校验通过后才交给 `upgrade` 代理。
+   */
+  const handleUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
+    const ip = clientIpOf(req.socket)
+    const rejected = (status: number, text: string): void => {
+      socket.write(`HTTP/1.1 ${String(status)} ${text}\r\nconnection: close\r\n\r\n`)
+      socket.destroy()
+    }
+    const authorize = async (): Promise<boolean> => {
+      if (!isLoopbackSource(ip) && opts.requestApproval && !approved.has(ip)) {
+        let allow = false
+        try {
+          allow = await Promise.race([
+            opts.requestApproval(ip),
+            new Promise<boolean>((resolve) => setTimeout(() => resolve(false), APPROVAL_TIMEOUT_MS)),
+          ])
+        } catch (err) {
+          log('error', `lan: upgrade approval failed: ${err instanceof Error ? err.message : String(err)}`)
+          allow = false
+        }
+        if (!allow) return false
+        approved.add(ip)
+        log('info', `lan: device ${ip} approved (websocket)`)
+      }
+      if (opts.token && readCookie(req.headers.cookie, ACCESS_COOKIE) !== opts.token) return false
+      return true
+    }
+    void authorize().then((allowed) => {
+      if (!allowed) {
+        rejected(401, 'Unauthorized')
+        return
+      }
+      if (opts.upgrade === undefined) {
+        rejected(501, 'Not Implemented')
+        return
+      }
+      try {
+        opts.upgrade(req, socket, head)
+      } catch (err) {
+        log('error', `lan: websocket proxy failed: ${err instanceof Error ? err.message : String(err)}`)
+        rejected(502, 'Bad Gateway')
+      }
+    })
+  }
+  server.on('upgrade', (req, socket, head) => { handleUpgrade(req, socket, head) })
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     try {

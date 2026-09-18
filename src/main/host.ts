@@ -17,10 +17,17 @@
  */
 import { log } from './logger.ts'
 import { DesktopHostProcess } from './hostProcess.ts'
+import { request as httpRequest } from 'node:http'
+import type { IncomingMessage } from 'node:http'
+import type { Duplex } from 'node:stream'
 
-/** Host 就绪事实（来自子进程 IPC `ready` 事件）。 */
+/** Host 就绪事实（来自子进程 IPC `ready` 事件；官方形态：认证 URL + index 注入）。 */
 export interface HostReady {
   dshVersion: string
+  /** 已认证的 Web Host 基地址（带一次性 token，主进程据此换 cookie）。 */
+  url: string
+  /** 窗口启动时必须应用的 index 注入片段（客户端 boot 等它们）。 */
+  injections: readonly unknown[]
 }
 
 export type HostState = 'starting' | 'ready' | 'stopped'
@@ -45,6 +52,11 @@ export interface HostOptions {
    * 走随包 pnpm，离线机器不需要系统 pnpm，也不受用户 npmrc 影响（官方语义）。
    */
   pnpmEntry?: string
+  /**
+   * Web Host 监听端口（官方默认 19387）。**冲突时**首次失败会自动改用随机端口重试一次，
+   * 这样「本机另有 DSH 实例占着该端口」不会变成启动失败。
+   */
+  port?: number
   /** 工作区开发用回环 inspector 端口；给出时 Host 额外允许 workspace 链接的 bundle。 */
   inspectPort?: number
   /** 崩溃重启退避上限（缺省 30s）。 */
@@ -84,6 +96,8 @@ export class HostManager {
   /** 失败看门狗：onFailure 之后 exit 事件失联时兜底进入崩溃路径。 */
   private failureWatch: NodeJS.Timeout | null = null
   private quit = false
+  /** 端口冲突兜底是否已用过（只切一次随机端口）。 */
+  private portFallbackUsed = false
 
   constructor(
     private opts: HostOptions,
@@ -240,12 +254,93 @@ export class HostManager {
    * 懒启动：尚未启动时补一次 start()；Host 未就绪/已停机时抛普通 Error
    * （就绪过程中发出的请求会在 DesktopHostProcess.fetch 内等 ready，启动失败即拒绝）。
    */
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, options: { allowForeignOrigin?: boolean } = {}): Promise<Response> {
     if (this.quit) throw new Error('dsh host is stopped')
     if (this.child === null) this.start()
     const host = this.child
     if (host === null) throw new Error('dsh host is not running')
-    return host.fetch(request)
+    return host.fetch(request, options)
+  }
+
+  /** index 注入片段（客户端 boot 前必须应用）；Host 未就绪时为空。 */
+  getInjections(): readonly unknown[] {
+    return this.child?.getInjections() ?? []
+  }
+
+  /** 已认证的 Host 基地址；未就绪时为 undefined。 */
+  getUrl(): string | undefined {
+    return this.child?.getUrl()
+  }
+
+  /** Host 签发的 cookie（WebSocket 升级头用）；未就绪时为 undefined。 */
+  getCookie(): string | undefined {
+    return this.child?.getCookie()
+  }
+
+  /**
+   * 把一条 WebSocket 升级请求原样代理到已认证 Host（局域网/浏览器版门面用）。
+   *
+   * 官方传输下客户端用 WS mux 拉远端流，而浏览器只能连门面自己的地址；门面把
+   * 握手原样搬过去，并把 Origin/Cookie 改写成 Host 认可的值（渲染层/浏览器拿不到凭据）。
+   */
+  proxyWebSocket(request: IncomingMessage, socket: Duplex, head: Buffer): void {
+    const url = this.getUrl()
+    const cookie = this.getCookie()
+    if (url === undefined || cookie === undefined) {
+      socket.destroy()
+      return
+    }
+    const target = new URL(url)
+    const headers: Record<string, string> = {}
+    for (const [name, value] of Object.entries(request.headers)) {
+      if (value === undefined) continue
+      headers[name] = Array.isArray(value) ? value.join(', ') : value
+    }
+    headers.host = target.host
+    headers.origin = target.origin
+    headers.cookie = cookie
+    headers['sec-fetch-site'] = 'same-origin'
+    const proxy = httpRequest({
+      hostname: target.hostname,
+      port: target.port,
+      path: request.url ?? '/',
+      method: request.method ?? 'GET',
+      headers,
+    })
+    proxy.on('upgrade', (response, upstream, upstreamHead) => {
+      const lines = [`HTTP/1.1 ${String(response.statusCode ?? 101)} ${response.statusMessage ?? 'Switching Protocols'}`]
+      for (const [name, value] of Object.entries(response.headers)) {
+        if (value === undefined) continue
+        for (const item of Array.isArray(value) ? value : [value]) lines.push(`${name}: ${item}`)
+      }
+      socket.write(`${lines.join('\r\n')}\r\n\r\n`)
+      if (upstreamHead.length > 0) socket.write(upstreamHead)
+      if (head.length > 0) upstream.write(head)
+      const shutdown = (): void => {
+        socket.destroy()
+        upstream.destroy()
+      }
+      socket.on('close', shutdown)
+      upstream.on('close', shutdown)
+      socket.on('error', shutdown)
+      upstream.on('error', shutdown)
+      socket.pipe(upstream).pipe(socket)
+    })
+    proxy.on('response', (response) => {
+      // 未升级（Host 拒绝握手等）：把状态回给客户端后关闭
+      const lines = [`HTTP/1.1 ${String(response.statusCode ?? 502)} ${response.statusMessage ?? 'Bad Gateway'}`]
+      for (const [name, value] of Object.entries(response.headers)) {
+        if (value === undefined) continue
+        for (const item of Array.isArray(value) ? value : [value]) lines.push(`${name}: ${item}`)
+      }
+      socket.write(`${lines.join('\r\n')}\r\n\r\n`)
+      response.pipe(socket)
+    })
+    proxy.on('error', (error: unknown) => {
+      log('error', `host: websocket proxy failed: ${error instanceof Error ? error.message : String(error)}`)
+      socket.destroy()
+    })
+    proxy.end()
   }
 
   private spawn(): void {
@@ -263,15 +358,18 @@ export class HostManager {
       (line) => { this.emitLog('stderr', line) },
       (code, signal) => { this.onHostExit(gen, code, signal) },
       this.opts.pnpmEntry,
+      // 开发（带 inspector）时放行 workspace 链接的 bundle；打包运行时走官方 runtime 解析。
+      this.opts.inspectPort !== undefined,
+      this.opts.port,
     )
     this.child = host
     log('info', `host spawn ${this.opts.node} ${this.opts.runtimeDir} (project=${this.opts.projectDir}${this.opts.inspectPort === undefined ? '' : `, inspect=${String(this.opts.inspectPort)}`})`)
     void host.start().then((ready) => {
       if (gen !== this.childGen) return
-      const result: HostReady = { dshVersion: ready.dshVersion }
+      const result: HostReady = { dshVersion: ready.dshVersion, url: ready.url, injections: ready.injections }
       this.ready = result
       this.restarts = 0
-      log('info', `host ready: dsh ${ready.dshVersion} protocol=${String(ready.protocolVersion)}`)
+      log('info', `host ready: dsh ${ready.dshVersion} url=${ready.url.replace(/token=[^&]+/u, 'token=***')} injections=${String(ready.injections.length)}`)
       this.setState('ready')
       this.emitReady(result)
     }, (error: unknown) => {
@@ -309,6 +407,23 @@ export class HostManager {
     this.clearFailureWatch()
     if (this.quit) return
     log('error', `host fatal: ${error.message}`)
+    // 端口冲突（本机另有 DSH 实例 / Web 版占着 19387）不该算启动失败：
+    // 首次遇到就把端口切成 0（随机）再走一次启动路径。只做一次，避免死循环。
+    if (this.ready === null && !this.portFallbackUsed && /EADDRINUSE|address already in use/iu.test(error.message)) {
+      this.portFallbackUsed = true
+      log('info', 'host port is busy: retrying on an ephemeral port')
+      const stale = this.child
+      this.child = null
+      this.childGen += 1
+      try {
+        stale?.kill('SIGKILL')
+      } catch {
+        /* ignore */
+      }
+      this.opts = { ...this.opts, port: 0 }
+      this.spawn()
+      return
+    }
     const host = this.child
     if (host === null) return // 退出事件已经走过崩溃路径
     try {

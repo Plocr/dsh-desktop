@@ -13,7 +13,6 @@ export interface TrayDeps {
     autoStart: boolean
     notifications: boolean
     autoUpdate: boolean
-    runningJobs: number
     harnessState: string
     globalShortcut: string
     appVersion: string
@@ -23,25 +22,16 @@ export interface TrayDeps {
     safeMode: boolean
     /** 最近一次 harness 启动失败摘要（ready 后清空） */
     lastHarnessError: string | null
-    /** DeepSeek API Key 自检结果（null=检测中/未检测） */
-    apiKey: { ok: boolean; detail: string; verdict: 'ok' | 'invalid' | 'unknown' } | null
-    /** 桥接通道状态（壳 ↔ harness 唯一通道；诊断来自插件 bridge.diag 与握手回执） */
+    /** 桥接通道状态（壳 ↔ harness 的原生能力通道；诊断来自插件 bridge.diag 与握手回执） */
     bridge: {
       connected: boolean
-      /** jobs 服务是否可见（null=未知）：不可见时徽标/任务通知不可用 */
       jobs: 'present' | 'absent' | null
       protocol: 'ok' | 'mismatch' | 'unknown'
-      /** 待审批条数（approval.asked 入、approval.decided 出） */
-      pending: number
       /** 最新诊断码（排障用；如 auth.rejected / ws.server.error） */
       lastCode: string | null
     }
-    /** 最近会话（快照 + sessions.changed 增量；点击直达） */
-    recentSessions: { id: string; label: string }[]
   }
   showWindow: () => void
-  /** 点击托盘会话条目 / 待审批条目：跳到该会话（复用 dsh:// 深链路径） */
-  openSession: (sessionId: string) => void
   openBrowser: () => void
   pickWorkspace: () => void
   restartHarness: () => void
@@ -51,8 +41,6 @@ export interface TrayDeps {
   checkUpdate: () => void
   cleanLogs: () => void
   uninstall: () => void
-  /** 最新一条待审批所属会话；没有可跳转的目标时返回 null（托盘条目据此禁用） */
-  pendingSessionId: () => string | null
   /** 打开官方插件页（Web 侧边栏「插件」）：官方设计里插件管理的唯一主场 */
   openPluginPage: () => void
   /** 托盘「退出安全模式」：恢复全部插件 */
@@ -93,7 +81,7 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
       { label: '打开浏览器版', enabled: !!url, click: () => deps.openBrowser() },
       { type: 'separator' },
       {
-        label: `Harness: ${s.harnessState}${s.runningJobs > 0 ? `（${s.runningJobs} 个任务运行中）` : ''}`,
+        label: `Harness: ${s.harnessState}`,
         enabled: false,
       },
       {
@@ -105,38 +93,7 @@ export function createTray(iconPath: string, deps: TrayDeps): TrayHandle {
           : `桥接：未连接${s.bridge.lastCode ? `（${s.bridge.lastCode}）` : ''}`,
         enabled: false,
       },
-      ...(s.bridge.pending > 0
-        ? ([
-            {
-              label: `待审批：${s.bridge.pending} 条（点击查看）`,
-              click: () => deps.openSession(deps.pendingSessionId() ?? ''),
-              enabled: deps.pendingSessionId() !== null,
-            },
-          ] as const)
-        : []),
-      ...(s.recentSessions.length > 0
-        ? ([
-            {
-              label: '最近会话',
-              submenu: s.recentSessions.map((session) => ({
-                label: session.label.length > 60 ? `${session.label.slice(0, 60)}…` : session.label,
-                click: () => deps.openSession(session.id),
-              })),
-            },
-          ] as const)
-        : []),
       { label: '重启 Harness', click: () => deps.restartHarness() },
-      {
-        // DeepSeek API Key 自检状态（只读）：防止「key 失效/未落盘」被误判为配置错误
-        label: s.apiKey
-          ? s.apiKey.verdict === 'ok'
-            ? `DeepSeek API Key：有效`
-            : s.apiKey.verdict === 'invalid'
-              ? 'DeepSeek API Key：无效（请到设置→模型更新）'
-              : 'DeepSeek API Key：状态未知（网络/服务异常，见日志）'
-          : 'DeepSeek API Key：检测中…',
-        enabled: false,
-      },
       {
         label: '桌面插件',
         submenu: [

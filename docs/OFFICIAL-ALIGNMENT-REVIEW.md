@@ -81,7 +81,7 @@
 
 ## 4. 未落地：建议的后续工作
 
-1. **传输迁移到官方形态（P1-3）**：把 Host 从"自研字节管道 + 自研静态资源"换成
+1. ~~**传输迁移到官方形态（P1-3）**~~ → **已落地，见 §7**：把 Host 从"自研字节管道 + 自研静态资源"换成
    `runProfile` + 认证 Web Host（默认 19387），Electron 侧改为"转发请求 + 注入官方 `injections`"。
    收益：Web 面行为自动跟随官方（认证、注入、目录选择、`webserver.config.port` patch）；
    代价：壳里 `appProtocol.ts` / `hostProtocol.ts` / `lanServer.ts` 三条路径需重写，且要重新验证
@@ -92,11 +92,9 @@
    注意：这些原语在 Host 侧（dsh 运行时树）可用，壳侧需要用 `createRequire` 指向运行时树。
 3. **`plugin_manager` 工具（P0-1 的延伸）**：它在 `dsh-base` 里默认 `disabled: true`，由 agent 预设
    （Creator）开启。若希望默认可用，应通过 profile patch 显式打开，而不是另做一套壳工具。
-4. **模块解析 generation（P2）**：官方 `runProfile` 还会挂 `PluginPackages`（`resolutionMode: runtime`
-   下按安装包与 bundle 图生成不可变解析代）。本壳 Host 未移植它，仍靠 `healProfilesModuleFallback`
-   ＋ profile `node_modules` 解析——启动、插件列表与 Remote 面已验证可用（见 e2e）；若后续出现
-   "装了插件但重载后解析不到"一类问题，这里就是第一处要补的地方。代价是每次启动多付
-   `healProfilesModuleFallback` 的 **190 ms**（官方走 PluginPackages，不付这笔；见 §6.3 实测）。
+4. ~~**模块解析 generation（P2）**~~ → **已随 §7 一并落地**：Host 现在直接用官方 `runProfile`，
+   解析走官方 `PluginPackages`（link/runtime 两种模式），`healProfilesModuleFallback` 的
+   190 ms 启动开销与相关自研代码一并删除。
 5. **文档口径**：`README.md` 里"完全对齐官方"的表述需要区分"已对齐"与"有意差异"两栏；
    本文件即后续对齐清单的来源。
 
@@ -184,3 +182,41 @@ Host 引导分解（随包 Node + 真实 profile，3 次取稳定值）：
   重用户机器上最拖启动；现在按随包 dsh 版本记标记，只跑一次，并留了托盘「重新修复旧会话日志」），
   以及**局域网 IP 解析移出关键路径**（原来在窗口创建前 `await`，最坏 1.5 s UDP 超时；
   现在只在开启局域网共享时、Host ready 之后按需解析）。
+
+---
+
+## 7. 第三轮：传输层换成官方形态
+
+### 7.1 改了什么
+
+| 位置 | 旧 | 新 |
+|---|---|---|
+| Host（`packages/host`） | 自研 fd3/fd4 字节管道 + 自研帧协议（协议 v3）+ 自研静态资源/Remote 流处理 | 官方 `runProfile`：真实 Web Host（loopback，默认 19387）+ 官方认证 URL 与 index 注入；**不再有管道**（`wire.ts` 已删除） |
+| 桌面补丁 | 自研 `desktop.cordis.patch.yml`（停用 webserver/web-startup 等） | **不再打任何补丁**（`patchFiles: []`，与官方 desktop-host 一致）；`--no-open` 保证不自动开浏览器 |
+| 壳侧转发 | `host.fetch()` 走管道（`hostProtocol.ts` 帧编解码，已删除） | 官方三件套：`serveWebDocument`（本地 dist + `__DSH_BOOT_READY__`）/ `authenticateWebHost`（URL→cookie）/ `forwardWebRequest`（带 cookie 转发，来源校验） |
+| 渲染层启动 | 自研 `__DSH_TRANSPORT__`（NDJSON `/.dsh/remote-stream`） | 官方契约：preload 暴露 `dshDesktopBoot.ready()/failed()`，主进程返回 `{injections, streamBaseUrl}`，客户端自己应用注入 |
+| WebSocket | 不需要（远端流被改成 NDJSON） | 官方 mux：主进程按官方方式给 `ws://127.0.0.1/*` 补 Origin/cookie；局域网门面新增 **WS 升级代理**（同样过设备授权 + token 门禁） |
+
+### 7.2 顺带修掉的三个真 bug（都是本轮审查发现的）
+
+1. **overlays 传成了「层」而不是「行」**：官方 `readProfilePatches` 的 `context.overlays` 是**扁平的补丁行**，
+   而第二轮我传的是 `loadOverlayPatches()` 返回的**层数组**。`composeEntries` 会 flatten、看起来正常，
+   但 Loader 的 `applyEntryPatches` 不 flatten——于是整个桌面补丁被当成「没有 id 的 patch」静默丢弃：
+   **webserver/web-startup 全部启用** → Host 去抢 3080 端口、自动拉起浏览器；本机已有 DSH Web 实例时
+   直接 `EADDRINUSE` 启动失败 → 反复重启 → 这就是「偶尔闪屏」的根因。现在整块补丁不复存在（§7.1）。
+2. **启动时自动打开浏览器（用户报告的第 2 条）**：同一根因；现在 Host 以官方 `--no-open --port 19387` 启动，
+   e2e 断言 stdout 不得出现 "opening the default browser"。
+3. **日志里带一次性 token**：Web Host 的启动行 `dsh web: http://127.0.0.1:19387/?token=…` 会被壳逐行落盘；
+   现在脱敏规则同时覆盖 bridge 发现行与任何 `token=` 参数。
+
+另外补了两个健壮性护栏：
+- **端口冲突兜底**：19387 被占时自动改用随机端口重试一次（官方只报错）；工作台按 URL 里的端口连接，无需固定端口。
+- **闪屏护栏**：`showLoading` 幂等（同状态不重复 loadURL）、`loadApp(generation)` 只在 Host 换代时重载页面。
+
+### 7.3 验证
+
+`npm run e2e:bridge` 已重写为官方传输契约，23 项断言全绿：
+`ready` 带 url + 8 条 injections、**未自动打开浏览器**、`serveWebDocument` 的入口文档含
+`__DSH_BOOT_READY__`、`authenticateWebHost` 拿到 cookie、`forwardWebRequest` 打通
+`/api/pluginManager/listBundles` 且拒绝外来 Origin、bridge 全 RPC（含坏 token 4001）、
+局域网 HTTP 与 **WS 升级 101**（门禁后代理）。

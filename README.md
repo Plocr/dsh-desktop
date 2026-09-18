@@ -10,18 +10,21 @@
 
 **对齐官方 [DeepSeek Harness 桌面端](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop) 的运行时、插件与版本模型**：同一个绑定版本单元、同一套 profile/组合包语义、同一套官方插件系统（Web 侧边栏「插件」页 + `plugin_manager` 工具，包操作走随包 pnpm）。壳只保留桌面原生能力（窗口、托盘、深链、快捷键、通知/徽标、自动更新、局域网/浏览器版），界面是官方 Web UI 原样。
 
-> 传输层是本壳**有意保留的差异**：官方桌面已改为「认证 Web Host（默认 19387）+ Electron 转发请求并注入」；本壳用 `dsh-app://` 特权方案直连 Host 字节管道，因此本机没有任何 harness 监听端口。逐条差距与后续对齐计划见 [docs/OFFICIAL-ALIGNMENT-REVIEW.md](docs/OFFICIAL-ALIGNMENT-REVIEW.md)。
+> 传输层同样是官方形态：Host 用官方 `runProfile` 起**真实 Web Host**（loopback，默认 19387），
+> Electron 从 `dsh-app://app/` 加载随包 dist，其余请求带 Host 签发的 cookie 转发；
+> `--no-open` 保证**启动时不会自动打开浏览器**（要看浏览器版请走托盘）。
+> 逐条差距与实测数据见 [docs/OFFICIAL-ALIGNMENT-REVIEW.md](docs/OFFICIAL-ALIGNMENT-REVIEW.md)。
 
 ```
-Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（Host 子进程，进程内引导 dsh profile）
+Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（官方 runProfile 引导 profile）
     │  ▲                              │  ▲
-    │  │ fd5: Node IPC（ready/fatal/shutdown）
-    │  │ fd3/fd4: 13 字节帧头的字节管道（请求/响应，64KiB 分片 + 背压）
+    │  │ Node IPC：ready{url,injections} / fatal / shutdown
+    │  │ HTTP：已认证 Web Host（loopback，默认 19387；冲突时自动换随机端口）
     │  └──────────────────────────────┘
-    ├── 窗口加载 dsh-app://app/ ──▶ 壳把整份 Request 交给 Host（管道 fetch）：
-    │        • /api/*              → connection.createSharedFetchHandler('/api')
-    │        • /.dsh/remote-stream → NDJSON 远端流（Host 注入 __DSH_TRANSPORT__）
-    │        • 其余                 → 官方 Web 前端静态资源（index.html 注入传输脚本）
+    ├── 窗口加载 dsh-app://app/ ──▶ 壳按官方桌面端分发：
+    │        • 入口文档与 /assets/*  → 随包 dist（注入 __DSH_BOOT_READY__）
+    │        • 其余（/api、插件 client）→ 带 Host cookie 转发（forwardWebRequest）
+    │        • WebSocket 远端流      → 客户端直连 Host，壳补齐 Origin/cookie
     └── bridge 插件 WS（127.0.0.1，随机端口 + 随机 token）→ 通知/徽标/深链/工作区注册
 ```
 
@@ -29,8 +32,8 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（Host 子进程
 
 | 维度 | 本壳做法（= 官方做法） |
 |---|---|
-| 传输 | **没有任何 harness 监听端口**。Host 在随包 Node 里引导 dsh，壳与它之间只有 fd3/fd4 字节管道（13 字节帧头、协议 v3、64 KiB 数据帧上限、按 `desiredSize` 背压）；渲染层只看到特权方案 `dsh-app://`（`shell` 壳页面 / `app` 工作台），端口、token、cookie 概念上都不存在 |
-| Web UI 远端流 | 原本是 WebSocket mux（自定义方案开不了 WS）：Host 在入口文档注入 `__DSH_TRANSPORT__`（`ownsHost: true` + `openStream`），客户端改走 `/.dsh/remote-stream` 的 NDJSON；壳侧只透传 |
+| 传输 | **官方形态**：Host 用 `runProfile` 起真实 Web Host（loopback，默认 19387，可用 `webserver.config.port` patch 覆盖），ready 事件带回**认证 URL** 与 **index 注入片段**；窗口从 `dsh-app://app/` 加载随包 dist（入口注入 `__DSH_BOOT_READY__`），其余请求由主进程带 cookie 转发。凭据只存在主进程，渲染层拿不到；`--no-open` 保证不自动开浏览器 |
+| Web UI 远端流 | 官方 WebSocket mux：客户端连 `ws://127.0.0.1:<hostPort>`，主进程按官方方式补 `Origin`/`cookie`；局域网/浏览器版门面额外做 WS 升级代理（同样过设备授权 + token 门禁） |
 | 运行时 | `extraResources` 直接随包两棵树：`resources/runtime`（便携 Node + pnpm）与 `resources/dsh`（`npm install @deepseek-ai/dsh` 的完整生产闭包 + 第一方包），**不再首启解压**；`resources/dsh/desktop-runtime.json` 记录每个文件的 sha256 与发行身份（壳版本 + dsh 版本 + Node/pnpm 版本 + 协议版本），启动时校验，对不上直接拒绝启动 |
 | 版本模型 | **一个签名更新单元**：壳 / dsh / Node / pnpm 由 `desktop-runtime.json` 绑死，随桌面端一起发版；不再有「单独更新 harness」的通道（历史上的整树刷新、兼容探测、tar.gz 解压与不兼容清单全部删除） |
 | 插件 | **官方插件系统原样运行**：Host 向 dsh 提供官方「启动器信息」（`profileContext`，含随包 pnpm 作为 `packageManager`），`plugin-manager` 与 HMR 因此激活——侧边栏「插件」页与 `plugin_manager` 工具可在本壳里安装/启停/卸载。profile（`$DSH_HOME/profiles/dsh-workbench`）承载组合：`dsh.profile.bundles` 是有序启用列表，第一方包（bridge / host / dsh）以 **junction 共享包**链接进 profile `node_modules`，第三方插件由官方管理器用**随包 pnpm**装进 profile 依赖，事务期间持有 `<profile>/lock` 与 `desktop-packages-pending` 标记；安装失败按官方语义回滚 `package.json` + `pnpm-lock.yaml`，依赖脚本待批准时给出「允许并重试」 |
@@ -39,8 +42,8 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（Host 子进程
 ### 本壳相对官方的**有意差异**
 
 - **profile 名是 `dsh-workbench`**（官方用保留名 `desktop`）。本壳是独立应用，不占用官方保留名；首次启动会把历史 `profiles/desktop` 改名迁移。
-- **多一个 `dsh-desktop-bridge` 插件**（第一方、随包、bundle 层加载）：官方壳用原生对话框/无托盘，本壳用系统通知、任务栏徽标、`dsh://` 深链、托盘、局域网/浏览器版，这些需要一条壳↔harness 的本地 RPC 通道。它是**唯一的监听 socket**（127.0.0.1 随机端口 + 每次启动随机 token），不参与 harness 的 HTTP 面。
-- **局域网访问 / 浏览器版**：官方没有该能力；本壳的对外门面把 HTTP 请求喂给同一条管道 fetch，回环免授权、局域网设备需电脑确认 + 本次运行 token 换 cookie（`src/main/lanServer.ts`）。
+- **多一个 `dsh-desktop-bridge` 插件**（第一方、随包、bundle 层加载）：官方壳用原生对话框/无托盘，本壳用系统通知、任务栏徽标、`dsh://` 深链、托盘、局域网/浏览器版，这些需要一条壳↔harness 的本地 RPC 通道。它是壳自有的、唯一额外监听 socket（127.0.0.1 随机端口 + 每次启动随机 token），不参与 harness 的 HTTP 面。
+- **局域网访问 / 浏览器版**：官方没有该能力；本壳的对外门面（`src/main/lanServer.ts`）把 HTTP 与 WebSocket 升级都代理到已认证 Host，回环免授权、局域网设备需电脑确认 + 本次运行 token 换 cookie。
 - **会话修复与安全模式**：官方没有；本壳保留（`src/main/sessionRepair.ts`、`src/main/safeMode.ts`）。
 
 ---

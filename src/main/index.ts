@@ -1,14 +1,14 @@
 /**
  * DSH Desktop 主进程入口（官方桌面架构）：
  * 单实例 → 设置/日志 → 定位随包运行时 → 确保 desktop profile（共享包链接）→
- * 创建窗口/托盘（dsh-app:// 特权方案）→ spawn **Host 子进程**（字节管道，无监听端口）→
- * Host ready → 加载 dsh-app://app/ → 桥接事件（徽标/通知，仅桌面原生部分）→
+ * 创建窗口/托盘（dsh-app:// 特权方案）→ spawn **Host 子进程**（官方 `runProfile`）→
+ * Host ready（认证 URL + index 注入）→ 加载 dsh-app://app/ → 桥接事件（徽标/通知）→
  * 全局快捷键 / dsh:// 深链 / 自动更新 → 优雅停机。
  *
  * 与官方一致的传输与版本模型：
- *  - 后端是 `packages/host`（官方 apps/desktop-host 的移植），在随包 Node 里**进程内**引导
- *    dsh profile；渲染层只经 dsh-app:// 特权方案访问，壳与 Host 之间是 fd3/fd4 字节管道，
- *    本机不存在 harness 的监听 socket（见 hostProtocol.ts / appProtocol.ts）；
+ *  - 后端是 `packages/host`（官方 apps/desktop-host 的同形实现）：`runProfile` 起真实
+ *    Web Host（loopback 19387，认证 URL），窗口从 dsh-app://app/ 加载**随包 dist**，
+ *    其余请求带 Host 签发的 cookie 由主进程转发（见 webDocument.ts / appProtocol.ts）；
  *  - 壳版本与随包 dsh/Node/pnpm 由 resources/dsh/desktop-runtime.json 绑定为一个签名更新单元，
  *    不存在「单独更新 harness」的通道；
  *  - 插件管理（安装/启停/卸载）由 Host 进程里的**官方共享插件管理器**负责
@@ -22,7 +22,7 @@ import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { initLogger, log, logDirPath } from './logger'
 import { loadSettings, saveSettings, type AppSettings } from './settings'
-import { appResourcesDir, ensureProfile, resolveRuntime, type RuntimeSpec } from './runtime'
+import { appResourcesDir, ensureProfile, resolveRuntime, shippedResourcesDir, type RuntimeSpec } from './runtime'
 import { readProfileBundles, pruneStaleProfileBundles, isolateProfileForSafeMode, restoreProfileManifest } from './pluginfs.ts'
 import { isSafeMode, recordStartFailure, recordStartSuccess, exitSafeMode, activateSafeMode, SAFE_MODE_THRESHOLD, type SafeModeState } from './safeMode'
 import {
@@ -304,6 +304,11 @@ let lanToken: string | null = null
 let lanApprovalLock = false
 /** 本次进程启动以来 harness 是否成功 ready 过（用于安全模式失败计数判定）。 */
 let harnessEverReady = false
+/**
+ * Host 世代：每次 ready 递增。官方传输下 Host 换代意味着**新的端口与 cookie**，
+ * 工作台必须重载才能重新握手；同一世代内的重复 ready 则不重载（避免闪屏）。
+ */
+let hostGeneration = 0
 /** API Key 自检结果（null=尚未检测；托盘展示用）。 */
 let apiKeyStatus: ApiKeyCheckResult | null = null
 /** 是否已就当前 key 状态提示过用户（避免每次 ready 重复弹通知）。 */
@@ -399,7 +404,11 @@ async function manageLanServer(): Promise<void> {
       lanToken = lanToken ?? randomBytes(16).toString('hex')
       lanHandle = await createLanProxy({
         bindHost: '0.0.0.0',
-        forward: (request) => host.fetch(request),
+        // 局域网门面：请求来自别的设备（Origin 不是 dsh-app://app），
+        // 但已经过本壳自己的设备授权 + 本次运行 token 门禁，因此放行来源校验。
+        forward: (request) => host.fetch(request, { allowForeignOrigin: true }),
+        // WebSocket 流（官方 mux）也要经门面转发：浏览器里客户端连的是门面自身的地址。
+        upgrade: (request, socket, head) => host.proxyWebSocket(request, socket, head),
         requestApproval: (ip) => promptLanApproval(ip),
         token: lanToken,
       })
@@ -613,11 +622,18 @@ function showWindow(): void {
  * 未开启 → 明确提示先开启（不偷偷为本机再开一个长期监听口）。
  */
 function openBrowser(): void {
-  if (!lanHandle || !lanToken) {
-    notify('打开浏览器版', '官方桌面架构下后端不监听端口：请先在托盘菜单开启「局域网访问」，本机浏览器版与它共用同一个对外地址。', () => showWindow())
+  // 官方传输下 Host 本身就是 Web 应用：**用户手动点托盘**时直接把这个回环地址交给
+  // 默认浏览器（一次 token 换 cookie，和 `dsh web` 同语义）。启动时绝不自动打开。
+  const hostUrl = host?.getUrl()
+  if (hostUrl !== undefined && hostUrl !== '') {
+    void shell.openExternal(hostUrl)
     return
   }
-  void shell.openExternal(`http://127.0.0.1:${lanHandle.port}/?token=${lanToken}`)
+  if (lanHandle && lanToken) {
+    void shell.openExternal(`http://127.0.0.1:${lanHandle.port}/?token=${lanToken}`)
+    return
+  }
+  notify('打开浏览器版', 'Harness 还没就绪（或已停止）。先「重启 Harness」，或稍后再试。', () => showWindow())
 }
 
 function currentInfo(): unknown {
@@ -929,6 +945,14 @@ function flushPendingDeepLinks(): void {
 
 /* ── 主流程 ──────────────────────────────────────────────────────────── */
 
+/**
+ * 随包 Web 前端 dist（官方桌面端也是从这里直读入口文档与静态资源）。
+ * 与 `runtime` 解析无关，因此可以在窗口创建前直接用资源根拼出来。
+ */
+function webDistDir(): string {
+  return path.join(shippedResourcesDir(), 'dsh', 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist')
+}
+
 async function main(): Promise<void> {
   initLogger(path.join(app.getPath('userData'), 'logs'))
   settingsFile = path.join(app.getPath('userData'), 'settings.json')
@@ -941,14 +965,45 @@ async function main(): Promise<void> {
   // 先创建窗口并立即显示加载页，再准备运行时/后端。
   win = createWindow(path.join(__dirname, '..', 'preload', 'index.cjs'), resourcesDir, {
     // 导航锁：只允许本壳的两个 dsh-app:// 来源（shell 壳页面 / app 工作台）。
-    // 后端没有监听端口，页面也无从访问任何 http/ws 地址。
     isAllowed: (url) => url.startsWith(SHELL_ORIGIN) || url.startsWith(APP_ORIGIN),
     theme: resolveEffectiveTheme(dshHome()),
   })
   // dsh-app:// 处理器要装在窗口所在分区（Electron 的 protocol 模块只管默认分区）；
-  // 工作台请求全部转给 Host 的管道 fetch。
-  installAppProtocol(session.fromPartition(UI_PARTITION), path.join(resourcesDir, 'shell-pages'), (request) =>
-    host.fetch(request),
+  // 入口文档与静态资源从随包 dist 直读（官方 serveWebDocument），其余请求带 cookie 转发给已认证 Host。
+  installAppProtocol(
+    session.fromPartition(UI_PARTITION),
+    path.join(resourcesDir, 'shell-pages'),
+    webDistDir(),
+    (request) => host.fetch(request),
+  )
+  // 官方桌面端做法：工作台里的客户端直接连 ws://127.0.0.1:<hostPort> 拉远端流，
+  // 凭据（cookie）与 Origin 由主进程在发送头里补上——渲染层拿不到 token/cookie。
+  session.fromPartition(UI_PARTITION).webRequest.onBeforeSendHeaders(
+    { urls: ['ws://127.0.0.1/*'] },
+    (details, callback) => {
+      const target = host.getUrl()
+      const cookie = host.getCookie()
+      if (target === undefined || cookie === undefined || details.webContentsId !== win?.win.webContents.id) {
+        callback({})
+        return
+      }
+      const hostUrl = new URL(target)
+      const requested = new URL(details.url)
+      if (requested.host !== hostUrl.host) {
+        callback({})
+        return
+      }
+      const headers = Object.fromEntries(
+        Object.entries(details.requestHeaders).map(([name, value]) => [name.toLowerCase(), value]),
+      )
+      if (headers.origin !== APP_ORIGIN) {
+        callback({ cancel: true })
+        return
+      }
+      callback({
+        requestHeaders: { ...headers, origin: hostUrl.origin, cookie, 'sec-fetch-site': 'same-origin' },
+      })
+    },
   )
   win.showLoading(undefined, resolveThemePreference(dshHome()))
   win.win.on('close', (e) => {
@@ -1004,10 +1059,11 @@ async function main(): Promise<void> {
         lastHarnessError = null
         recordStartSuccess(safeModeFile())
         harnessVersion = r.dshVersion
+        hostGeneration += 1
         // 对外服务（默认关闭）：官方架构下没有 harness 端口，门面直连 Host 管道 fetch
         void manageLanServer().then(() => refreshTray())
         // 切到工作台：dsh-app://app/ 的所有请求都由 Host 处理（含 __DSH_TRANSPORT__ 注入）
-        win?.loadApp()
+        win?.loadApp(hostGeneration)
         refreshTray()
         // API Key 自检（异步，不阻塞）：失效时托盘/通知给出明确提示
         void runApiKeyCheck()
@@ -1127,31 +1183,19 @@ async function main(): Promise<void> {
       autoUpdate: settings.autoUpdate,
       lanShare: settings.lanShare,
       lanUrl,
-      runningJobs,
       harnessState: host?.state === 'ready' ? '运行中' : host?.state === 'starting' ? '启动中' : '已停止',
       globalShortcut: currentShortcut(),
       appVersion: app.getVersion(),
       harnessVersion,
       safeMode: isSafeMode(safeModeFile()),
       lastHarnessError,
-      apiKey: apiKeyStatus,
       bridge: {
         connected: bridgeConnected,
         jobs: bridgeJobsState(),
         protocol: bridgeProtocolState(),
-        pending: pendingApprovals.size,
         lastCode: bridgeDiag?.code ?? null,
       },
-      recentSessions: recentSessions(sessionIndex, 8).map((entry) => ({
-        id: entry.id,
-        label: entry.live ? `${sessionLabel(entry, entry.id)}` : `${sessionLabel(entry, entry.id)}（历史）`,
-      })),
     }),
-    pendingSessionId: () => latestApproval(pendingApprovals)?.sessionId ?? null,
-    openSession: (sessionId) => {
-      if (!sessionId) return
-      void handleDeepLink({ kind: 'session', sessionId })
-    },
     showWindow,
     openBrowser,
     pickWorkspace: () => void pickWorkspace(),
@@ -1247,6 +1291,17 @@ async function main(): Promise<void> {
     getInfo: currentInfo,
     openSession: (sessionId) => handleDeepLink({ kind: 'session', sessionId }),
     requestUpdateInstall: () => requestUpdateInstall(),
+    // 官方契约：工作台 boot 时取回 index 注入片段与流基地址（`dshDesktopBoot.ready()`）。
+    boot: () => {
+      const url = host.getUrl()
+      if (url === undefined) throw new Error('Harness is not ready')
+      return { injections: host.getInjections(), streamBaseUrl: new URL(url).origin }
+    },
+    bootFailed: (message) => {
+      log('error', `workspace boot failed: ${message}`)
+      lastHarnessError = message.slice(0, 220)
+      refreshTray()
+    },
   })
 
   // dsh:// 协议 + 全局快捷键 + 自动更新

@@ -33,7 +33,8 @@ const dshRuntime = pkg.dshRuntime ?? {}
 const DSH_VERSION = process.env.DSH_RUNTIME_DSH_VERSION ?? dshRuntime.dsh
 const NODE_VERSION = process.env.DSH_RUNTIME_NODE_VERSION ?? dshRuntime.node
 const PNPM_VERSION = process.env.DSH_RUNTIME_PNPM_VERSION ?? dshRuntime.pnpm
-const HOST_PROTOCOL_VERSION = 3
+// 与 src/main/hostProcess.ts 的 DESKTOP_HOST_PROTOCOL_VERSION 一致；契约变化必须同时递增。
+const HOST_PROTOCOL_VERSION = 4
 /**
  * Office→PDF 原生引擎（LibreOffice，win32-x64 ≈ 325 MB / 2000 文件）默认随包**不**带：
  * 它只服务应用内文档预览，是本壳体积的绝对大头。需要预览的构建设 `DSH_DESKTOP_OFFICE_RUNTIME=1`。

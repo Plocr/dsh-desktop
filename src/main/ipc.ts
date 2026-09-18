@@ -21,11 +21,21 @@ export interface IpcDeps {
   openSession: (sessionId: string) => Promise<void>
   /** 更新下载完成后，由页面右上角「安装更新」按钮触发：确认后退出并安装。 */
   requestUpdateInstall: () => Promise<boolean>
+  /** 工作台 boot：返回 Host 的 index 注入片段与流基地址（官方 `dshDesktopBoot.ready`）。 */
+  boot: () => { injections: readonly unknown[]; streamBaseUrl: string }
+  /** 工作台自报启动失败（官方 `dshDesktopBoot.failed`）：走原生恢复。 */
+  bootFailed: (message: string) => void
 }
 
 /** 仅放行壳页面（dsh-app://shell 的 loading/error 页）；其他来源拒绝。 */
 function fromShellPage(e: IpcMainInvokeEvent): boolean {
   return (e.senderFrame?.url ?? '').startsWith(SHELL_ORIGIN)
+}
+
+/** 仅放行工作台主框架（dsh-app://app 的顶层文档）；第三方插件 iframe 等一律拒绝。 */
+function fromAppPage(e: IpcMainInvokeEvent): boolean {
+  const url = e.senderFrame?.url ?? ''
+  return url.startsWith(APP_ORIGIN) && e.senderFrame === e.sender.mainFrame
 }
 
 export function registerIpc(deps: IpcDeps): void {
@@ -88,6 +98,18 @@ export function registerIpc(deps: IpcDeps): void {
     const url = e.senderFrame?.url ?? ''
     if (!url.startsWith(SHELL_ORIGIN) && !url.startsWith(APP_ORIGIN)) return
     void deps.requestUpdateInstall()
+  })
+
+  // 工作台 boot（官方契约）：只有 dsh-app://app 的主框架能拿到注入片段。
+  ipcMain.handle('dsh:boot', (e) => {
+    if (!fromAppPage(e)) throw new Error('forbidden: application page only')
+    return deps.boot()
+  })
+
+  ipcMain.handle('dsh:boot-failed', (e, message: unknown) => {
+    if (!fromAppPage(e)) throw new Error('forbidden: application page only')
+    deps.bootFailed(typeof message === 'string' ? message : 'unknown boot failure')
+    return true
   })
 
   // 保留：无窗口时也能触发的原生对话框兜底
