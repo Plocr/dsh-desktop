@@ -176,6 +176,28 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（官方 runProf
 > 相关环境变量（仅打包时用，见 `scripts/setup-runtime.mjs`）：`DSH_RUNTIME_DSH_VERSION`（默认 npm 上最新的可用版）、
 > `DSH_RUNTIME_NODE_VERSION`、`DSH_RUNTIME_NODE_ARCH`。
 
+### 官方 Harness 更新怎么进到桌面端（不需要服务器）
+
+桌面端**不会**自己去 npm 拉新版 harness——版本是绑定的（见上一段）。但"监测官方更新 → 拉取 → 构建安装包"
+这条链路可以完全托管给 **GitHub Actions**（免费额度足够，不需要你自建服务器）：
+
+| 方式 | 怎么做 | 结果 |
+|---|---|---|
+| 手动 | `npm run upstream:dsh:check`（只报告）→ `npm run upstream:dsh -- --sync --write` → `npm run setup:runtime` → `npm run check` + `npm run e2e:bridge` → 打 tag | 本地一条龙 |
+| 半自动（默认） | `.github/workflows/upstream-dsh.yml` 每天 04:00（Asia/Shanghai）自动跑，发现新版就同步 pin、重建运行时、跑门禁与 e2e，全绿后推分支 + 开 PR | 你 review 后合并，再打 tag 出包 |
+| 全自动 | 手动触发同一个 workflow 并勾选 `publish` | 全绿后自动打 `v<壳版本>` tag 并触发 `build-release.yml`（三平台出包 + 发 Release）→ 已装用户自动更新 |
+
+两个必须知道的细节：
+
+1. **不能看 npm 的 `latest` tag**。实测 `@deepseek-ai/dsh` 的 `latest` 指向 `0.1.5-rc.2`，而最高版本是
+   `0.1.6-alpha.2`——巡检脚本比的是**版本列表里的最大值**（复用壳自己的版本比较函数）。
+2. **每次都得同时升壳版本**。electron-updater 只接受更高的应用版本；只改 dsh pin 而壳版本不动，
+   已装用户收不到更新。脚本会自动把壳版本 patch+1。
+
+自动化只处理版本号：官方组合树或宿主 API 有破坏性变化时，CI 里的 e2e 会失败（**不会**发出坏包），
+那种情况需要人工改 `packages/host` / `packages/bridge` 源码；IPC 契约变了才需要手动 +1
+`DESKTOP_HOST_PROTOCOL_VERSION`（在 `src/main/hostProcess.ts` 与 `scripts/setup-runtime.mjs` 两处）。
+
 **入口（托盘 → 设置）：**
 
 - `自动更新（框架 v… · 官方 Harness v…）`（开关，默认开）：冷启动自动检查并下载一次；关闭则仅手动

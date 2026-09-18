@@ -20,6 +20,8 @@
     "setup:runtime": "node scripts/setup-runtime.mjs",
     "verify:runtime": "node scripts/verify-runtime.mjs",
     "e2e:bridge": "node scripts/e2e-bridge.mjs",
+    "upstream:dsh": "node scripts/upstream-dsh.mjs",
+    "upstream:dsh:check": "node scripts/upstream-dsh.mjs --check",
     "make:icons": "node scripts/make-icons.mjs",
     "dist:win": "node scripts/build.mjs && node scripts/make-icons.mjs && node scripts/setup-runtime.mjs && electron-builder --win nsis --config.electronDist=node_modules/electron/dist",
     "dist:win:portable": "node scripts/build.mjs && node scripts/make-icons.mjs && node scripts/setup-runtime.mjs && electron-builder --win portable --config.electronDist=node_modules/electron/dist",

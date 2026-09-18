@@ -1,0 +1,158 @@
+name: upstream-dsh
+
+# 官方 harness（@deepseek-ai/dsh）更新巡检 —— 不需要任何服务器，全靠 GitHub Actions：
+#
+#   1. 定时（每天 04:00 Asia/Shanghai）问 npm registry：**版本列表里的最高版本**是否高于我们绑定的？
+#      （注意：看 dist-tag `latest` 会漏更新——实测 latest=0.1.5-rc.2 而最高=0.1.6-alpha.2）
+#   2. 有新版 → 同步 pin（package.json.dshRuntime.dsh + packages/host 里跟随 dsh 的依赖）并升壳版本；
+#   3. 重建随包运行时树 + typecheck + 单测 + e2e（真实 dsh + 官方认证 Web Host + bridge）；
+#   4. 全绿后：
+#        · 默认（publish=false）→ 推一个 `upstream/dsh-<版本>` 分支并尝试开 PR，等你 review；
+#        · publish=true（手动触发时勾选）→ 打 `v<壳版本>` tag 并**显式 dispatch** build-release.yml
+#          （用 GITHUB_TOKEN 推 tag 不会触发 push 事件，所以必须显式触发）→ 三平台出包 + 发布 Release，
+#          已装用户端由 electron-updater 自动更新。
+#
+# 只在版本号层面自动化的部分：如果官方组合树/宿主 API 有破坏性变化，第 3 步的 e2e 会失败（不会发版），
+# 那种情况需要人工改 packages/host 或 packages/bridge 源码；`DESKTOP_HOST_PROTOCOL_VERSION`
+# （src/main/hostProcess.ts + scripts/setup-runtime.mjs 两处）也只在 IPC 契约变化时才需要手动 +1。
+on:
+  schedule:
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: '同步并验证后直接打 tag 出包（不勾 = 只开 PR 等审）'
+        type: boolean
+        default: false
+      version:
+        description: '指定目标 dsh 版本（留空 = 自动取 npm 最高版本）'
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  # 打 tag 用 GITHUB_TOKEN 推**不会**触发 build-release.yml（GitHub 会忽略 token 产生的 push 事件），
+  # 所以出包那一步要显式 dispatch，需要 actions: write。
+  actions: write
+
+# 同一时间只跑一个巡检（避免两次 run 各自建分支/抢 tag）
+concurrency:
+  group: upstream-dsh
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install deps
+        run: npm ci
+
+      - name: 检测上游最高版本
+        id: upstream
+        shell: pwsh
+        # --check 在“有新版本”时退出码 10（方便本地脚本/人判断）；CI 里这不是失败，
+        # 输出已经写进 $GITHUB_OUTPUT，后续步骤据此决定要不要同步。
+        continue-on-error: true
+        run: node scripts/upstream-dsh.mjs --check --github-output
+
+      - name: 写运行摘要（无更新时也能一眼看到）
+        # 用 bash：`${{ … }}` 由 GitHub 在交给 shell 之前替换好，双引号里的 \` 只是字面反引号；
+        # 不用 pwsh 是为了避开 PowerShell 里 `${…}` 的变量展开语法（`${{ … }}` 会被它误解）。
+        shell: bash
+        run: |
+          {
+            echo '## upstream-dsh'
+            echo ''
+            echo "- 当前绑定：\`${{ steps.upstream.outputs.current }}\`"
+            echo "- npm 最高版本：\`${{ steps.upstream.outputs.highest }}\`（latest dist-tag：\`${{ steps.upstream.outputs.latest_tag }}\`）"
+            echo "- 是否有更新：\`${{ steps.upstream.outputs.update }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cache dsh runtime
+        if: ${{ steps.upstream.outputs.update == 'true' || inputs.version != '' }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            resources/dsh
+            resources/runtime
+            resources/.dsh-runtime-cache.json
+          key: dsh-runtime-${{ runner.os }}-${{ runner.arch }}-x64-${{ hashFiles('scripts/setup-runtime.mjs', 'packages/bridge/package.json', 'packages/host/package.json', 'package.json') }}
+          restore-keys: |
+            dsh-runtime-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: 同步版本号（pin + 壳版本）
+        if: ${{ steps.upstream.outputs.update == 'true' || inputs.version != '' }}
+        shell: pwsh
+        run: |
+          $args = @('scripts/upstream-dsh.mjs', '--sync', '--write')
+          if ('${{ inputs.version }}' -ne '') { $args += @('--version', '${{ inputs.version }}') }
+          node @args
+
+      - name: 重建运行时 + 质量门禁
+        if: ${{ steps.upstream.outputs.update == 'true' || inputs.version != '' }}
+        run: |
+          node scripts/build.mjs
+          node scripts/make-icons.mjs
+          node scripts/setup-runtime.mjs
+          npx tsc --noEmit
+          node --test
+          node scripts/verify-runtime.mjs
+
+      - name: E2E（真实 dsh + 官方 Web Host + bridge）
+        if: ${{ steps.upstream.outputs.update == 'true' || inputs.version != '' }}
+        run: node scripts/e2e-bridge.mjs
+
+      - name: 提交结果（PR 或直接出包）
+        if: ${{ steps.upstream.outputs.update == 'true' || inputs.version != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          $dsh = $pkg.dshRuntime.dsh
+          $ver = $pkg.version
+          # 升级前的 pin（HEAD 还是 master 的提交，尚未 commit 本次改动）
+          $prev = (git show HEAD:package.json | ConvertFrom-Json).dshRuntime.dsh
+          $branch = "upstream/dsh-$dsh"
+          git config user.name 'dsh-upstream-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git checkout -b $branch
+          git add package.json packages/host/package.json
+          git commit -m "chore(upstream): 升级官方 harness 到 $dsh（壳 v$ver）"
+          if ('${{ inputs.publish }}' -eq 'true') {
+            git tag "v$ver"
+            git push origin $branch
+            git push origin "v$ver"
+            # 显式触发三平台出包（build-release 的 workflow_dispatch 支持 inputs.tag）
+            gh workflow run build-release.yml --ref $branch -f tag="v$ver"
+            if ($LASTEXITCODE -eq 0) {
+              "已打 tag \`v$ver\` 并触发 build-release：三平台出包 + 发布 Release（已装用户随后自动更新）。" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            } else {
+              "tag \`v$ver\` 已推送，但自动触发 build-release 失败——请手动触发（workflow_dispatch，tag 填 v$ver）。" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            }
+          } else {
+            git push -u origin $branch
+            # 单引号字符串：反引号与 $ 都是字面量，不会被 PowerShell 展开
+            $body = @(
+              ('官方 harness 自动巡检发现新版：`' + $prev + '` → `' + $dsh + '`。'),
+              '',
+              '本 PR 由 .github/workflows/upstream-dsh.yml 生成，已通过：',
+              '- 重建随包运行时树（setup-runtime）+ verify:runtime',
+              '- typecheck + 单元测试',
+              '- e2e：真实 dsh + 官方认证 Web Host + bridge 契约',
+              '',
+              ('合并后再打 `v' + $ver + '` tag（或手动触发 build-release）即可出包给用户自动更新。')
+            ) -join "`n"
+            gh pr create --base master --head $branch --title "chore(upstream): 升级到官方 harness $dsh（壳 v$ver）" --body $body
+            if ($LASTEXITCODE -ne 0) {
+              "PR 创建失败（仓库可能未开启 Actions 创建 PR）——请手动对比分支：https://github.com/$env:GITHUB_REPOSITORY/compare/master...$branch" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            }
+          }
