@@ -17,6 +17,9 @@ name: build-release
 #     需要 (MAC_CSC_LINK, MAC_CSC_KEY_PASSWORD, MAC_SIGNING_IDENTITY, MAC_TEAM_ID)
 #     以及一套公证凭据 (APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID)
 #     （或改用 API Key / 钥匙串 profile，见文档）。
+#
+# Actions 基线：checkout / setup-node / cache 一律 ≥ v5（Node 24）。v4 跑在 Node 20 上，
+# GitHub 已于 2025-09 公告弃用并强制到 Node 24（每次运行都会报 annotation）——升级时保持 ≥ v5。
 on:
   push:
     branches:
@@ -38,8 +41,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
       - name: Install deps
@@ -56,14 +59,14 @@ jobs:
     needs: check
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
       - name: Install deps
         run: npm ci
       - name: Cache dsh runtime（命中则跳过 20-30 分钟 npm install）
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             resources/dsh
@@ -87,14 +90,14 @@ jobs:
     # 指向挂着 SafeNet Token 的 self-hosted Windows runner。
     runs-on: ${{ vars.DSH_WINDOWS_RUNNER || 'windows-latest' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
       - name: Install deps
         run: npm install
       - name: Cache dsh runtime（命中则跳过 20-30 分钟 npm install）
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           # setup-runtime 的真实产物（旧路径 resources/dsh-runtime 不存在，缓存从未命中过）
           path: |
@@ -184,14 +187,14 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       DSH_RUNTIME_NODE_ARCH: arm64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
       - name: Install deps
         run: npm install
       - name: Cache dsh runtime（命中则跳过 20-30 分钟 npm install）
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           # setup-runtime 的真实产物（旧路径 resources/dsh-runtime 不存在，缓存从未命中过）
           path: |
@@ -285,14 +288,14 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       DSH_RUNTIME_NODE_ARCH: x64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
       - name: Install deps
         run: npm install
       - name: Cache dsh runtime（命中则跳过 20-30 分钟 npm install）
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           # setup-runtime 的真实产物（旧路径 resources/dsh-runtime 不存在，缓存从未命中过）
           path: |
@@ -378,7 +381,7 @@ jobs:
     continue-on-error: true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Download dmg + blockmap assets
         env:
           GH_TOKEN: ${{ github.token }}

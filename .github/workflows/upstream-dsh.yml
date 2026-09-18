@@ -16,6 +16,8 @@ name: upstream-dsh
 # 只在版本号层面自动化的部分：如果官方组合树/宿主 API 有破坏性变化，第 3 步的 e2e 会失败（不会发版），
 # 那种情况需要人工改 packages/host 或 packages/bridge 源码；`DESKTOP_HOST_PROTOCOL_VERSION`
 # （src/main/hostProcess.ts + scripts/setup-runtime.mjs 两处）也只在 IPC 契约变化时才需要手动 +1。
+#
+# Actions 基线：checkout / setup-node / cache 一律 ≥ v5（Node 24），理由同 build-release.yml。
 on:
   schedule:
     - cron: '0 20 * * *'
@@ -45,11 +47,11 @@ jobs:
   sync:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
@@ -79,7 +81,7 @@ jobs:
 
       - name: Cache dsh runtime
         if: ${{ steps.upstream.outputs.update == 'true' || inputs.version != '' }}
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             resources/dsh
