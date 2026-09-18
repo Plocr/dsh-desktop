@@ -49,7 +49,7 @@ jobs:
       - name: Test
         run: npm test
 
-  # 端到端契约（真实随包 dsh + Host 字节管道 + bridge 插件）：Windows runner。
+  # 端到端契约（真实随包 dsh + 官方认证 Web Host + bridge 插件）：Windows runner。
   # 这条链路是"插件/壳在真实运行时树里静默失灵"唯一能被挡住的门，PR 也要跑；
   # 运行时树命中上面的缓存时只要几分钟（首次或缓存失效另算）。
   e2e:

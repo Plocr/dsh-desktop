@@ -53,7 +53,7 @@ export function redactBridgeLine(line: string): string {
   return line.replace(/([?&]token=)[^\s&"']+/gu, '$1<redacted>')
 }
 
-/* ── 会话目录（托盘「最近会话」/ 深链标题） ─────────────────────────── */
+/* ── 会话目录（深链标题缓存） ───────────────────────────────────────── */
 
 export interface BridgeSessionEntry {
   id: string
@@ -91,14 +91,19 @@ export function sessionIndexFrom(payload: unknown): SessionIndex {
   return index
 }
 
-/** 最近会话（新→旧），用于托盘菜单；无 createdAt 的排在最后。 */
+/**
+ * 最近会话（新→旧，无 createdAt 的排最后）。
+ *
+ * ⚠ 0.8.2 起**没有生产消费者**：托盘不再列「最近会话」（D39）。保留它是明确的
+ * 界面扩展面（未来的会话列表/首页），有单测锁语义；下次审查若仍无人用就直接删。
+ */
 export function recentSessions(index: SessionIndex, limit = 8): BridgeSessionEntry[] {
   return [...index.values()]
     .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
     .slice(0, Math.max(0, limit))
 }
 
-/** 托盘/深链显示用标题：无标题时退回 id 前 8 位。 */
+/** 会话显示用标题：无标题时退回 id 前 8 位（同上：目前只有测试在用）。 */
 export function sessionLabel(entry: BridgeSessionEntry | undefined, id: string): string {
   if (entry?.title) return entry.title
   return id.length > 8 ? `${id.slice(0, 8)}…` : id
@@ -156,7 +161,12 @@ export function withoutApproval(index: ApprovalIndex, payload: unknown): Approva
   return next
 }
 
-/** 最新一条待审批（托盘点击"去处理"用）。 */
+/**
+ * 最新一条待审批。
+ *
+ * ⚠ 0.8.2 起**没有生产消费者**：托盘不再列「待审批」（D39），审批提醒改由系统通知
+ * 直达会话。同样作为扩展面保留（有单测），下次审查若仍无人用就直接删。
+ */
 export function latestApproval(index: ApprovalIndex): PendingApproval | null {
   let last: PendingApproval | null = null
   for (const entry of index.values()) last = entry

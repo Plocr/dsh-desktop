@@ -154,8 +154,9 @@ cordis.patch.yml  []（用户补丁层，壳不写它）
   `desktopProfileContext`），其中 `packageManager` 是随包 Node + 随包 pnpm 入口。官方 `dsh-base` 的
   `plugin-manager` 与 `hmr` 两行据此激活，于是 **Web 侧边栏「插件」页与 `plugin_manager` 工具在本壳里
   原生可用**：安装/启停/卸载、`inspect` 预检、安装日志流、失败回滚、待批准依赖脚本都由官方管理器负责。
-  启动层序统一由官方 `readProfilePatches` 计算，本壳自有的 patch 层（`config/desktop.cordis.patch.yml`
-  + agent 预设根）放进 `profileContext.overlays`，保证插件管理器/HMR 重算时与启动时逐层一致。
+  启动层序完全由官方计算：每个 bundle 的 `dsh.bundle.patch` → profile 的 `cordis.patch.yml`，
+  **本壳不再带任何私有 patch 层**（D38 之后 Host 以 `patchFiles: []` 启动，与官方 desktop-host 同形；
+  曾经的 `config/desktop.cordis.patch.yml` 与 overlay 注入已随该轮删除，插件管理器/HMR 与启动层序自然一致）。
 - **唯一管理入口**：插件管理只有 Web 侧边栏「插件」页（官方共享管理器），**托盘没有插件入口**——
   0.8.2 起连「在插件页管理（官方）…」也删了（D39），托盘只留「进入安全模式」这个原生恢复动作。
   壳**不再**维护自己的插件列表、启停开关、安装/卸载对话框与 pnpm 事务（曾经的 `pluginTransactions.ts` 已删除）。

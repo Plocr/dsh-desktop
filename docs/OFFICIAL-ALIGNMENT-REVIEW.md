@@ -64,7 +64,7 @@
 | P0-1 | 绑定运行时升到 `0.1.6-alpha.2`（与官方 Desktop 同版），随包闭包从此带 `dsh-plugin-manager` / `dsh-hmr` / `client-ui-plugin-manager` | `package.json`（`dshRuntime.dsh`）、`packages/host/package.json` |
 | P0-2 | Host 构造官方 `ProfileContext` 并在 boot 时 `provide('profileContext', …)`；`packageManager` = 随包 Node + 随包 pnpm 入口（`--expose-internals`，`PATH` 前缀指向随包 Node）；壳把 `runtime.pnpmEntry` 经 `--pnpm` 传给 Host | `packages/host/src/index.ts`、`src/main/hostProcess.ts`、`src/main/host.ts`、`src/main/index.ts` |
 | P0-2（就绪信号） | 补 `appReady` 服务（与官方 `dsh/profile-boot` 的 `createAppReady` 同语义，树安定后 `commit`）：`dsh-hmr` 在 `profileContext` 在场时会硬依赖它，缺了会以 `Profile HMR requires application readiness` 直接让组合树启动失败——这是"只加 profileContext"跑不起来的原因 | `packages/host/src/index.ts` |
-| P0-2（层序一致性） | 启动层序改由官方 `readProfilePatches(binName, profileContext)` 计算，自有覆盖（`desktop.cordis.patch.yml` + agent 预设根）改放进 `profileContext.overlays`——插件管理器/HMR 重算 patch 时与本进程启动层序逐层一致 | `packages/host/src/index.ts` |
+| P0-2（层序一致性） | 启动层序改由官方 `readProfilePatches(binName, profileContext)` 计算，自有覆盖（`desktop.cordis.patch.yml` + agent 预设根）改放进 `profileContext.overlays`——插件管理器/HMR 重算 patch 时与本进程启动层序逐层一致。**⚠ 已被第三轮取代**（见 §7.1：Host 现在 `patchFiles: []`，本壳不再有任何私有 patch 层，该文件已删除） | `packages/host/src/index.ts` |
 | P0-3 | 托盘「桌面插件」只留「在插件页管理（官方）…」+ 安全模式；**自研插件管理整体删除**（见 §6） | `src/main/tray.ts`、`src/main/index.ts` |
 | P1-1 | 安装/升级失败回滚 `package.json` + `pnpm-lock.yaml` 快照、待批准脚本「允许并重试」、`.plugin-manager/logs` 诊断——这些语义现在**全部由官方插件管理器提供**（壳侧实现已随 §6 删除） | 官方 `dsh-plugin-manager`（Host 进程内） |
 | P1-2 | 启动期只做失效条目清理（`pruneStaleProfileBundles`），绝不重新启用用户停用的组合包；移除启动期按 `settings.disabledPlugins` 强制挂载的循环 | `src/main/pluginfs.ts`、`src/main/index.ts` |

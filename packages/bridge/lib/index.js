@@ -652,7 +652,7 @@ export function apply(ctx, config = {}) {
     if (safe(() => event?.type, null) === 'session/title') markSessionsChanged()
   })
 
-  // 会话生命周期：新建/结束都要让壳的会话目录跟上（托盘「最近会话」、深链标题）
+  // 会话生命周期：新建/结束都要让壳的会话目录跟上（深链标题缓存；0.8.2 起托盘不再列最近会话）
   ctx.on('session/created', () => markSessionsChanged())
   ctx.on('session/disposed', () => markSessionsChanged())
 

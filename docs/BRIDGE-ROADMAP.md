@@ -1,6 +1,6 @@
 # dsh-desktop-bridge：审查结论与迭代计划
 
-版本：1.0 ｜ 日期：2026-09-15 ｜ 对应代码：`packages/bridge@0.4.0`、壳 `0.7.19`（未 bump）
+版本：1.1 ｜ 日期：2026-09-18（托盘部分随 0.8.2 重设计更新）｜ 对应代码：`packages/bridge@0.4.0`、壳 `0.8.2`
 
 本文覆盖三件事：**（1）桥接插件的现状契约**（谁在用、谁没人用）、**（2）本轮审查发现的缺陷与修复**（含证据与验证方式）、**（3）下一阶段的迭代计划**（每条含理由、验收标准与代价）。设计层面的既定边界见 `DESIGN.md`（D25/D30）。
 
@@ -12,14 +12,14 @@ bridge 是**壳 ↔ harness 的唯一通道**：插件跑在 Host 进程内的 d
 
 | 方向 | 名称 | 谁在用 | 备注 |
 | --- | --- | --- | --- |
-| 推送 | `jobs.changed` | 壳：任务栏徽标 + 托盘 | 壳据此重算运行中任务数（跨会话聚合按 id 去重） |
+| 推送 | `jobs.changed` | 壳：任务栏徽标 | 壳据此重算运行中任务数（跨会话聚合按 id 去重）；0.8.2 起托盘不再显示任务数 |
 | 推送 | `job.done` | 壳：系统通知 | 关闭通知时静默 |
-| 推送 | `approval.asked` | 壳：系统通知（**点击直达会话**）+ 托盘「待审批」 | 带 `sessionId/requestId/toolName` |
-| 推送 | `approval.decided` | 壳：待审批出环 | 刷新托盘「待审批：N」 |
-| 推送 | `sessions.changed` | 壳：托盘「最近会话」+ 深链标题缓存 | 去抖 250ms + 单飞合并；与快照同形状（全量目录，**上限 200 条**：live 全留 + 最近持久化，带 `truncated`） |
+| 推送 | `approval.asked` | 壳：系统通知（**点击直达会话**）+ 待审批环 | 带 `sessionId/requestId/toolName`；0.8.2 起托盘不再列「待审批」（通知仍直达会话） |
+| 推送 | `approval.decided` | 壳：待审批环出环 | 环用于快照对齐与去重 |
+| 推送 | `sessions.changed` | 壳：深链标题缓存（`dsh://session/<id>`） | 去抖 250ms + 单飞合并；与快照同形状（全量目录，**上限 200 条**：live 全留 + 最近持久化，带 `truncated`）；0.8.2 起托盘不再列「最近会话」 |
 | 推送 | `bridge.diag` | 壳：日志 + 托盘「桥接：…」状态行 | 插件诊断（D33） |
 | RPC | `ping` | 壳：连接自检 | |
-| RPC | `workspace.register` | 壳：「选择工作区」 | 不重启 Host 即可注册 |
+| RPC | `workspace.register` | 壳页面 `dsh:pick-workspace`（原生选目录后注册） | 不重启 Host 即可注册；托盘不再有这个入口 |
 | RPC | `session.resolve` | 壳：`dsh://session/<id>` 深链（目录 miss 时） | live 优先，持久化兜底 |
 | RPC | `dashboard.snapshot` | 壳：连接/重连后整份对齐（徽标 + 会话目录 + 待审批） | |
 | RPC | `billing.balance` | 壳：API key 自检（D35） | 桥接不可用时壳回退本地文件 |

@@ -390,7 +390,9 @@ function installDshTree(target) {
   runNpmInstall(dshDir, [])
   const dist = path.join(dshDir, 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist', 'index.html')
   if (!existsSync(dist)) throw new Error(`frontend dist missing: ${dist} —— dsh-web-app 无法 serve UI`)
-  for (const rel of ['lib/index.js', 'config/desktop.cordis.patch.yml']) {
+  // Host 只随包一个构建产物：桌面补丁层已在第三轮移除（Host 以 `patchFiles: []` 启动，
+  // 与官方 desktop-host 同形），config/ 目录不再存在——别在这里加回死文件检查。
+  for (const rel of ['lib/index.js']) {
     const f = path.join(dshDir, 'node_modules', 'dsh-desktop-host', rel)
     if (!existsSync(f)) throw new Error(`missing Host runtime file: ${f}`)
   }
