@@ -1,7 +1,9 @@
 node_modules/
 dist/
-# electron-builder 产物（release/ 为标准输出；release-final/ 等变体一并忽略）
-release*/
+# electron-builder 产物（仓库根的 release/ 为标准输出；release-final/ 等变体一并忽略）
+# 注意钉在仓库根：`release*/` 不带前导斜杠会连 docs/release-notes/ 一起吃掉——
+# 结果就是"更新日志写了但没进提交"，Release 只能退回 GitHub 自动生成的 notes。
+/release*/
 # 随包运行时（setup-runtime.mjs 生成：便携 Node + pnpm / dsh 闭包 + 第一方包）
 resources/dsh/
 resources/runtime/
