@@ -61,10 +61,33 @@ jobs:
       - name: 检测上游最高版本
         id: upstream
         shell: pwsh
-        # --check 在“有新版本”时退出码 10（方便本地脚本/人判断）；CI 里这不是失败，
-        # 输出已经写进 $GITHUB_OUTPUT，后续步骤据此决定要不要同步。
-        continue-on-error: true
-        run: node scripts/upstream-dsh.mjs --check --github-output
+        # `--check` 约定：0 = 已是最新，10 = 有新版本（本地脚本/人据此判断）。
+        # 但 Windows runner 的 shell 是 pwsh，而 PowerShell 在进程退出时会把**任何非零**
+        # 原生退出码折叠成 1 —— 「有新版本」在 CI 里因此长得和真失败一样：每次有更新的
+        # 运行都挂一条红色 `##[error]Process completed with exit code 1.` 注解。
+        # 那种噪音会让下一个人把真的失败当成同一条已知噪音划过去。
+        #
+        # 也不能用 `continue-on-error: true` 糊（原来就是这么写的）：它同样吞掉**真失败**，
+        # 而 registry 不可达时 update 输出为空 → 下游所有步骤的条件都不成立 → 巡检静默
+        # 空转还显示成功，无人值守的意义就没了。
+        #
+        # 所以在这里自己归一：10 归 0（有新版本是正常结果），只有真非零才让它红。
+        # 注意 `$LASTEXITCODE` 在 pwsh **进程内部**仍是 10（折叠只发生在进程退出时），
+        # 所以这一步能准确区分二者。
+        run: |
+          node scripts/upstream-dsh.mjs --check --github-output
+          $code = $LASTEXITCODE
+          if ($code -eq 0) {
+            Write-Output '上游已是最新（exit 0），本次巡检无操作。'
+            exit 0
+          }
+          if ($code -eq 10) {
+            Write-Output '上游有新版本（exit 10）——正常结果，继续同步。'
+            exit 0
+          }
+          "上游版本检测失败（exit $code）：registry 不可达或脚本出错。**不能当成「无更新」**——本次巡检终止，没有做任何改动。" |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          exit $code
 
       - name: 写运行摘要（无更新时也能一眼看到）
         # 用 bash：`${{ … }}` 由 GitHub 在交给 shell 之前替换好，双引号里的 \` 只是字面反引号；
