@@ -13,10 +13,12 @@ export interface BridgeTarget {
   token: string
 }
 
-/** `authed` 回执：协议版本 + 插件最新诊断（壳用于同代判断与托盘状态）。 */
+/** `authed` 回执：协议版本 + 插件最新诊断（壳用于同代判断与托盘状态）+ 账号最新状态。 */
 export interface BridgeHello {
   protocolVersion: number | null
   diag: unknown
+  /** 登录状态（重连补齐：断线期间可能已进入等待浏览器/已失败）。 */
+  account: unknown
 }
 
 export interface BridgeHandlers {
@@ -150,11 +152,12 @@ export class BridgeClient {
         this.connected = true
         // 插件回执统一包成 {type, payload}（encode()）：版本号/诊断都在 payload 里。
         // 版本 = 对面那半边的协议版本（不一致由 index.ts 报警并标注在托盘）。
-        const payload = (msg as { payload?: { protocolVersion?: unknown; diag?: unknown } }).payload
+        const payload = (msg as { payload?: { protocolVersion?: unknown; diag?: unknown; account?: unknown } }).payload
         const reported = payload?.protocolVersion
         const hello: BridgeHello = {
           protocolVersion: typeof reported === 'number' && Number.isInteger(reported) ? reported : null,
           diag: payload?.diag ?? null,
+          account: payload?.account ?? null,
         }
         this.handlers.onConnected(true, hello)
         log('info', 'bridge connected')

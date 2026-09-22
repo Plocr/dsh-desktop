@@ -5,6 +5,7 @@ import {
   apply,
   approvalEventOf,
   jobsApiGeneration,
+  minimalAccountState,
   uniqueJobs,
   tokenMatches,
 } from '../packages/bridge/lib/index.js'
@@ -28,6 +29,7 @@ import { WebSocket } from '../packages/bridge/vendor/ws/wrapper.mjs'
 /** 假 ctx：只实现插件用到的最小面（get / on / 事件触发 / dispose）。 */
 function fakeCtx(services = {}) {
   const listeners = new Map()
+  const disposers = []
   return {
     services,
     get: (name) => services[name],
@@ -40,8 +42,15 @@ function fakeCtx(services = {}) {
     emit(event, ...args) {
       for (const fn of [...(listeners.get(event) ?? [])]) fn(...args)
     },
+    /** cordis 的 `ctx.effect`：立即执行并记住它返回的撤销器（dispose 时一并跑）。 */
+    effect(fn) {
+      const disposer = fn()
+      if (typeof disposer === 'function') disposers.push(disposer)
+      return () => {}
+    },
     dispose() {
       for (const fn of [...(listeners.get('dispose') ?? [])]) fn()
+      for (const disposer of disposers.splice(0)) disposer()
     },
     hasListener(event, fn) {
       return (listeners.get(event) ?? []).includes(fn)
@@ -55,6 +64,34 @@ function captureStdout() {
   const orig = console.log
   console.log = (...args) => lines.push(args.map(String).join(' '))
   return { lines, restore: () => { console.log = orig } }
+}
+
+/**
+ * 账号服务 stub：真实实现是长跑的事件流（`watch(signal)` 异步生成器）。
+ * 这里用「队列 + 等待者」模拟同一个接口，测试可以随时 push 一条新状态。
+ */
+function accountStub() {
+  const queue = []
+  const waiters = []
+  return {
+    push(state) {
+      const waiter = waiters.shift()
+      if (waiter) waiter(state)
+      else queue.push(state)
+    },
+    async *watch(signal) {
+      while (!signal.aborted) {
+        const next = queue.length > 0
+          ? queue.shift()
+          : await new Promise((resolve) => {
+              waiters.push(resolve)
+              signal.addEventListener('abort', () => resolve(null), { once: true })
+            })
+        if (next === null || signal.aborted) return
+        yield next
+      }
+    },
+  }
 }
 
 const DISCOVERY_PREFIX = 'dsh desktop: '
@@ -741,6 +778,86 @@ test('sessions.changed：目录超过上限时截断（live 全留 + 最近持�
     const pushed = await waitFor(() => client.messages.find((m) => m.type === 'sessions.changed'), 'sessions.changed')
     assert.equal(pushed.payload.truncated, true)
     assert.equal(pushed.payload.sessions.length, 200)
+  } finally {
+    client.ws.close()
+    ctx.dispose()
+    stdout.restore()
+  }
+})
+
+/* ── 账号登录状态推送（官方「左下角登录」的原生适配面） ─────────────── */
+
+test('minimalAccountState：只带壳需要的字段（凭据/资料一律不过桥）', () => {
+  const minimal = minimalAccountState({
+    status: 'credential-stored',
+    token: 'secret',
+    attempt: {
+      id: 'a1',
+      phase: 'waiting-browser',
+      authorizeUrl: 'https://platform.deepseek.com/dsh/authorize?x=1',
+      expiresAt: 123,
+      errorCode: undefined,
+      token: 'secret',
+      user: { email: 'a@b.c' },
+    },
+  })
+  assert.deepEqual(minimal, {
+    status: 'credential-stored',
+    attempt: { id: 'a1', phase: 'waiting-browser', authorizeUrl: 'https://platform.deepseek.com/dsh/authorize?x=1', expiresAt: 123 },
+  })
+  assert.equal(minimalAccountState({}), null)
+  assert.equal(minimalAccountState({ attempt: { phase: 'waiting-browser' } }), null)
+})
+
+test('account.changed：账号服务在场时把登录阶段推给壳，认证快照带上最新状态', async () => {
+  const account = accountStub()
+  const { ctx, target, stdout } = await startBridge({ services: { ...harnessStub(), deepseekAccount: account } })
+  const client = openClient(target.port)
+  try {
+    await client.open
+    client.ws.send(JSON.stringify({ type: 'auth', token: target.token, protocolVersion: BRIDGE_PROTOCOL_VERSION }))
+    const authed = await waitFor(() => client.messages.find((m) => m.type === 'authed'), 'authed')
+    assert.equal(authed.payload.account, null, '尚未有状态时快照为空')
+
+    account.push({
+      status: 'signed-out',
+      attempt: { id: 'a1', phase: 'waiting-browser', authorizeUrl: 'https://platform.deepseek.com/dsh/authorize?x=1' },
+    })
+    const pushed = await waitFor(() => client.messages.find((m) => m.type === 'account.changed'), 'account.changed')
+    assert.deepEqual(pushed.payload, {
+      status: 'signed-out',
+      attempt: { id: 'a1', phase: 'waiting-browser', authorizeUrl: 'https://platform.deepseek.com/dsh/authorize?x=1' },
+    })
+
+    // 重连（新客户端）时快照必须带上最新状态：断线期间可能已经进入等待浏览器/已经失败
+    const second = openClient(target.port)
+    try {
+      await second.open
+      second.ws.send(JSON.stringify({ type: 'auth', token: target.token, protocolVersion: BRIDGE_PROTOCOL_VERSION }))
+      const hello = await waitFor(() => second.messages.find((m) => m.type === 'authed'), 'authed#2')
+      assert.equal(hello.payload.account.attempt.id, 'a1')
+      assert.equal(hello.payload.account.status, 'signed-out')
+    } finally {
+      second.ws.close()
+    }
+  } finally {
+    client.ws.close()
+    ctx.dispose()
+    stdout.restore()
+  }
+})
+
+test('账号服务缺失：只打一条 stdout（不进 diag，免得顶掉托盘的桥接状态行）', async () => {
+  const { ctx, target, stdout } = await startBridge({ services: harnessStub({ jobs: jobsStub().service }) })
+  const client = openClient(target.port)
+  try {
+    await client.open
+    client.ws.send(JSON.stringify({ type: 'auth', token: target.token, protocolVersion: BRIDGE_PROTOCOL_VERSION }))
+    const authed = await waitFor(() => client.messages.find((m) => m.type === 'authed'), 'authed')
+    // 最近一条诊断仍是 jobs 的（不是 account.absent）
+    assert.equal(authed.payload.diag.code, 'jobs.present')
+    assert.equal(authed.payload.account, null)
+    assert.ok(stdout.lines.some((l) => l.includes('account.absent')))
   } finally {
     client.ws.close()
     ctx.dispose()

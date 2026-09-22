@@ -9,7 +9,9 @@
  * fd3/fd4 字节管道（`--port 0` 无监听端口形态）已随本次迁移删除。
  *
  * 本文件与官方的差异只有两点，都是本壳的发行约束：
- *  1. profile 名是本壳自有的 `dsh-workbench`（官方用保留名 `desktop`）；
+ *  1. profile **目录**是本壳自有的 `dsh-workbench`（官方用保留名 `desktop`，其 CLI 会硬拒绝
+ *     该名），但交给启动器的 **profile 身份名仍是 `desktop`**——desktop-only 的官方行按它开关，
+ *     见下面 `DESKTOP_PROFILE_IDENTITY` 的说明；
  *  2. `packageManager` 指向**随包 pnpm 与桌面自有 store**（离线 + 与既有 profile 的
  *     node_modules 保持同一个 store，避免 pnpm 的 ERR_PNPM_UNEXPECTED_STORE）。
  *
@@ -24,8 +26,18 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
-/** 本壳 profile 名；必须与 `src/main/desktopProfile.ts` 的 DESKTOP_PROFILE 一致。 */
-const DESKTOP_PROFILE_NAME = 'dsh-workbench'
+/**
+ * 交给官方启动器的 **profile 身份名**：官方桌面端在这里报 `desktop`，而 `desktop` 这个名字
+ * 是官方组合树里若干 desktop-only 行的开关（`dsh-base` 的
+ * `deepseek-account.desktopPlatform`、`dsh-web-app` 的 `ui-sidebar-browser`）。
+ *
+ * 本壳的 profile **目录**是自有名 `dsh-workbench`（见 `resolvedProfile` 传入的
+ * `loadProfileDirectory(...)` 结果；官方 CLI 会硬拒绝 `--profile desktop`，而那是
+ * 官方 Electron 应用的保留名）。目录与身份分开之后：盘上不占用官方保留目录，
+ * 组合树里仍是**桌面端**——否则官方账号插件不会带 `x-client-platform: desktop-*`
+ * 请求头（登录会被平台拒绝），桌面侧的浏览器标签也不会挂载。
+ */
+const DESKTOP_PROFILE_IDENTITY = 'desktop'
 
 /** 官方桌面端使用的 loopback 端口（与 Web 的 3080 分开）。 */
 const DEFAULT_PORT = 19387
@@ -135,7 +147,7 @@ export async function runDesktopHost(
   const profile = loadProfileDirectory('dsh', absoluteProject, installAnchor)
   const application = runProfile({
     environment: loadLayeredEnv('dsh'),
-    profile: DESKTOP_PROFILE_NAME,
+    profile: DESKTOP_PROFILE_IDENTITY,
     // 官方：打包走 runtime（按解析代强制解析），开发走 link（把链接物化进 profile）。
     resolutionMode: options.allowLinkedPackages === true ? 'link' : 'runtime',
     resolvedProfile: { profile, installAnchor },

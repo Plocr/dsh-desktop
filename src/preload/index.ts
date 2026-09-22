@@ -47,6 +47,19 @@ const api = origin === SHELL_ORIGIN ? shellApi : origin === APP_ORIGIN ? appApi 
 if (api) contextBridge.exposeInMainWorld('dshDesktop', api)
 
 /**
+ * 官方桌面端在 preload 里给文档根打 `data-platform`（`apps/desktop/src/preload-platform.ts`），
+ * Web UI 的部分桌面专属样式按它开关（例：账号页/平台页的 macOS 红绿灯留白
+ * `html[data-platform=darwin] …`）。本壳不设的话，桌面版页面会按"非桌面载体"渲染。
+ */
+if (origin === APP_ORIGIN) {
+  const mark = (): void => {
+    document.documentElement.dataset.platform = process.platform
+  }
+  if (document.documentElement) mark()
+  else window.addEventListener('DOMContentLoaded', mark)
+}
+
+/**
  * 工作台的**桌面启动通道**（官方契约）：Web 客户端在 boot 时调用
  * `window.dshDesktopBoot.ready()` 取回 `{ injections, streamBaseUrl }`，
  * 应用注入片段后才真正启动；启动失败调用 `failed(message)` 让壳走原生恢复。

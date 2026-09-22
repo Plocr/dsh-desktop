@@ -15,7 +15,7 @@
  *    （Web 侧边栏「插件」页 / `plugin_manager` 工具），壳只提供 profile 与原生恢复
  *    （安全模式隔离，见 pluginfs.ts）。
  */
-import { app, clipboard, dialog, session, shell, BrowserWindow } from 'electron'
+import { app, clipboard, dialog, nativeTheme, session, shell, BrowserWindow } from 'electron'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -24,6 +24,14 @@ import { initLogger, log, logDirPath } from './logger'
 import { loadSettings, saveSettings, type AppSettings } from './settings'
 import { appResourcesDir, ensureProfile, resolveRuntime, shippedResourcesDir, type RuntimeSpec } from './runtime'
 import { readProfileBundles, pruneStaleProfileBundles, isolateProfileForSafeMode, restoreProfileManifest } from './pluginfs.ts'
+import { repairProfileIfNeeded } from './profileRepair.ts'
+import {
+  accountLoginSteps,
+  accountLoginFailureText,
+  accountStateOf,
+  emptyAccountLoginMemory,
+  type AccountLoginMemory,
+} from './accountLogin.ts'
 import { isSafeMode, recordStartFailure, recordStartSuccess, exitSafeMode, activateSafeMode, SAFE_MODE_THRESHOLD, type SafeModeState } from './safeMode'
 import {
   apiKeyNeedsAttention,
@@ -140,6 +148,11 @@ let pendingDeepLinks: DeepLinkAction[] = []
 /** 桥接连接状态 + 插件诊断（托盘「桥接：…」一行；见 refreshTray）。 */
 let bridgeConnected = false
 let bridgeDiag: BridgeDiag | null = null
+/**
+ * 官方「左下角登录」的壳侧记忆（同一次尝试只开一次浏览器、只在结束时唤回一次窗口）。
+ * 状态本体在 harness 里（PKCE/凭据都在那边），这里只记 attempt id 去过重。
+ */
+let accountLoginMemory: AccountLoginMemory = emptyAccountLoginMemory()
 /** 插件上报的协议版本（null=对面没报）；与本壳常量不一致时托盘标注。 */
 let bridgePeerProtocol: number | null = null
 /** 会话目录（快照 + sessions.changed 增量）：托盘「最近会话」与深链标题都用它。 */
@@ -294,8 +307,10 @@ function reconcilePluginBundles(): void {
       log('info', `safe mode bundles ${isolated ? 'isolated' : 'already isolated'}`)
       return
     }
-    // 只清理失效条目（用户停用的组合包保持停用）
-    pruneStaleProfileBundles(profileDir)
+    // 只清理失效条目（用户停用的组合包保持停用）。
+    // 第二组解析根 = 随包 dsh 树：第一方 bundle（@deepseek-ai/dsh-*）按官方语义
+    // 从「dsh 安装处」解析，不在 profile 的 node_modules 里。
+    pruneStaleProfileBundles(profileDir, runtime === null ? [] : [path.join(runtime.runtimeDir, 'node_modules')])
     log('info', `profile bundles: ${readProfileBundles(profileDir).join(', ') || '(none)'}`)
   } catch (err) {
     log('error', `reconcilePluginBundles failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -871,6 +886,34 @@ async function runApiKeyCheck(): Promise<void> {
   }
 }
 
+/**
+ * 账号登录状态 → 原生动作（官方桌面端同形：`apps/desktop/src/main.ts` 的账号流处理）。
+ *
+ * 壳**不碰凭据**：登录全程在 harness 里（PKCE + 平台回调 + 凭据落盘），
+ * 桥接只把「阶段 / 授权链接 / 失败分类」这几项发过来；这里决定要不要开浏览器、要不要把窗口叫回来。
+ */
+function handleAccountChanged(payload: unknown): void {
+  const state = accountStateOf(payload)
+  if (state === null) return
+  // 主题与官方同源：壳把有效主题写进 nativeTheme.themeSource（见 window.ts），这里读解析结果。
+  const { steps, memory } = accountLoginSteps(state, nativeTheme.shouldUseDarkColors, accountLoginMemory)
+  accountLoginMemory = memory
+  for (const step of steps) {
+    if (step.kind === 'open-browser') {
+      log('info', `account sign-in: opening authorize page in the system browser (attempt ${step.attemptId})`)
+      void shell.openExternal(step.url).catch((err: unknown) => {
+        log('error', `account sign-in: could not open browser: ${err instanceof Error ? err.message : String(err)}`)
+      })
+      continue
+    }
+    // failed / expired：用户此刻多半停在浏览器里，必须把应用唤回前台并给出可读原因
+    const detail = accountLoginFailureText(step)
+    log('error', `account sign-in ${step.reason}: ${detail}`)
+    showWindow()
+    if (settings.notifications) notify('DeepSeek 登录未完成', detail)
+  }
+}
+
 function handleBridgeEventWrapper(type: string, payload: unknown): void {
   if (
     type === 'job.done' ||
@@ -878,9 +921,16 @@ function handleBridgeEventWrapper(type: string, payload: unknown): void {
     type === 'approval.asked' ||
     type === 'approval.decided' ||
     type === 'sessions.changed' ||
+    type === 'account.changed' ||
     type === 'bridge.diag'
   ) {
     log('info', `bridge event: ${type} ${JSON.stringify(payload).slice(0, 300)}`)
+  }
+  // 账号登录（官方「左下角登录」）：桥接在宿主进程内订阅账号状态后推给壳，壳只做两件原生事
+  // （等浏览器阶段用系统浏览器打开授权页一次 / 失败或超时把主窗口唤回前台一次）——与官方桌面端同形。
+  if (type === 'account.changed') {
+    handleAccountChanged(payload)
+    return
   }
   handleBridgeEvent(
     type,
@@ -1151,6 +1201,37 @@ async function main(): Promise<void> {
   runLegacySessionRepair(runtime.dshVersion)
   perf('旧会话修复检查')
 
+  // profile 依赖体检与修复：官方插件管理器的事务失败只回滚清单（`package.json` + 锁文件），
+  // `node_modules` 不回滚；跨版本换 pnpm 主版本（store 换代）时每次包操作都会失败，于是留下
+  // 「声明了却没装上」「装上了清单里没有」这两类不一致——前者让 harness 解不出 bundle，
+  // 后者就是用户看到的插件残留。这里在 Host 起来之前把盘面收敛回清单描述的状态。
+  // 失败不阻塞启动（解析不出来的 bundle 由 reconcilePluginBundles 的解析检查兜住）。
+  try {
+    const repair = await repairProfileIfNeeded({
+      profileDir: desktopProfileDir(),
+      node: runtime.node,
+      pnpmEntry: runtime.pnpmEntry,
+      dshHome: dshHome(),
+      markerFile: path.join(app.getPath('userData'), 'plugin-repair.json'),
+      log: (level, message) => log(level, message),
+      onRepaired: (result) => {
+        // 只有真的动过手才打扰用户（成功/失败都说明白是插件的事）
+        if (!result.installed && result.removed.length === 0) return
+        if (!settings.notifications) return
+        notify(
+          '插件环境已体检',
+          result.installed && !result.installOk
+            ? `依赖重装失败：${result.report.missing.join('、')} 仍不可用（检查网络后重启应用会重试）。`
+            : result.summary,
+        )
+      },
+    })
+    if (repair !== null) log('info', `profile repair: ${repair.summary}`)
+  } catch (err) {
+    log('error', `profile repair failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  perf('profile 依赖体检')
+
   // 插件启停 / 安全模式 → profile 组合
   // 启动期只清理失效条目：bundles 列表由官方插件管理器拥有，不在这里重新启用任何依赖。
   reconcilePluginBundles()
@@ -1249,6 +1330,8 @@ async function main(): Promise<void> {
           return
         }
         bridgePeerProtocol = hello?.protocolVersion ?? null
+        // 重连补齐登录状态（断线期间可能已经进入等待浏览器 / 已经失败）
+        if (hello?.account !== undefined && hello.account !== null) handleAccountChanged(hello.account)
         if (hello?.diag !== undefined && hello.diag !== null) {
           const d = diagOf(hello.diag)
           if (d !== null) {

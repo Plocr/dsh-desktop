@@ -29,6 +29,9 @@ export const name = 'dsh-desktop-bridge'
  * 壳侧同名常量在 `src/main/bridgeEvents.ts`（跨进程契约，有测试锁两边的值一致）。
  * 版本不一致时壳会报错并在托盘标注——profile 层允许用户替换 bundle，
  * 那是不一致唯一可能的来源，必须可诊断而不是"通知时有时无"。
+ *
+ * **加事件类型不必 +1**：壳按 type 分发、不认识的一律忽略（`handleBridgeEventWrapper`），
+ * 所以「新增一类推送」是加法式的；只有**改名或改语义**已存在的字段才需要升版本。
  */
 export const BRIDGE_PROTOCOL_VERSION = 1
 
@@ -127,6 +130,35 @@ export function uniqueJobs(jobs) {
  */
 export function jobsApiGeneration(jobs) {
   return typeof safe(() => jobs?.events?.subscribe, undefined) === 'function' ? 2 : 1
+}
+
+/**
+ * 账号状态 → 壳需要的最小字段（纯函数，可单测）。
+ *
+ * 登录全在 harness 里（PKCE、平台回调、凭据落盘），壳只做两件原生事：
+ * 等待浏览器阶段用**系统浏览器**打开授权页一次、失败/超时把主窗口唤回前台一次
+ * （官方桌面端 `apps/desktop/src/main.ts` 挂在同一条账号状态流上）。
+ * 因此这里只发 `status` 与 attempt 的 `id/phase/authorizeUrl/errorCode/expiresAt`——
+ * **凭据、token、用户资料一律不过桥**（`getProfile`/`getBalance` 由 Web 侧的账号页走 Remote）。
+ *
+ * @returns 可广播的最小状态；负载不是账号状态时返回 null。
+ */
+export function minimalAccountState(state) {
+  if (!state || typeof state !== 'object') return null
+  const status = state.status === 'signed-out' || state.status === 'credential-stored' ? state.status : null
+  const raw = state.attempt
+  let attempt = null
+  if (raw && typeof raw === 'object' && typeof raw.id === 'string' && raw.id !== '' && typeof raw.phase === 'string') {
+    attempt = {
+      id: raw.id,
+      phase: raw.phase,
+      ...(typeof raw.authorizeUrl === 'string' && raw.authorizeUrl !== '' ? { authorizeUrl: raw.authorizeUrl } : {}),
+      ...(typeof raw.errorCode === 'string' && raw.errorCode !== '' ? { errorCode: raw.errorCode } : {}),
+      ...(Number.isFinite(raw.expiresAt) ? { expiresAt: raw.expiresAt } : {}),
+    }
+  }
+  if (status === null && attempt === null) return null
+  return { status, attempt }
 }
 
 /** 常量时间比较 token（本地进程也可能尝试侧信道；长度不同直接判否）。 */
@@ -384,6 +416,9 @@ export function apply(ctx, config = {}) {
       node: process.version,
       uptimeMs: Math.round(process.uptime() * 1000),
       workspaces,
+      // 官方组合树看到的 profile 身份名：desktop-only 行（账号插件 desktopPlatform、
+      // 桌面侧边栏浏览器标签）按它开关，报错名字就会静默降级（真机事故见 D44）。
+      profileIdentity: safe(() => ctx.get('profileContext')?.name ?? null, null),
     }
   }
 
@@ -613,7 +648,13 @@ export function apply(ctx, config = {}) {
           }
           try {
             ws.send(
-              encode('authed', { pid: process.pid, protocolVersion: BRIDGE_PROTOCOL_VERSION, diag: lastDiag }),
+              encode('authed', {
+                pid: process.pid,
+                protocolVersion: BRIDGE_PROTOCOL_VERSION,
+                diag: lastDiag,
+                // 重连补齐：断线期间可能已经进入「等待浏览器」或已经失败，只靠增量会丢掉那一跳
+                account: latestAccount,
+              }),
             )
           } catch {
             /* ignore */
@@ -663,6 +704,54 @@ export function apply(ctx, config = {}) {
   }
 
   /* ── harness 事件 -> 推送 ───────────────────────────────────────────── */
+
+  // 账号登录状态（官方「左下角登录」）：登录本体在 harness（PKCE / 平台回调 / 凭据落盘），
+  // 壳只做两件原生事——等待浏览器时用系统浏览器打开授权页、失败/超时把窗口唤回前台。
+  // 账号服务可能不存在（第三方 profile 没装那一行）→ 只记一条诊断，绝不打断桥接。
+  // 最新一条状态随 `authed` 一起给壳（重连后补上断线期间错过的阶段）。
+  let latestAccount = null
+  const wireAccount = () => {
+    const start = (accountCtx) => {
+      const account = safe(() => accountCtx.get('deepseekAccount'), undefined) ?? safe(() => accountCtx.deepseekAccount, undefined)
+      if (!account || typeof account.watch !== 'function') {
+        // 只打 stdout（壳落盘），**不进 diag**：`diag` 是托盘的桥接状态行，账号行不在场是
+        // 正常组合（第三方 profile 可以没有它），不该把"最近一条诊断"顶成警告。
+        console.log(`[bridge] info account.absent ${JSON.stringify({ hint: '账号服务不可见：登录阶段不会推给壳（登录本身仍可用）' })}`)
+        return
+      }
+      const lifetime = new AbortController()
+      const pump = (async () => {
+        try {
+          for await (const state of account.watch(lifetime.signal)) {
+            if (lifetime.signal.aborted) break
+            const minimal = minimalAccountState(state)
+            if (minimal === null) continue
+            latestAccount = minimal
+            broadcast('account.changed', minimal)
+          }
+        } catch (err) {
+          if (!lifetime.signal.aborted) {
+            console.log(`[bridge] warn account.watch.failed ${JSON.stringify({ message: err instanceof Error ? err.message : String(err) })}`)
+          }
+        }
+      })()
+      const stop = () => {
+        lifetime.abort()
+        return pump.catch(() => undefined)
+      }
+      // 宿主语境走官方 `effect`（插件卸载即撤销）；最小 stub（无 effect）退化成 dispose 钩子。
+      if (typeof accountCtx.effect === 'function') accountCtx.effect(() => stop)
+      else ctx.on('dispose', () => void stop())
+    }
+    // 服务在 apply 阶段未必就绪（与 jobs 同理）：用官方 `inject` 挂「服务出现时再订阅」。
+    try {
+      if (typeof ctx.inject === 'function') ctx.inject(['deepseekAccount'], start)
+      else start(ctx)
+    } catch (err) {
+      // 接线失败只是"登录不推给壳"，绝不能连发现行都不打（否则壳永远连不上桥接）
+      console.log(`[bridge] warn account.wire.failed ${JSON.stringify({ message: err instanceof Error ? err.message : String(err) })}`)
+    }
+  }
 
   // 后台任务：可见集变化（注册/stopping/结算/移除）与单个任务完成。
   // 注意：必须在 Loader 安定后接线——apply 阶段 `jobs` 服务可能尚未就绪。
@@ -782,6 +871,7 @@ export function apply(ctx, config = {}) {
     if (!(await listening)) return
     announced = true
     wireJobs()
+    wireAccount()
     print()
   }
 

@@ -71,15 +71,57 @@ export function readProfileBundles(profileDir: string): string[] {
 }
 
 /**
- * 清理失效条目：`bundles` 里已不再是 profile 依赖的项移出，其余（含用户停用的状态）原样保留。
+ * 解析根：一个 profile bundle 能从哪里被找到。
+ *
+ * harness 自己按「profile `node_modules` → dsh 安装树」两处解析 bundle 名
+ * （官方 `dsh` 的 `cannot resolve profile bundle` 报错原文里就是这两个来源），
+ * 所以壳的对账必须用同一套来源判断，否则会出现「壳认为这项有效、harness 却解不出来」。
+ */
+function bundleResolveRoots(profileDir: string, extraRoots: readonly string[] = []): string[] {
+  return [path.join(profileDir, 'node_modules'), ...extraRoots]
+}
+
+/**
+ * 这个 bundle 名此刻真的能被 harness 解析出来吗。
+ *
+ * 只看 `<root>/<name>/package.json` 是否存在（junction/符号链接同样算存在——
+ * 共享包就是这样链接进 profile 的）。
+ *
+ * **为什么必须查这一步**：`dsh.profile.bundles` 里的条目在 harness 侧是硬依赖——
+ * 解不出来时 0.1.7 之前的 desktop-host 会直接 fatal（→ 壳连续失败 → 误入安全模式），
+ * 0.1.7 起退化成一行 stderr 警告（插件静默缺席）。两种情况都不是用户想要的，
+ * 而「声明了依赖、包却没装上」（卸载/回滚只还原了 `package.json`，`node_modules` 没跟上）
+ * 正是产生这种条目的典型路径。
+ */
+export function isBundleResolvable(
+  name: string,
+  profileDir: string,
+  extraRoots: readonly string[] = [],
+): boolean {
+  for (const root of bundleResolveRoots(profileDir, extraRoots)) {
+    if (existsSync(path.join(root, ...name.split('/'), 'package.json'))) return true
+  }
+  return false
+}
+
+/**
+ * 清理失效条目：`bundles` 里**已不再是 profile 依赖**或**已经解析不出来**的项移出，
+ * 其余（含用户停用的状态）原样保留。
  *
  * **绝不激活**任何依赖——`dsh.profile.bundles` 是插件启停的唯一事实来源，官方插件管理器
  * 用「关闭 = 移出列表、保留依赖」实现停用；启动时按依赖重新塞回列表，等于把用户停用的
  * 组合包在下次启动悄悄打开。安装新组合包后的启用由官方管理器自己完成。
  *
+ * 解析检查是 0.8.5 补上的（见 `isBundleResolvable`）：只按依赖判断会漏掉
+ * 「依赖声明还在、包已不在盘上」这一档，而它恰好是 harness 报
+ * `cannot resolve profile bundle …` 的唯一来源。移出列表不会卸载任何东西
+ * （依赖与 `node_modules` 原样保留），插件在官方「插件」页里仍可见、可重装/重新启用。
+ *
+ * @param profileDir - 桌面 profile 目录。
+ * @param extraRoots - 额外解析根（壳传随包 dsh 树的 `node_modules`：第一方 bundle 在那里）。
  * @returns 清理后的 bundles 列表。
  */
-export function pruneStaleProfileBundles(profileDir: string): string[] {
+export function pruneStaleProfileBundles(profileDir: string, extraRoots: readonly string[] = []): string[] {
   const manifest = readProfileManifestLike(profileDir)
   if (manifest === null) return readProfileBundles(profileDir)
   const bundles = [...(manifest.dsh?.profile?.bundles ?? [])]
@@ -87,7 +129,7 @@ export function pruneStaleProfileBundles(profileDir: string): string[] {
   let changed = false
   for (const name of [...bundles]) {
     if (BUILTIN_BUNDLES.has(name)) continue
-    if (!(name in dependencies)) {
+    if (!(name in dependencies) || !isBundleResolvable(name, profileDir, extraRoots)) {
       bundles.splice(bundles.indexOf(name), 1)
       changed = true
     }

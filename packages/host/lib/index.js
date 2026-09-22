@@ -6,7 +6,7 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { loadLayeredEnv, loadProfileDirectory } from "@deepseek-ai/dsh-app-boot";
 import { runProfile } from "@deepseek-ai/dsh/profile-boot";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
-var DESKTOP_PROFILE_NAME = "dsh-workbench";
+var DESKTOP_PROFILE_IDENTITY = "desktop";
 var DEFAULT_PORT = 19387;
 var PNPM_STATE_DIR = join("desktop", "pnpm");
 function desktopPackageManager(pnpmEntry) {
@@ -65,7 +65,7 @@ async function runDesktopHost(runtimeDir, projectDir, options = {}) {
   const profile = loadProfileDirectory("dsh", absoluteProject, installAnchor);
   const application = runProfile({
     environment: loadLayeredEnv("dsh"),
-    profile: DESKTOP_PROFILE_NAME,
+    profile: DESKTOP_PROFILE_IDENTITY,
     // 官方：打包走 runtime（按解析代强制解析），开发走 link（把链接物化进 profile）。
     resolutionMode: options.allowLinkedPackages === true ? "link" : "runtime",
     resolvedProfile: { profile, installAnchor },

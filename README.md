@@ -36,12 +36,12 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（官方 runProf
 | Web UI 远端流 | 官方 WebSocket mux：客户端连 `ws://127.0.0.1:<hostPort>`，主进程按官方方式补 `Origin`/`cookie`；局域网/浏览器版门面额外做 WS 升级代理（同样过设备授权 + token 门禁） |
 | 运行时 | `extraResources` 直接随包两棵树：`resources/runtime`（便携 Node + pnpm）与 `resources/dsh`（`npm install @deepseek-ai/dsh` 的完整生产闭包 + 第一方包），**不再首启解压**；`resources/dsh/desktop-runtime.json` 记录每个文件的 sha256 与发行身份（壳版本 + dsh 版本 + Node/pnpm 版本 + 协议版本），启动时校验，对不上直接拒绝启动 |
 | 版本模型 | **一个签名更新单元**：壳 / dsh / Node / pnpm 由 `desktop-runtime.json` 绑死，随桌面端一起发版；不再有「单独更新 harness」的通道（历史上的整树刷新、兼容探测、tar.gz 解压与不兼容清单全部删除） |
-| 插件 | **官方插件系统原样运行**：Host 向 dsh 提供官方「启动器信息」（`profileContext`，含随包 pnpm 作为 `packageManager`），`plugin-manager` 与 HMR 因此激活——侧边栏「插件」页与 `plugin_manager` 工具可在本壳里安装/启停/卸载。profile（`$DSH_HOME/profiles/dsh-workbench`）承载组合：`dsh.profile.bundles` 是有序启用列表，第一方包（bridge / host / dsh）以 **junction 共享包**链接进 profile `node_modules`，第三方插件由官方管理器用**随包 pnpm**装进 profile 依赖，事务期间持有 `<profile>/lock` 与 `desktop-packages-pending` 标记；安装失败按官方语义回滚 `package.json` + `pnpm-lock.yaml`，依赖脚本待批准时给出「允许并重试」 |
+| 插件 | **官方插件系统原样运行**：Host 向 dsh 提供官方「启动器信息」（`profileContext`，身份名 `desktop`，含随包 pnpm 作为 `packageManager`），`plugin-manager` 与 HMR 因此激活——侧边栏「插件」页与 `plugin_manager` 工具可在本壳里安装/启停/卸载。profile（`$DSH_HOME/profiles/dsh-workbench`）承载组合：`dsh.profile.bundles` 是有序启用列表，第一方包（bridge / host / dsh）以 **junction 共享包**链接进 profile `node_modules`，第三方插件由官方管理器用**随包 pnpm**装进 profile 依赖，事务期间持有 `<profile>/lock` 与 `desktop-packages-pending` 标记；安装失败按官方语义回滚 `package.json` + `pnpm-lock.yaml`，依赖脚本待批准时给出「允许并重试」。**壳只做两件对账**（都不做插件管理）：启动期把解析不出来的 bundle 条目移出启用列表（不卸载任何东西），以及在启动前体检并修复 `node_modules` 与清单的不一致（缺包/锁文件脱节 → 随包 pnpm `pnpm install`；清单未声明、pnpm 也不认的插件目录 → 清除，链接只删链接） |
 | 签名 | Windows：EV 证书 + SafeNet 令牌（`signtoolOptions.sign` → `scripts/windows-sign.mjs`，未配置签名环境时显式跳过）；macOS：Developer ID 签名 + `notarytool` 公证 + stapling（`scripts/package-macos.mjs`，`resources/dsh`/`resources/runtime` 排除签名）。逐项说明见 [docs/SIGNING.md](docs/SIGNING.md) |
 
 ### 本壳相对官方的**有意差异**
 
-- **profile 名是 `dsh-workbench`**（官方用保留名 `desktop`）。本壳是独立应用，不占用官方保留名；首次启动会把历史 `profiles/desktop` 改名迁移。
+- **profile 目录是 `dsh-workbench`**（官方用保留名 `desktop`）。本壳是独立应用，不占用官方保留名；首次启动会把历史 `profiles/desktop` 改名迁移。**交给官方启动器的身份名仍是官方的 `desktop`**——官方组合树里 desktop-only 的行（账号插件的 `desktopPlatform`、桌面侧边栏的浏览器标签）按它开关；目录与身份分开后，盘上不占官方目录，组合树里仍是桌面端。
 - **多一个 `dsh-desktop-bridge` 插件**（第一方、随包、bundle 层加载）：官方壳用原生对话框/无托盘，本壳用系统通知、任务栏徽标、`dsh://` 深链、托盘、局域网/浏览器版，这些需要一条壳↔harness 的本地 RPC 通道。它是壳自有的、唯一额外监听 socket（127.0.0.1 随机端口 + 每次启动随机 token），不参与 harness 的 HTTP 面。
 - **局域网访问 / 浏览器版**：官方没有该能力；本壳的对外门面（`src/main/lanServer.ts`）把 HTTP 与 WebSocket 升级都代理到已认证 Host，回环免授权、局域网设备需电脑确认 + 本次运行 token 换 cookie。
 - **会话修复与安全模式**：官方没有；本壳保留（`src/main/sessionRepair.ts`、`src/main/safeMode.ts`）。
@@ -140,17 +140,18 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（官方 runProf
 
 - **开始会话**：启动后在窗口内选择工作区，即可开始对话
 - **视觉模型**：模型下拉切换到 `DeepSeek-V4-Flash-Vision-Exp`，拖入图片即可看图对话（见上方"模型与视觉能力"）
+- **账号登录（侧边栏左下角）**：官方账号功能原样可用——点「登录」后应用会自动**用系统浏览器打开授权页**（链接带 `theme=`，跟随应用明暗），在浏览器里完成授权即回到应用；授权超时/失败时窗口会自动唤回前台并说明原因（网络 / 凭据存储 / 超时 / 平台拒绝）。登录后可看余额，用量/充值按钮打开平台页面（当前在系统浏览器里打开，尚未做官方桌面端那种应用内平台视图）；「退出登录」只清账号授权，不动你配置的 API Key。凭据只存在本机 harness 的凭据文件里，壳不接触
 - **全局唤出**：任意界面按 `Ctrl+Shift+Space` 呼出/隐藏窗口
 - **深链**：浏览器或其他应用点击 `dsh://` 链接可唤起并打开对应会话
 - **托盘**：关闭窗口默认最小化到托盘；右键托盘图标可看一行状态（Harness · 桥接）、打开浏览器版、手机连接（二维码）、重启 Harness、进入/退出安全模式、设置（更新 / 自启 / 通知 / 日志 / 卸载）
-- **会话共享**：桌面版默认使用**独立数据目录**（`%LOCALAPPDATA%/DSH Desktop/dsh-home`），并与 Web/CLI 并存互不冲突；首次启动会自动把旧的 `~/.dsh` 迁移过去，原数据保留。
+- **会话共享**：桌面版默认使用**独立数据目录**（`%APPDATA%/DSH Desktop/dsh-home`，即 Electron `userData` 下），并与 Web/CLI 并存互不冲突；首次启动会自动把旧的 `~/.dsh` 迁移过去，原数据保留。
 - **手机连接（扫描二维码）**：托盘点「手机连接（扫描二维码）…」会按需开启壳自带的对外门面（绑 `0.0.0.0:46123`，固定端口被占则自动换随机端口），并弹出二维码窗口；**手机相机扫码即在浏览器里打开本工作台**（地址带本次运行的一次性令牌）。手机首次访问时**电脑会弹授权框**（按设备 IP 记一次，本次运行有效）：允许才放行，拒绝返回 403。⚠️ 允许后该设备可在浏览器中操作本工作台（可读文件/执行命令），建议仅在可信网络使用；「断开手机连接」或在托盘菜单关闭后立即停止对外服务。
 
 ---
 
 ## 隐私说明
 
-- **数据本地化**：会话、工作区、设置均保存在本机（默认 `%LOCALAPPDATA%/DSH Desktop/dsh-home` 下的独立数据目录），不与 Web/CLI 冲突，也不会自动上传。
+- **数据本地化**：会话、工作区、设置均保存在本机（默认 `%APPDATA%/DSH Desktop/dsh-home` 下的独立数据目录），不与 Web/CLI 冲突，也不会自动上传。
 - **API 凭据**：DeepSeek API Key 通过配置的凭据存储（或在环境变量 `DEEPSEEK_API_KEY`）提供给 harness，仅在发起模型请求时使用；桌面壳本身不保存密钥明文到会话。
 - **网络边界**：默认仅回环监听（`127.0.0.1`）；只有点了「手机连接（扫描二维码）」才会开启对外门面（`0.0.0.0`，端口被占自动回退随机端口），且其它设备首次访问必须在本机授权。断开手机连接后立即停止对外服务。
 - **更新元数据**：更新检查只访问 npm registry / GitHub Releases 拉取版本与安装包，不包含你的会话内容。

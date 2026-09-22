@@ -1,6 +1,6 @@
 # dsh-desktop-bridge：审查结论与迭代计划
 
-版本：1.2 ｜ 日期：2026-09-19（新增 §2.3 的停机句柄修复）｜ 对应代码：`packages/bridge@0.4.1`、壳 `0.8.2`
+版本：1.3 ｜ 日期：2026-09-23（新增 `account.changed` 推送与 `authed.account` 快照字段）｜ 对应代码：`packages/bridge@0.5.0`、壳 `0.8.5`
 
 本文覆盖三件事：**（1）桥接插件的现状契约**（谁在用、谁没人用）、**（2）本轮审查发现的缺陷与修复**（含证据与验证方式）、**（3）下一阶段的迭代计划**（每条含理由、验收标准与代价）。设计层面的既定边界见 `DESIGN.md`（D25/D30）。
 
@@ -17,6 +17,7 @@ bridge 是**壳 ↔ harness 的唯一通道**：插件跑在 Host 进程内的 d
 | 推送 | `approval.asked` | 壳：系统通知（**点击直达会话**）+ 待审批环 | 带 `sessionId/requestId/toolName`；0.8.2 起托盘不再列「待审批」（通知仍直达会话） |
 | 推送 | `approval.decided` | 壳：待审批环出环 | 环用于快照对齐与去重 |
 | 推送 | `sessions.changed` | 壳：深链标题缓存（`dsh://session/<id>`） | 去抖 250ms + 单飞合并；与快照同形状（全量目录，**上限 200 条**：live 全留 + 最近持久化，带 `truncated`）；0.8.2 起托盘不再列「最近会话」 |
+| 推送 | `account.changed` | 壳：账号登录的原生动作（`waiting-browser` → 系统浏览器打开授权页一次；`failed`/`expired` → 唤回窗口） | 只带 `{status, attempt:{id,phase,authorizeUrl,errorCode,expiresAt}}`；**凭据/token/资料一律不过桥**（0.5.0） |
 | 推送 | `bridge.diag` | 壳：日志 + 托盘「桥接：…」状态行 | 插件诊断（D33） |
 | RPC | `ping` | 壳：连接自检 | |
 | RPC | `workspace.register` | 壳页面 `dsh:pick-workspace`（原生选目录后注册） | 不重启 Host 即可注册；托盘不再有这个入口 |
@@ -24,6 +25,9 @@ bridge 是**壳 ↔ harness 的唯一通道**：插件跑在 Host 进程内的 d
 | RPC | `dashboard.snapshot` | 壳：连接/重连后整份对齐（徽标 + 会话目录 + 待审批） | |
 | RPC | `billing.balance` | 壳：API key 自检（D35） | 桥接不可用时壳回退本地文件 |
 | RPC | `runtime.info` / `sessions.list` | **诊断面**（live e2e 断言 + 排障） | 无产品消费者，保留并在此标注归属 |
+
+握手面还有一个字段：`authed` 回执除 `protocolVersion` / `diag` 外带 `account`（最新账号状态或 `null`），
+用于重连补齐——断线期间可能已经进入「等待浏览器」或已经失败，只靠增量会漏掉那一跳（0.5.0）。
 
 握手：`auth {token, protocolVersion}` → `authed {pid, protocolVersion, diag}`；两端版本不一致时壳报警并在托盘标注（D32）。
 

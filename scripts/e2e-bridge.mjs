@@ -352,7 +352,16 @@ try {
     results.push({ name: `bridge 拒绝${label}（4001）`, ok: rejected.code === 4001, detail: rejected })
   }
   await rpc('bridge ping', 'ping', {})
-  await rpc('bridge runtime.info', 'runtime.info', {})
+  {
+    // 官方组合树看到的身份名必须是 desktop：账号插件的 desktopPlatform（登录要带的
+    // x-client-platform 头）与桌面侧边栏的浏览器标签都按它开关（D44 的真机事故）。
+    const info = await rpc('bridge runtime.info', 'runtime.info', {})
+    results.push({
+      name: '宿主身份 = desktop（官方账号/桌面行按它开关）',
+      ok: info.result?.profileIdentity === 'desktop',
+      detail: { profileIdentity: info.result?.profileIdentity ?? null },
+    })
+  }
   await rpc('bridge sessions.list', 'sessions.list', {})
   await rpc('bridge dashboard.snapshot', 'dashboard.snapshot', {})
   await rpc('bridge billing.balance', 'billing.balance', {})

@@ -267,6 +267,119 @@ Host 引导分解（随包 Node + 真实 profile，3 次取稳定值）：
 
 ---
 
+## 10. 第六轮：官方账号登录对齐 + 插件残留根因（2026-09-23）
+
+本轮由两条用户报告驱动：「官方更新了左下角的登录功能，去适配一下」「为什么还留着两个我早就不用的插件」。
+两条都定位到了**本壳自身的偏差**，不是官方行为变化。
+
+### 10.1 登录为什么失败：profile 身份名报错了
+
+官方桌面端把桌面身份写在 `runProfile({ profile: 'desktop' })` 里，官方 Host 原文（`apps/desktop-host/src/index.ts`）：
+
+```ts
+const profile = loadProfileDirectory('dsh', projectDir, installAnchor)
+const application = runProfile({
+  profile: 'desktop',
+  resolvedProfile: { profile, installAnchor },
+  patchFiles: [],
+  args: ['--no-open', '--port', '19387'],
+  …
+})
+```
+
+即 **profile 的「目录」与「身份名」是两件事**：目录由 `loadProfileDirectory` 给出，身份名只进
+`profileContext.name`（`@deepseek-ai/dsh/lib/profile-boot` 里 `profileContext = { name: options.profile, dir: composed.profile.dir, … }`）。
+官方组合树里恰好有两处 desktop-only 行按这个身份开关：
+
+| 行 | 官方 patch | 身份必须是什么 |
+|---|---|---|
+| `deepseek-account` | `@deepseek-ai/dsh-base`：`desktopPlatform: !!js "ctx.get('profileContext')?.name === 'desktop' && ['darwin','win32'].includes(process.platform) ? process.platform : null"` | `desktop`（否则账号请求不带 `x-client-platform: desktop-win`） |
+| `ui-sidebar-browser` | `@deepseek-ai/dsh-web-app`：`disabled: !!js "ctx.get('profileContext')?.name !== 'desktop'"` | `desktop` |
+
+本壳先前把**两者都**改成了自有名 `dsh-workbench`（理由成立且必须保留：官方 CLI 硬拒绝
+`--profile desktop`，那是官方 Electron 应用的保留名），代价是官方账号插件认为"这是非桌面载体"：
+
+```text
+[2026-09-23 02:03:17] [deepseek-account] request  { path: '/auth-api/v0/dsh/auth_init', method: 'POST' }
+[2026-09-23 02:03:17] [deepseek-account] response { path: '/auth-api/v0/dsh/auth_init', status: 200 }
+[2026-09-23 02:03:34] [deepseek-account] request failed { path: '/auth-api/v0/dsh/auth_exchange', errorCode: 'network' }
+[2026-09-23 02:03:34] [deepseek-account] sign-in failed { errorCode: 'network' }
+```
+
+**注意 `errorCode: 'network'` 是个陷阱**：插件对「fetch 抛错」与「HTTP 非 2xx」用同一个分类
+（`if (!response.ok) throw new PlatformAuthError('network')`），所以"被平台拒绝"看起来和"断网"一模一样；
+而同一分钟里 `auth_init` 拿到过 200，说明网络是通的。
+
+改法（`packages/host/src/index.ts`）：**目录名保留自有，身份名照官方报 `desktop`**。
+合规范畴之外，本轮还把官方桌面端围绕登录做的两件原生事补齐（官方 `apps/desktop/src/main.ts`）：
+
+| 官方动作 | 本壳落地 |
+|---|---|
+| 尝试进入 `waiting-browser` 时用**系统浏览器**打开 `authorizeUrl`，并加 `theme=dark|light`（登录页跟随应用配色），同一次尝试只开一次 | 桥接把账号状态推给壳（`account.changed`，见下），壳执行同样两个动作（`src/main/accountLogin.ts` + `src/main/index.ts`） |
+| 尝试以 `failed` / `expired` 结束时**把主窗口唤回前台**（用户此刻停在浏览器里） | 同上；并给出按 `errorCode` 分类的中文原因（网络/存储/超时/平台拒绝） |
+| 应用文档根打 `data-platform`（桌面专属 CSS 的开关，如账号页/平台页的 macOS 红绿灯留白） | `src/preload/index.ts` 补上（官方 `preload-platform.ts` 的等价物） |
+
+**状态怎么到壳**：官方桌面端自己拉账号 Remote 流（`desktopAccountBackend(...).watch`）。本壳的运行时不带
+`@deepseek-ai/dsh-api-gateway/stream-protocol` 的依赖（主进程不 import 运行时包），因此走**已有的那条**壳↔harness
+通道：桥接插件在宿主进程里 `ctx.inject(['deepseekAccount'])` 订阅同一个账号服务，把
+`{status, attempt:{id,phase,authorizeUrl,errorCode,expiresAt}}` 推给壳（`packages/bridge`）。
+**凭据、token、用户资料一律不过桥**（账号页的余额/资料仍由 Web 侧走 Remote）。
+
+### 10.2 插件残留：三条真机事实，两个根因
+
+用户侧的现象是两类：① 启动报 `dsh: cannot resolve profile bundle "dsh-better-sidebar" …`；
+② profile 的 `node_modules` 里躺着两个"早就卸载"的插件（`dsh-commandcode-goat`、`dsh-opencode-go`）。
+
+| 档 | 真机证据 | 根因 |
+|---|---|---|
+| 声明了依赖、包不在盘上 | `profiles/dsh-workbench/package.json` 的 `dependencies` 有 `dsh-better-sidebar@^0.17.1`，`node_modules` 里没有这个目录；`package.json.safemode.bak` 的 bundles 里也带着它 | 官方插件管理器的事务失败**只回滚 `package.json` + `pnpm-lock.yaml`**，`node_modules` 不回滚（官方失败语义表第 1 行），于是"清单说装了、盘上没有" |
+| 包在盘上、清单没有 | `.modules.yaml` 的 `hoistedLocations` 里有 `dsh-commandcode-goat`、`pnpm-lock.yaml` 的 importer 也只剩它；`node_modules/dsh-opencode-go` 是指向 `E:\Dsh\Plugins\…` 的链接，pnpm 完全不认 | 同上（卸载把清单清干净、盘上留着），手链接进来的那档本来就不在 pnpm 账上 |
+| 每次包操作都失败 | `[2026-09-17 12:47:14] plugin transaction: pnpm add 失败：pnpm now wants to use the store at …\store\v10 … reinstall your dependencies with "pnpm install"` | 跨壳版本换了 pnpm 主版本（store 布局换代 → `ERR_PNPM_UNEXPECTED_STORE`）。pnpm 自己给的正解就是重装依赖 |
+
+本轮的两处修法：
+
+1. **bundle 对账加解析检查**（`src/main/pluginfs.ts`）：`dsh.profile.bundles` 里除官方基线与 bridge 之外，
+   只有「在清单里声明**且**能被解析出来」的项才保留。解析来源与 harness 自己一致：profile `node_modules`
+   → 随包 dsh 树（`resources/dsh/node_modules`）。移出列表**不卸载任何东西**——依赖与目录原样保留，
+   插件在官方「插件」页里仍可见、可重装/重新启用。
+2. **profile 依赖体检 + 修复**（`src/main/profileDeps.ts` 判定、`src/main/profileRepair.ts` 执行）：
+   启动期（Host 起来之前）体检四方状态——清单 / 盘上 / `pnpm-lock.yaml` importer / `.modules.yaml` 托管视图：
+   - 缺包或锁文件脱节 → 用**随包 pnpm** 跑一次 `pnpm install`（store/registry/userconfig 与 Host 的
+     `profileContext.packageManager` 同一套，否则 pnpm 会因 store 不一致直接拒绝）；
+   - 「pnpm 不认、清单也没声明」的 dsh 插件目录 → 删除（**链接只删链接本身**，绝不顺着链接删被指向的目录）；
+   - 判定为干净时**什么都不做**；离线失败不阻塞启动，按状态指纹 6 小时内不重跑，日志与通知说清是哪一档。
+
+### 10.2.1 残留清掉之后暴露的第三档：插件自己的版本漂移
+
+清单修好、`dsh-better-sidebar` 装回来之后，harness 仍报一行警告（本壳实测）：
+
+```text
+dsh: warning: 1 entry did not activate
+better-sidebar (dsh-better-sidebar): failed to import
+```
+
+这是**插件与 harness 的 API 漂移**，不是壳的问题：`dsh-better-sidebar@0.17.1` 的宿主半边
+`import { SettingsConflictError, settingsNamespace } from "@deepseek-ai/dsh-settings"`，
+而 0.1.7 的 `@deepseek-ai/dsh-settings` 只导出 `SettingsConflictError / SettingsForms / redactSecrets`
+（`settingsNamespace` 已被删除）——ESM 具名导入缺失 → 整条 entry 导入失败。
+该插件 0.18.0 起改成只导入 `SettingsConflictError`（对比 unpkg 上 0.17.1/0.18.1/0.19.1 的 `lib/index.js` 顶部 import 即可复现）。
+
+结论：**这类"插件太旧"的问题归插件自己**——本壳的对账只保证「清单 ↔ 盘面 ↔ 锁定文件」一致，
+不去改写用户 pin 的版本（官方插件管理器同样只在用户显式 `add`/`update` 时动版本）。
+真机处理：把 `dsh-better-sidebar` 升到 `^0.19.1` 后，宿主启动 stderr 干净（0 条警告）。
+
+### 10.3 验证
+
+- `npm run check`：typecheck + **144** 单测全绿。新增 21 项：`test/profile-deps.test.mjs`（四方状态判定、
+  锁文件/`.modules.yaml` 解析用的是真机形状、指纹、pm 参数、修复动作含"删残留"）、`test/account-login.test.mjs`
+  （状态解析、`theme=` 参数、同一次尝试只开一次浏览器/只唤回一次窗口）、`test/pluginfs.test.mjs` 的两项回归
+  （`dsh-better-sidebar` 那一档；解析来源含随包树）、`test/bridge-plugin.test.mjs` 三项
+  （`minimalAccountState` 过滤凭据、`account.changed` 推送与重连快照、账号服务缺席不污染托盘诊断）。
+- `npm run e2e:bridge`：真实 dsh 运行时 + 官方认证 Web Host + bridge 契约全绿（含 `profileContext` 身份改动后
+  Host 仍能引导、插件管理器仍可用）。
+
+---
+
 ## 9. 第五轮：性能审查（启动/退出/托盘响应，2026-09-19）
 
 用户报："打开和退出都不流畅、有时要退出两次、托盘左键点图标没反应"。全部按实测定位，机器上真跑出的数字如下。
