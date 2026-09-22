@@ -591,6 +591,11 @@ async function requestUpdateInstall(): Promise<boolean> {
   if (r.response !== 0) return false
   quitForUpdateInstall = true
   const ok = installDownloadedUpdate()
+  if (!ok) {
+    // quitAndInstall 抛错时不会有退出流程来清这个标志；留着它会让**下一次正常退出**
+    // 走「更新安装」分支（绕过受控单出口：撤托盘/拆窗口/Host 停机/兜底强杀）。
+    quitForUpdateInstall = false
+  }
   if (ok || settings.pendingUpdateVersion === app.getVersion()) {
     // 安装已启动 / 已处于该版本 → 清掉待安装标记
     if (settings.pendingUpdateVersion) {
@@ -1387,6 +1392,15 @@ async function main(): Promise<void> {
           `DSH Desktop ${info.version} 已开始在线下载。\n官方地址：${info.fileUrl}\n加速地址：${info.proxyUrl}`,
           () => showWindow(),
         )
+      },
+      // 本平台装不了（macOS 清单里没有 zip，见 src/main/updatePayload.ts）：
+      // 不谎称在下载，只把「手动下载地址」摆在右上角卡片里
+      onUnsupported: (info) => {
+        shellUpdateSink = beginUpdateOverlay({
+          pct: null,
+          detail: `DSH Desktop ${info.version} 可用，但${info.reason}，请下载安装包手动安装`,
+          url: info.fileUrl,
+        })
       },
       // 外壳下载进度 → 任务栏 + 右上角卡片实时百分比
       onProgress: (p: UpdateProgress) => {

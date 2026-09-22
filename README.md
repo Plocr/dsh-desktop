@@ -184,7 +184,7 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（官方 runProf
 | 方式 | 怎么做 | 结果 |
 |---|---|---|
 | 手动 | `npm run upstream:dsh:check`（只报告）→ `npm run upstream:dsh -- --sync --write` → `npm run setup:runtime` → `npm run check` + `npm run e2e:bridge` → 打 tag | 本地一条龙 |
-| 自动（默认） | `.github/workflows/upstream-dsh.yml` 每天 04:00（Asia/Shanghai）自动跑，或手动触发（`publish` 默认勾选） | 检测到新版 → 同步 pin、重建运行时、跑门禁与 e2e → 全绿后写更新日志、推默认分支 + 打 `v<壳版本>` tag → 触发 `build-release.yml` 三平台出包并发布 Release → 已装用户自动更新 |
+| 自动（默认） | `.github/workflows/upstream-dsh.yml` 每天 04:00（Asia/Shanghai）自动跑，或手动触发（`publish` 默认勾选） | 检测到新版 → 同步 pin、重建运行时、跑门禁与 e2e → 全绿后写更新日志、推默认分支 + 打 `v<壳版本>` tag → 触发 `build-release.yml` 三平台出包并发布 Release → 已装用户自动更新（**Windows**；macOS 需签名分支产出 zip 才支持应用内更新，否则应用内会明确提示去 Release 页手动下载 dmg） |
 | 只审不发（可选） | 手动触发同一 workflow 并**取消勾选** `publish` | 只推 `upstream/dsh-<版本>` 分支 + 开 PR，等你 review 后自己打 tag |
 
 **更新日志**：自动出包时会写一份 `docs/release-notes/v<壳版本>.md` 并随代码提交，正文开头就是
@@ -205,7 +205,7 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（官方 runProf
 **入口（托盘 → 设置）：**
 
 - `自动更新（框架 v… · 官方 Harness v…）`（开关，默认开）：冷启动自动检查并下载一次；关闭则仅手动
-- `检查更新…`（动作）：检查框架更新，有新版自动本地下载；下载完成后需点「安装更新并重启」按钮确认安装
+- `检查更新…`（动作）：检查框架更新，有新版自动本地下载；下载完成后需点「安装更新并重启」按钮确认安装（Windows 为静默安装 + 自动重启）。macOS 上若该版本没提供 zip 更新包（未签名构建即如此），应用会直接说明「请手动下载安装」，不会假装在下载
 
 **托盘状态行（一行，排障用）：**
 
@@ -235,9 +235,9 @@ npm run dist:mac          # macOS dmg（需在 macOS 上执行，arm64/x64）
 - `scripts/build.mjs`：esbuild 打包 main/preload → `dist/`
 - `scripts/make-icons.mjs`：生成应用图标（png / ico / icns）
 - `scripts/setup-runtime.mjs`：构建随包运行时两棵树——`resources/runtime`（便携 Node + pnpm）与 `resources/dsh`（`npm install @deepseek-ai/dsh` + 第一方包 tgz + `desktop-runtime.json` 逐文件 sha256 清单）；源码哈希未变时秒过不联网
-  - 可用环境变量：`DSH_RUNTIME_DSH_VERSION`（默认取 `package.json` 的 `dshRuntime.dsh`，当前 `0.1.6-alpha.2`——与官方桌面端同版；本壳 profile 为自有名 `dsh-workbench`，不受官方 desktop 守卫影响）、`DSH_RUNTIME_NODE_VERSION`（默认 `v24.15.0`）、`DSH_RUNTIME_NODE_ARCH`（目标便携 Node 架构，交叉构建时显式指定）
+  - 可用环境变量：`DSH_RUNTIME_DSH_VERSION`（默认取 `package.json` 的 `dshRuntime.dsh`，该值由上游巡检自动同步——与官方桌面端同版；本壳 profile 为自有名 `dsh-workbench`，不受官方 desktop 守卫影响）、`DSH_RUNTIME_NODE_VERSION`（默认 `v24.15.0`）、`DSH_RUNTIME_NODE_ARCH`（目标便携 Node 架构，交叉构建时显式指定）
   - **载荷策略**：`DSH_DESKTOP_OFFICE_RUNTIME=1` 才把 Office→PDF 原生引擎（LibreOffice，win32-x64 ≈ 325 MB / 2050 文件）打进包——默认不带，安装包因此小 ~80 MB、装机文件少数千个；代价是应用内 docx/xlsx/pptx 预览不可用（第一次转换会以 `unavailable` 明确报错）。文档类 `.md`（保留 LICENSE/NOTICE）与便携 Node 自带的 npm 目录也在打包时剔除。
-- `scripts/merge-mac-manifest.mjs`：合并 macOS arm64/x64 两个 `latest-mac.yml` 为一份（多架构自动更新）
+- `scripts/merge-mac-manifest.mjs`：合并 macOS arm64/x64 的 `latest-mac.yml` 为一份（多架构自动更新）。zip（应用内更新唯一认的载荷）与 dmg（手动安装）都进 `files[]`，sha512/size 由下载下来的实际文件现算——打包期那份早于公证/钉票，已作废
 
 CI（`.github/workflows/build-release.yml`）：master/PR 跑 `check`（typecheck + 单测）与 `e2e`（Windows：真实 dsh 运行时 + Host 管道 + 桥接契约，`npm run e2e:bridge`）；打 `v*` tag 或手动触发时跑三平台安装包构建并上传到对应 Release。mac 的 arm64 构建在 x64 runner 上交叉进行，便携 Node 目标架构经 `DSH_RUNTIME_NODE_ARCH` 显式指定。
 
@@ -245,8 +245,8 @@ CI（`.github/workflows/build-release.yml`）：master/PR 跑 `check`（typechec
 
 ## 平台支持
 
-- **Windows**（主平台，实测）：NSIS 安装包、托盘、系统通知、任务栏徽标、开机自启、`dsh://` 深链
-- **macOS**（配置就绪）：dmg（arm64/x64）、`dsh://` 深链、运行时路径走 `~/Library/Application Support`
+- **Windows**（主平台，实测）：NSIS 安装包、托盘、系统通知、任务栏徽标、开机自启、`dsh://` 深链、应用内自动更新（差分下载依赖随包的 `.exe.blockmap`）
+- **macOS**（配置就绪）：dmg（arm64/x64）、`dsh://` 深链、运行时路径走 `~/Library/Application Support`；**应用内更新**要求签名分支产出的 zip（electron-updater 在 macOS 只认 zip），未签名构建由应用明确提示手动下载 dmg
 - **Linux**：代码兼容，未提供安装包
 
 ---

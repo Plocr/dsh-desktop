@@ -18,6 +18,7 @@
 import { app, shell } from 'electron'
 import { log } from './logger'
 import { notify } from './notify'
+import { hasInstallablePayload, unsupportedPayloadReason } from './updatePayload.ts'
 
 const RELEASES_PAGE = 'https://github.com/Plocr/dsh-desktop/releases/latest'
 
@@ -43,6 +44,7 @@ let downloadedVersion: string | null = null
 let hooks: UpdaterHooks = {
   onManualResult: () => {},
   onAvailable: () => {},
+  onUnsupported: () => {},
   onProgress: () => {},
   onDownloaded: () => {},
 }
@@ -68,7 +70,14 @@ export function updateDownloadReady(): boolean {
 export function installDownloadedUpdate(): boolean {
   if (!autoUpdater || !downloadedVersion) return false
   try {
-    autoUpdater.quitAndInstall()
+    // 参数是 (isSilent, isForceRunAfter)：
+    //  - 静默：应用内对话框已经问过一次（「现在将结束应用并安装更新」），再弹一层
+    //    NSIS 向导是重复确认；`/S` 对 electron-builder 的向导式安装包同样有效
+    //    （`--updated` 会沿用已有安装目录，不需要 /D）。
+    //  - 强制重启：对话框承诺的是「安装完成后自动重启」，而默认
+    //    isForceRunAfter=false 只会把「运行应用」交给 Finish 页的勾选框，
+    //    用户不点就不会重启。
+    autoUpdater.quitAndInstall(true, true)
     return true
   } catch (err) {
     log('error', `updater: quitAndInstall failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -81,6 +90,11 @@ export interface UpdaterHooks {
   onManualResult: (msg: string) => void
   /** 检测到新版（本地已开始下载） */
   onAvailable: (info: { version: string; fileUrl: string; proxyUrl: string }) => void
+  /**
+   * 检测到新版，但**本平台装不了**（macOS 清单里没有 zip，见 updatePayload.ts）：
+   * 不再假装在下载，只把手动下载地址交出去。
+   */
+  onUnsupported: (info: { version: string; fileUrl: string; proxyUrl: string; reason: string }) => void
   /** 下载进度 */
   onProgress: (p: UpdateProgress) => void
   /** 下载完成（等待退出安装/点击立即安装） */
@@ -114,7 +128,13 @@ export function initUpdater(initHooks: UpdaterHooks, opts: { autoCheck: boolean 
 
     // 本地下载（进度推送）；安装需用户点「安装更新并重启」（不随退出自动装——
     // 且不能在我们 after-quit 强退时被吞，见 index.ts before-quit 的更新安装分支）
-    au.autoDownload = true
+    //
+    // autoDownload 必须是 false：自动下载发生在 electron-updater **内部**的
+    // update-available 监听器里，壳拦不住。而 macOS 的清单里没有 zip 时
+    // downloadUpdate() 必抛 ERR_UPDATER_ZIP_FILE_NOT_FOUND —— 那样壳还没来得及
+    // 说「这版装不了」，用户就先看到一条「检查更新失败」。所以下载由壳在
+    // update-available 里显式发起（见下），先判断能不能装。
+    au.autoDownload = false
     au.autoInstallOnAppQuit = false
     au.disableWebInstaller = true
 
@@ -125,11 +145,29 @@ export function initUpdater(initHooks: UpdaterHooks, opts: { autoCheck: boolean 
     au.on('update-available', (info) => {
       log('info', `updater: update available ${info.version}`)
       const fileUrl = fileUrlOf(info as { files?: { url?: string }[] })
+      const files = (info as { files?: unknown }).files
+      if (!hasInstallablePayload(files, process.platform)) {
+        // 诚实降级：**不**发起下载（注定失败），也**不**说「已开始本地下载」。
+        // 自动检查保持安静（每次冷启动都弹通知会很吵），只把卡片摆在右上角；
+        // 手动检查给一句明确结论，而不是让用户去看「检查更新失败」。
+        const reason = unsupportedPayloadReason(process.platform)
+        log('error', `updater: no installable payload for ${process.platform} (${info.version}): ${reason}`)
+        hooks.onUnsupported({ version: info.version, fileUrl, proxyUrl: withGhProxy(fileUrl), reason })
+        if (lastCheckWasManual) {
+          hooks.onManualResult(`${reason}，请到 Release 页手动下载安装`)
+          lastCheckWasManual = false
+        }
+        return
+      }
       hooks.onAvailable({ version: info.version, fileUrl, proxyUrl: withGhProxy(fileUrl) })
       notify('发现新版本', `DSH Desktop ${info.version} 已开始本地下载`, () => {
         void shell.openExternal(RELEASES_PAGE).catch((err) => {
           log('error', `updater: open releases page failed: ${err instanceof Error ? err.message : String(err)}`)
         })
+      })
+      // autoDownload=false 之后由壳显式下载；失败经 'error' 事件统一回报（与之前一致）
+      void autoUpdater?.downloadUpdate().catch((err) => {
+        log('error', `updater: downloadUpdate rejected: ${err instanceof Error ? err.message : String(err)}`)
       })
     })
     au.on('download-progress', (p) => {
