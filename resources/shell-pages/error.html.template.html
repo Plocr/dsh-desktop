@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />
+<title>DSH Desktop — 启动失败</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --ink: #0f1115;
+    --sub: #6b7280;
+    --panel: #f6f7f9;
+    --border: #e4e7ec;
+    --danger: #b42318;
+    --danger-bg: #fef3f2;
+    --danger-border: #fecdca;
+    --accent: #0f1115;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) {
+      --bg: #151517;
+      --ink: #f9fafb;
+      --sub: #9aa0a6;
+      --panel: #1e1e21;
+      --border: #2e2f33;
+      --danger: #ff9c94;
+      --danger-bg: #2a1c1b;
+      --danger-border: #5b2d2a;
+      --accent: #f9fafb;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #151517;
+    --ink: #f9fafb;
+    --sub: #9aa0a6;
+    --panel: #1e1e21;
+    --border: #2e2f33;
+    --danger: #ff9c94;
+    --danger-bg: #2a1c1b;
+    --danger-border: #5b2d2a;
+    --accent: #f9fafb;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff;
+    --ink: #0f1115;
+    --sub: #6b7280;
+    --panel: #f6f7f9;
+    --border: #e4e7ec;
+    --danger: #b42318;
+    --danger-bg: #fef3f2;
+    --danger-border: #fecdca;
+    --accent: #0f1115;
+  }
+  html, body {
+    height: 100%; margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    display: flex; align-items: center; justify-content: center;
+    -webkit-font-smoothing: antialiased;
+  }
+  .card {
+    width: min(620px, calc(100vw - 64px));
+    padding: 28px 30px 24px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--bg);
+    box-shadow: 0 1px 2px rgba(16, 24, 40, .04), 0 12px 32px rgba(16, 24, 40, .06);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+  .brand svg { width: 30px; height: 22px; color: var(--accent); flex: none; }
+  .brand .name { font-size: 13px; font-weight: 600; letter-spacing: .2px; }
+  .brand .tag { font-size: 12px; color: var(--sub); }
+  h1 { font-size: 17px; margin: 0 0 12px; color: var(--ink); }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 600; color: var(--danger);
+    background: var(--danger-bg); border: 1px solid var(--danger-border);
+    border-radius: 999px; padding: 3px 10px; margin-bottom: 12px;
+  }
+  pre {
+    margin: 0 0 14px; padding: 12px 14px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    font: 12px/1.55 "Cascadia Mono", ui-monospace, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto;
+    color: var(--ink);
+  }
+  .hints { margin: 0 0 18px; padding: 0; list-style: none; font-size: 12.5px; line-height: 1.7; color: var(--sub); }
+  .hints li { padding-left: 16px; position: relative; }
+  .hints li::before { content: ""; position: absolute; left: 4px; top: 9px; width: 4px; height: 4px; border-radius: 50%; background: var(--border); }
+  .hints b { color: var(--ink); font-weight: 600; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button {
+    font: inherit; font-size: 13px; padding: 8px 16px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--bg); color: var(--ink);
+  }
+  button:hover { background: var(--panel); }
+  button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  button.primary:hover { opacity: .9; background: var(--accent); }
+  .muted { font-size: 12px; color: var(--sub); margin-left: auto; }
+  a { color: var(--ink); }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">
+      <svg viewBox="0 0 24 18" fill="currentColor" aria-hidden="true"><path d="__WHALE_PATH__"/></svg>
+      <span class="name">DSH Desktop</span>
+      <span class="tag">DeepSeek Harness 桌面工作台</span>
+    </div>
+    <div class="badge">Harness 启动失败</div>
+    <h1>工作台没能启动</h1>
+    <pre id="msg">（无详细错误信息）</pre>
+    <ul class="hints">
+      <li>先点下面的 <b>重启 Harness</b>；多数瞬时故障这一步就好。</li>
+      <li>若提示某个运行时文件缺失：多半是<b>安全软件按启发式规则隔离</b>了它（本应用未签名，运行时会拉起子进程、加载大量插件文件，容易被误报）。把安装目录加入白名单后重新安装即可。</li>
+      <li>插件导致起不来时，可从托盘菜单进入<b>安全模式</b>（停用全部第三方插件）再排查。</li>
+      <li>排查细节在<b>日志目录</b>里的 <code>harness-YYYYMMDD.log</code>。</li>
+    </ul>
+    <div class="actions">
+      <button class="primary" id="restart">重启 Harness</button>
+      <button id="logs">打开日志目录</button>
+      <button id="diag">打开诊断页</button>
+      <span class="muted" id="version"></span>
+    </div>
+  </div>
+  <script>
+    const q = new URLSearchParams(location.search)
+    const theme = q.get('theme')
+    if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme
+    const msg = q.get('msg')
+    if (msg) document.getElementById('msg').textContent = decodeURIComponent(msg)
+    const api = window.dshDesktop
+    document.getElementById('restart').onclick = () => { if (api && api.restartHarness) api.restartHarness() }
+    document.getElementById('logs').onclick = () => { if (api && api.openLogs) api.openLogs() }
+    // 诊断页：把当前日志目录与版本信息复制到剪贴板，便于贴给别人看（页面自身没有剪贴板以外的能力）
+    document.getElementById('diag').onclick = async () => {
+      try {
+        const info = api && api.getInfo ? await api.getInfo() : null
+        await navigator.clipboard.writeText(JSON.stringify(info ?? {}, null, 2))
+        document.getElementById('diag').textContent = '已复制诊断信息'
+      } catch {
+        document.getElementById('diag').textContent = '复制失败'
+      }
+    }
+    ;(async () => {
+      try {
+        const info = api && api.getInfo ? await api.getInfo() : null
+        if (info && typeof info === 'object') {
+          const parts = []
+          if (info.version) parts.push('v' + info.version)
+          if (info.harnessVersion) parts.push('harness ' + info.harnessVersion)
+          document.getElementById('version').textContent = parts.join(' · ')
+        }
+      } catch { /* 版本号显示失败不影响排查按钮 */ }
+    })()
+  </script>
+</body>
+</html>

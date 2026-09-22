@@ -9,8 +9,10 @@ resources/dsh/
 resources/runtime/
 resources/.dsh-runtime-cache.json
 resources/icons/
+resources/installer/
 packages/*/lib/client.js
 packages/*/lib/client.js.map
 *.log
 .DS_Store
 resources/shell-pages/loading.html
+resources/shell-pages/error.html

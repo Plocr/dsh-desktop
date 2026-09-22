@@ -133,6 +133,21 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（官方 runProf
 3. 首次启动创建桌面 profile 并引导内嵌 harness（约 2 秒，无需解压、无需联网）
 
 > 安装包自包含：内置便携 Node 与 dsh 运行时，**无需**预先安装 Node.js 或全局 dsh。
+>
+> ⚠️ **杀毒软件误报**：本应用未签名，且会拉起内嵌 Node 运行时加载大量插件文件，容易被行为启发式
+> （如卡巴斯基的 `PDM:Trojan.Win32.Generic`）误判并**隔离运行时文件**——之后应用会反复启动失败。
+> 处理与自查见 [docs/ANTIVIRUS-FALSE-POSITIVE.md](docs/ANTIVIRUS-FALSE-POSITIVE.md)（0.8.6 起应用会在启动时
+> 直接指出"哪个运行时文件缺失、很可能被安全软件隔离"，不再把它伪装成插件故障）。
+
+### 安装向导
+
+向导是带品牌的 NSIS 流程：欢迎页（内置运行时、离线可用）→ 安装位置 → 安装（连续进度条）→ 完成页
+（可直接勾选启动）。页头与侧栏的品牌图由 `scripts/make-icons.mjs` 生成（纯 JS，无外部依赖）；
+页面文案在 `scripts/installer.nsh` 里定义。
+
+| 欢迎页 |
+|---|
+| ![安装向导](docs/screenshots/安装向导.png) |
 
 ---
 

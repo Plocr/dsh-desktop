@@ -92,8 +92,17 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: DSH Desktop
+  uninstallDisplayName: DSH Desktop ${version}
   artifactName: DSH.Desktop-${version}-setup.${ext}
   include: scripts/installer.nsh
+  # 安装向导品牌图（MUI2 写死的尺寸：页头 150×57 / 侧栏 164×314），
+  # 由 `npm run make:icons`（scripts/make-icons.mjs，纯 JS 生成，无外部依赖）产出。
+  # 侧栏同时用于欢迎页/完成页（安装）与卸载向导。
+  installerIcon: resources/icons/icon.ico
+  uninstallerIcon: resources/icons/icon.ico
+  installerHeader: resources/installer/header.bmp
+  installerSidebar: resources/installer/sidebar.bmp
+  uninstallerSidebar: resources/installer/sidebar.bmp
 
 portable:
   artifactName: DSH.Desktop-${version}-portable.${ext}

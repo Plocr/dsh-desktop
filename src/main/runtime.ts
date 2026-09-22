@@ -126,9 +126,27 @@ export function resolveRuntime(): RuntimeSpec {
     ? path.join(resources, 'runtime', 'node', 'node.exe')
     : path.join(resources, 'runtime', 'node', 'bin', 'node')
   const pnpmEntry = path.join(resources, 'runtime', 'pnpm', 'bin', 'pnpm.cjs')
+  // 关键文件清单：不逐文件校验 sha256（上万文件，太慢），但**启动必需**的这几处必须在。
+  // 真机事故（2026-09-23）：安全软件把 Host 入口按启发式隔离掉，启动时报的是 Node 的
+  // `Cannot find module`，用户看不懂；这里给出「哪个文件缺了 + 最可能的原因」。
   const hostEntry = path.join(runtimeDir, 'node_modules', 'dsh-desktop-host', 'lib', 'index.js')
-  for (const [label, file] of [['Node', node], ['pnpm', pnpmEntry], ['Host 入口', hostEntry]] as const) {
-    if (!existsSync(file)) throw new Error(`桌面运行时缺少随包 ${label}（${file}）。${SETUP_RUNTIME_HINT}`)
+  const essentials = [
+    ['Node', node],
+    ['pnpm', pnpmEntry],
+    ['Host 入口', hostEntry],
+    ['bridge 插件', path.join(runtimeDir, 'node_modules', 'dsh-desktop-bridge', 'lib', 'index.js')],
+    ['harness 包', path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')],
+    ['Web 前端 dist', path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist', 'index.html')],
+  ] as const
+  const missing = essentials.filter(([, file]) => !existsSync(file))
+  if (missing.length > 0) {
+    const list = missing.map(([label, file]) => `  · ${label}：${file}`).join('\n')
+    throw new Error(
+      `桌面运行时缺少随包文件（安装不完整，或被杀毒软件/安全软件的启发式规则隔离）：\n${list}\n\n` +
+        '未签名的 Electron 应用 + 内嵌 harness（会拉起子进程、加载大量插件文件）容易被误报。' +
+        '请把安装目录加入安全软件白名单后重新安装；开发机上也可运行 npm run setup:runtime 重建（' +
+        `安装目录：${resources}）。`,
+    )
   }
   return { node, runtimeDir, dshVersion: release.dshVersion, pnpmEntry, descriptor }
 }

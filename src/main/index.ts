@@ -691,6 +691,9 @@ function openBrowser(): void {
 function currentInfo(): unknown {
   return {
     version: app.getVersion(),
+    // 诊断用：随包 harness 版本与运行时树位置（错误的排查页会展示/复制这些字段）
+    harnessVersion,
+    runtimeDir: runtime?.runtimeDir ?? null,
     harnessState: host?.state ?? 'stopped',
     url: lanUrl,
     dshHome: dshHome(),
@@ -1304,6 +1307,20 @@ async function main(): Promise<void> {
       },
       onState: (s) => {
         if (s === 'starting' && !harnessEverReady) win?.showLoading(undefined, resolveThemePreference(dshHome()))
+        refreshTray()
+      },
+      // 随包运行时文件缺失（安全软件隔离 / 安装损坏）：这是**安装问题**，不是插件问题。
+      // 不重试、不计入安全模式计数，直接把可执行的说明摆到用户面前（真机事故见 D46）。
+      onRuntimeDamaged: ({ entry }) => {
+        const detail =
+          `随包运行时缺少关键文件：\n${entry}\n\n` +
+          '这通常是被安全软件（如卡巴斯基的"主动防御"）按启发式规则隔离/删除。' +
+          '本应用是未签名的 Electron + 内嵌 harness，运行时会拉起子进程并加载大量插件文件，' +
+          '容易触发这类误报。\n\n' +
+          '处理：把安装目录加入安全软件白名单后重新安装（或从隔离区恢复该文件），然后点托盘「重启 Harness」。'
+        log('error', `runtime damaged: missing ${entry}（可能是安全软件隔离；不再重试）`)
+        if (settings.notifications) notify('运行时文件缺失（可能被安全软件隔离）', '已停止重试；按提示加入白名单后重新安装即可恢复。')
+        win?.showError(detail, resolveThemePreference(dshHome()))
         refreshTray()
       },
     },

@@ -4,6 +4,8 @@
  *  - resources/icons/tray.png   (32x32)
  *  - resources/icons/tray@2x.png(64x64)
  *  - resources/icons/icon.ico   (16/32/48/256 多尺寸，PNG-in-ICO)
+ *  - resources/installer/header.bmp (150x57)  NSIS 页头品牌条
+ *  - resources/installer/sidebar.bmp(164x314) NSIS 欢迎/完成页品牌面板
  * 设计：白底（与工作台一致）+ 黑色 DeepSeek 鲸鱼 logo（官网品牌 path，whale-path.txt）。
  * 鲸鱼光栅化：SVG path 解析（M/C/Z 绝对坐标）→ 三次贝塞尔采样 → 多边形
  * → nonzero 绕数 ray-casting 逐像素填充。
@@ -183,6 +185,149 @@ function render(size, whaleScale = 0.66) {
   return out
 }
 
+/* ── NSIS 安装向导品牌图（24-bit BMP；NSIS 只认这一种形状） ───────────── */
+
+/**
+ * 24-bit 未压缩 BMP（bottom-up、BI_RGB）。
+ * @param width - 像素宽
+ * @param height - 像素高
+ * @param rgb - 长度 width*height*3 的 RGB 缓冲（自上而下）
+ * @returns BMP 文件字节
+ */
+function encodeBmp(width, height, rgb) {
+  const rowSize = Math.ceil((width * 3) / 4) * 4
+  const pixels = rowSize * height
+  const out = Buffer.alloc(54 + pixels)
+  out.write('BM', 0, 'ascii')
+  out.writeUInt32LE(out.length, 2)
+  out.writeUInt32LE(54, 10)
+  out.writeUInt32LE(40, 14)
+  out.writeInt32LE(width, 18)
+  out.writeInt32LE(height, 22)
+  out.writeUInt16LE(1, 26)
+  out.writeUInt16LE(24, 28)
+  out.writeUInt32LE(pixels, 34)
+  out.writeInt32LE(2835, 38)
+  out.writeInt32LE(2835, 42)
+  for (let y = 0; y < height; y++) {
+    let o = 54 + y * rowSize
+    const srcY = height - 1 - y
+    for (let x = 0; x < width; x++) {
+      const i = (srcY * width + x) * 3
+      out[o++] = rgb[i + 2]
+      out[o++] = rgb[i + 1]
+      out[o++] = rgb[i]
+    }
+  }
+  return out
+}
+
+/** 读一次鲸鱼 path 多边形（品牌图与图标共用同一份矢量）。 */
+let whalePolysCache
+function whalePolys() {
+  if (whalePolysCache === undefined) {
+    const d = readFileSync(path.join(root, 'resources', 'shell-pages', 'whale-path.txt'), 'utf8').trim()
+    whalePolysCache = parsePathToPolys(d)
+  }
+  return whalePolysCache
+}
+
+/**
+ * 鲸鱼覆盖率图：每像素 3×3 超采样，供小尺寸下拿到平滑边缘。
+ * @param width - 图宽
+ * @param height - 图高
+ * @param opts - 高度占比与中心点（0–1 相对坐标）
+ * @returns 长度 width*height 的覆盖率（0–1）
+ */
+function whaleCoverage(width, height, opts = {}) {
+  const scale = opts.scale ?? 0.6
+  const cx = opts.cx ?? 0.5
+  const cy = opts.cy ?? 0.5
+  const polys = whalePolys()
+  // 鲸鱼自己的包围盒才是「视觉中心」：path 的 viewBox（24×18）里右侧有留白，
+  // 直接按 viewBox 居中会看起来偏左。这里按包围盒缩放 + 居中。
+  let bbMinX = Infinity
+  let bbMaxX = -Infinity
+  let bbMinY = Infinity
+  let bbMaxY = -Infinity
+  for (const pts of polys) {
+    for (const p of pts) {
+      if (p.x < bbMinX) bbMinX = p.x
+      if (p.x > bbMaxX) bbMaxX = p.x
+      if (p.y < bbMinY) bbMinY = p.y
+      if (p.y > bbMaxY) bbMaxY = p.y
+    }
+  }
+  const k = (height * scale) / (bbMaxY - bbMinY) // viewBox 单位 → 像素
+  const targetW = (bbMaxX - bbMinX) * k
+  const ox = width * cx - targetW / 2 - bbMinX * k
+  const oy = height * cy - (height * scale) / 2 - bbMinY * k
+  // 目标矩形（+1px 余量）：只在这个范围内做绕数判定
+  const minX = Math.max(0, Math.floor(ox + bbMinX * k) - 1)
+  const maxX = Math.min(width - 1, Math.ceil(ox + bbMaxX * k) + 1)
+  const minY = Math.max(0, Math.floor(oy + bbMinY * k) - 1)
+  const maxY = Math.min(height - 1, Math.ceil(oy + bbMaxY * k) + 1)
+  const coverage = new Float32Array(width * height)
+  for (let y = minY; y <= maxY; y++) {
+    for (let x = minX; x <= maxX; x++) {
+      let hits = 0
+      for (let sy = 0; sy < 3; sy++) {
+        for (let sx = 0; sx < 3; sx++) {
+          const px = x + (sx + 0.5) / 3
+          const py = y + (sy + 0.5) / 3
+          const wx = (px - ox) / k
+          const wy = (py - oy) / k
+          if (windingAt({ x: wx, y: wy }, polys) !== 0) hits += 1
+        }
+      }
+      coverage[y * width + x] = hits / 9
+    }
+  }
+  return coverage
+}
+
+/**
+ * NSIS 品牌图：白/浅灰底 + 黑色鲸鱼 + 一条发丝分隔线。
+ *  - `header`（150×57，MUI 页头右侧）：鲸鱼居中，底部发丝线；
+ *  - `sidebar`（164×314，欢迎/完成页左侧）：浅灰渐变面板，鲸鱼偏上、下方发丝线。
+ * @param width - 图宽
+ * @param height - 图高
+ * @param kind - 图类型
+ * @returns RGB 缓冲（自上而下）
+ */
+function brandPanel(width, height, kind) {
+  const rgb = new Uint8Array(width * height * 3)
+  const ink = [15, 17, 21]
+  const from = [255, 255, 255]
+  const to = kind === 'sidebar' ? [236, 239, 243] : [255, 255, 255]
+  for (let y = 0; y < height; y++) {
+    const t = height <= 1 ? 0 : y / (height - 1)
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 3
+      for (let c = 0; c < 3; c++) rgb[i + c] = Math.round(from[c] + (to[c] - from[c]) * t)
+    }
+  }
+  const coverage = kind === 'sidebar'
+    ? whaleCoverage(width, height, { scale: 0.3, cx: 0.5, cy: 0.42 })
+    : whaleCoverage(width, height, { scale: 0.62, cx: 0.5, cy: 0.5 })
+  for (let i = 0; i < coverage.length; i++) {
+    const a = coverage[i]
+    if (a <= 0) continue
+    for (let c = 0; c < 3; c++) rgb[i * 3 + c] = Math.round(rgb[i * 3 + c] * (1 - a) + ink[c] * a)
+  }
+  // 发丝线：只在 sidebar 上、鲸鱼正下方留一笔（页头自带下边框，不需要画）
+  if (kind === 'sidebar') {
+    const ruleY = Math.round(height * 0.58)
+    for (let x = Math.round(width * 0.32); x <= Math.round(width * 0.68); x++) {
+      const i = (ruleY * width + x) * 3
+      rgb[i] = 214
+      rgb[i + 1] = 219
+      rgb[i + 2] = 226
+    }
+  }
+  return rgb
+}
+
 /* ── ICO ─────────────────────────────────────────────────────────────── */
 
 function encodeIco(sizes, pngs) {
@@ -252,3 +397,11 @@ const icnsEntries = icnsSizes.map(({ type, size }) => ({
 }))
 writeFileSync(path.join(outDir, 'icon.icns'), encodeIcns(icnsEntries))
 console.log(`[icons] generated ${outDir}`)
+
+// NSIS 安装向导品牌图（electron-builder: nsis.installerHeader / installerSidebar /
+// uninstallerSidebar）。150×57 与 164×314 是 MUI2 写死的尺寸，不能再大也不能再小。
+const installerDir = path.join(root, 'resources', 'installer')
+mkdirSync(installerDir, { recursive: true })
+writeFileSync(path.join(installerDir, 'header.bmp'), encodeBmp(150, 57, brandPanel(150, 57, 'header')))
+writeFileSync(path.join(installerDir, 'sidebar.bmp'), encodeBmp(164, 314, brandPanel(164, 314, 'sidebar')))
+console.log(`[icons] generated ${installerDir} (NSIS header + sidebar BMP)`)

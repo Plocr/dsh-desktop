@@ -17,6 +17,8 @@
  */
 import { log } from './logger.ts'
 import { DesktopHostProcess } from './hostProcess.ts'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { request as httpRequest } from 'node:http'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
@@ -37,6 +39,12 @@ export interface HostHandlers {
   onExit: (info: { code: number | null; signal: NodeJS.Signals | null; willRestart: boolean }) => void
   onLog: (stream: 'stdout' | 'stderr', line: string) => void
   onState: (s: HostState) => void
+  /**
+   * 随包运行时**文件缺失**（不是插件问题）：壳停止重试并由调用方给出可执行的说明。
+   * 真机事故（2026-09-23）：安全软件把 Host 入口当启发式误报隔离掉，壳却按
+   * 「harness 崩溃」连推三次 → 安全模式，用户看到的是"插件坏了"，排查方向完全错。
+   */
+  onRuntimeDamaged?: (info: { entry: string }) => void
 }
 
 export interface HostOptions {
@@ -99,10 +107,15 @@ export class HostManager {
   /** 端口冲突兜底是否已用过（只切一次随机端口）。 */
   private portFallbackUsed = false
 
-  constructor(
-    private opts: HostOptions,
-    private handlers: HostHandlers,
-  ) {}
+  // 注意：不用 TypeScript 的「构造函数参数属性」——Node 的类型擦除（strip-only）不支持该语法，
+  // 而测试会直接 import 本模块（与 hostProcess.ts 同一条约束）。
+  private opts: HostOptions
+  private handlers: HostHandlers
+
+  constructor(opts: HostOptions, handlers: HostHandlers) {
+    this.opts = opts
+    this.handlers = handlers
+  }
 
   /** 首次启动（或崩溃后手动重启入口）。已在运行时忽略，避免重复 spawn。 */
   start(): void {
@@ -345,6 +358,17 @@ export class HostManager {
 
   private spawn(): void {
     if (this.quit) return
+    // 运行时完整性前置检查：随包 Host 入口在不在。
+    // 缺失只可能来自「安装被破坏 / 安全软件隔离」（运行时是不可变的签名更新单元），
+    // 绝不能当成 harness 崩溃去重试——重试只会把应用推进安全模式，把问题伪装成插件故障。
+    const hostEntry = join(this.opts.runtimeDir, 'node_modules', 'dsh-desktop-host', 'lib', 'index.js')
+    if (!existsSync(hostEntry)) {
+      log('error', `host entry missing: ${hostEntry}（随包运行时被破坏或被安全软件隔离）`)
+      this.quit = true
+      this.setState('stopped')
+      this.handlers.onRuntimeDamaged?.({ entry: hostEntry })
+      return
+    }
     this.setState('starting')
     const gen = ++this.childGen
     const host = new DesktopHostProcess(
