@@ -79,6 +79,9 @@ function desktopPackageManager(pnpmEntry: string): {
     // `--expose-internals` 已移除：实测 pnpm 11 的 install/add/remove 都不需要它，
     // 而这个 flag 在行为启发式里非常显眼。
     args: [
+      // 与宿主进程同一个理由：用操作系统证书库，穿得过安全软件的 TLS 扫描
+      // （否则 pnpm 从 registry 拉包会 SELF_SIGNED_CERT_IN_CHAIN，插件装不上）。
+      '--use-system-ca',
       resolve(pnpmEntry),
       '--config.registry=https://registry.npmjs.org/',
       `--config.store-dir=${store}`,

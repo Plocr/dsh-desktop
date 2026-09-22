@@ -15,7 +15,7 @@
  *    （Web 侧边栏「插件」页 / `plugin_manager` 工具），壳只提供 profile 与原生恢复
  *    （安全模式隔离，见 pluginfs.ts）。
  */
-import { app, clipboard, dialog, nativeTheme, session, shell, BrowserWindow } from 'electron'
+import { app, clipboard, dialog, nativeTheme, net, session, shell, BrowserWindow } from 'electron'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -33,6 +33,7 @@ import {
   emptyAccountLoginMemory,
   type AccountLoginMemory,
 } from './accountLogin.ts'
+import { closeLoginWindow, hasLoginWindow, openLoginWindow } from './loginWindow.ts'
 import { isSafeMode, recordStartFailure, recordStartSuccess, exitSafeMode, activateSafeMode, SAFE_MODE_THRESHOLD, type SafeModeState } from './safeMode'
 import {
   apiKeyNeedsAttention,
@@ -944,7 +945,12 @@ async function checkApiKey(): Promise<{ result: ApiKeyCheckResult; via: 'bridge'
       log('error', `api key check via bridge inconclusive: ${message}`)
     }
   }
-  return { result: await checkDeepSeekKey(path.join(dshHome(), '.credentials.yaml')), via: 'file' }
+  // 用 Chromium 网络栈（`net.fetch`）而不是 Node 的全局 fetch：它用操作系统证书库，
+  // 因此能穿过安全软件的 TLS 扫描（Node 侧只认自带 CA 列表，真机会 SELF_SIGNED_CERT_IN_CHAIN）。
+  return {
+    result: await checkDeepSeekKey(path.join(dshHome(), '.credentials.yaml'), undefined, net.fetch),
+    via: 'file',
+  }
 }
 
 /** 自检并更新托盘/通知（只在明确无效时通知一次）。 */
@@ -973,20 +979,30 @@ async function runApiKeyCheck(): Promise<void> {
 function handleAccountChanged(payload: unknown): void {
   const state = accountStateOf(payload)
   if (state === null) return
+  // 登录成功：关掉内置登录窗口并知会用户一次（只在确实开过窗口时提示，避免打扰）
+  if (state.status === 'credential-stored' && state.attempt?.phase === 'succeeded') {
+    if (hasLoginWindow()) {
+      closeLoginWindow('signed in')
+      if (settings.notifications) notify('已登录 DeepSeek', '账号授权完成，余额/用量在侧边栏左下角账号菜单里查看。')
+      showWindow()
+    }
+    return
+  }
   // 主题与官方同源：壳把有效主题写进 nativeTheme.themeSource（见 window.ts），这里读解析结果。
   const { steps, memory } = accountLoginSteps(state, nativeTheme.shouldUseDarkColors, accountLoginMemory)
   accountLoginMemory = memory
   for (const step of steps) {
     if (step.kind === 'open-browser') {
-      log('info', `account sign-in: opening authorize page in the system browser (attempt ${step.attemptId})`)
-      void shell.openExternal(step.url).catch((err: unknown) => {
-        log('error', `account sign-in: could not open browser: ${err instanceof Error ? err.message : String(err)}`)
-      })
+      // 默认开**应用内登录窗口**（不依赖系统默认浏览器），失败自动退回系统浏览器；
+      // 想强制用浏览器可设 DSH_DESKTOP_LOGIN_BROWSER=1（见 loginWindow.ts）。
+      const mode = openLoginWindow(step.url)
+      log('info', `account sign-in: authorize page opened (${mode}, attempt ${step.attemptId})`)
       continue
     }
     // failed / expired：用户此刻多半停在浏览器里，必须把应用唤回前台并给出可读原因
     const detail = accountLoginFailureText(step)
     log('error', `account sign-in ${step.reason}: ${detail}`)
+    closeLoginWindow(step.reason)
     showWindow()
     if (settings.notifications) notify('DeepSeek 登录未完成', detail)
   }

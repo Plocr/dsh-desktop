@@ -170,6 +170,9 @@ export function repairFingerprint(report: ProfileDependencyReport): string {
  */
 export function profilePnpmArgs(pnpmEntry: string, stateDir: string, command: 'install'): string[] {
   return [
+    // 与宿主/插件管理器同一个理由：用操作系统证书库，穿得过安全软件的 TLS 扫描
+    //（Kaspersky 的加密连接扫描会让 Node 的 registry 请求死在 SELF_SIGNED_CERT_IN_CHAIN）。
+    '--use-system-ca',
     pnpmEntry,
     '--config.registry=https://registry.npmjs.org/',
     `--config.store-dir=${stateDir}/store`,

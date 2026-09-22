@@ -127,6 +127,12 @@ export class DesktopHostProcess {
     // 本壳的 Host 包为非作用域名（与官方私有包 @deepseek-ai/dsh-desktop-host 的路径不同）。
     const entry = join(this.runtimeDir, 'node_modules', 'dsh-desktop-host', 'lib', 'index.js')
     const child = spawn(this.node, [
+      // 用**操作系统证书库**（Windows 根证书）而不是 Node 自带的 CA 列表。
+      // 真机事故（2026-09-23）：卡巴斯基的"加密连接扫描"会用自己的根证书重建 TLS 链，
+      // Windows/Chromium 信它，而 Node 只认自带列表 → Host 进程的所有 HTTPS 都
+      // `SELF_SIGNED_CERT_IN_CHAIN`（登录的 auth_init / 模型请求 / 余额查询全灭）。
+      // Electron 主进程与网页走 Chromium 栈本来就不受影响，只有 Node 侧需要这个开关。
+      '--use-system-ca',
       ...(this.inspectPort === undefined ? [] : [`--inspect=127.0.0.1:${String(this.inspectPort)}`]),
       entry,
       this.runtimeDir,

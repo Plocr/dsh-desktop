@@ -53,6 +53,14 @@ function mask(key: string): string {
 export async function checkDeepSeekKey(
   credentialsYaml: string,
   apiKey?: string,
+  /**
+   * 执行请求的实现（缺省 Node 的全局 fetch）。
+   *
+   * 壳在 Electron 主进程里会传入 **`net.fetch`**（Chromium 网络栈）：它用操作系统证书库，
+   * 因此能穿过安全软件的 TLS 扫描；而 Node 的 fetch 只认自带 CA 列表，
+   * 真机上会以 `SELF_SIGNED_CERT_IN_CHAIN` 失败（见 hostProcess.ts 的同款说明）。
+   */
+  fetchImpl: (input: string, init?: RequestInit) => Promise<Response> = (input, init) => fetch(input, init),
 ): Promise<ApiKeyCheckResult> {
   const key = apiKey ?? readDeepSeekKeyFromCredentials(credentialsYaml)
   if (!key) {
@@ -68,7 +76,7 @@ export async function checkDeepSeekKey(
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS)
   try {
-    const r = await fetch(`${BASE}/user/balance`, {
+    const r = await fetchImpl(`${BASE}/user/balance`, {
       headers: { Authorization: `Bearer ${key}` },
       signal: ctrl.signal,
     })
