@@ -155,7 +155,6 @@ test('repairFingerprint：只看包名集合（同状态同指纹，改清单即
 test('profilePnpmArgs：store/registry/userconfig 与 Host 的 packageManager 同一套', () => {
   const args = profilePnpmArgs('/rt/pnpm/bin/pnpm.cjs', '/home/desktop/pnpm', 'install')
   assert.deepEqual(args, [
-    '--expose-internals',
     '/rt/pnpm/bin/pnpm.cjs',
     '--config.registry=https://registry.npmjs.org/',
     '--config.store-dir=/home/desktop/pnpm/store',
@@ -163,6 +162,8 @@ test('profilePnpmArgs：store/registry/userconfig 与 Host 的 packageManager �
     '--config.userconfig=/home/desktop/pnpm/config/npmrc',
     'install',
   ])
+  // 不再带 --expose-internals（杀软行为启发式里很显眼的 flag；实测 pnpm 11 不需要）
+  assert.equal(args.includes('--expose-internals'), false)
 })
 
 test('listInstalledPackages：只认带 package.json 的目录/链接（含作用域包）', () => {

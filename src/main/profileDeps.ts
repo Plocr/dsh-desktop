@@ -164,10 +164,12 @@ export function repairFingerprint(report: ProfileDependencyReport): string {
  * 随包 pnpm 的调用参数（与 `packages/host/src/index.ts` 的 `desktopPackageManager` 保持同一形态：
  * 同一个 store、同一个 registry、同一个 userconfig，否则 pnpm 会因 store 不一致直接拒绝动手）。
  * 两处必须同步修改——宿主侧那份是官方插件管理器的 `packageManager`，这份是壳自己的修复动作。
+ *
+ * 不再带 `--expose-internals`：实测 pnpm 11 的 install/add/remove 都不需要它，而这个 flag
+ * 在行为启发式（杀软 PDM）里很显眼；解释器本身也换成自家 Electron 二进制（见 profileRepair）。
  */
 export function profilePnpmArgs(pnpmEntry: string, stateDir: string, command: 'install'): string[] {
   return [
-    '--expose-internals',
     pnpmEntry,
     '--config.registry=https://registry.npmjs.org/',
     `--config.store-dir=${stateDir}/store`,

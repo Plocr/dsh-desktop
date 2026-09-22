@@ -1,8 +1,12 @@
 /**
  * 构建随包运行时（对齐官方 desktop 的「两份资源」布局）：
  *
- *   resources/runtime/   便携 Node（nodejs.org 下载，校验 SHASUMS256）+ pnpm + versions.json
- *                        —— 包管理器独立于系统，插件事务只走它（官方原则）
+ *   resources/runtime/   pnpm + versions.json（**不随包 node.exe**）
+ *                        —— 解释器用应用自身的 Electron 二进制（`ELECTRON_RUN_AS_NODE=1`，
+ *                           与官方桌面端同形：少一个未签名解释器镜像、体积小约 50 MB，
+ *                           见 docs/ANTIVIRUS-FALSE-POSITIVE.md）；pnpm 仍随包，插件事务只走它。
+ *                           构建期会下载一份便携 Node（nodejs.org + SHASUMS256 校验）当**工具链**用
+ *                           （跑 npm 装 dsh 闭包），它不进安装包（electron-builder.yml 里 `!node/**`）。
  *   resources/dsh/       dsh 运行时树：`npm install @deepseek-ai/dsh@<ver>` 的完整生产依赖闭包，
  *                        外加本仓第一方包 dsh-desktop-bridge（插件）与 dsh-desktop-host（Host 入口），
  *                        末尾写 desktop-runtime.json（含每个文件的 sha256 清单）与
@@ -45,6 +49,11 @@ if (!DSH_VERSION || !NODE_VERSION || !PNPM_VERSION) {
 }
 /** 目标 Node 架构：默认宿主架构；交叉构建（x64 runner 上打 arm64 包）用 env 指定。 */
 const NODE_ARCH = process.env.DSH_RUNTIME_NODE_ARCH ?? process.arch
+/**
+ * 随包解释器身份（Electron 版本 + 它内置的 Node 版本）。
+ * 构建期就要读一次：descriptor 的 `release.electronVersion/nodeVersion` 记的是**运行时真正用的**解释器。
+ */
+const ELECTRON = electronIdentity()
 
 const systemTar =
   process.platform === 'win32' ? path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe') : ''
@@ -94,6 +103,39 @@ function runNpmInstall(prefix, extraArgs) {
     }
   }
   throw lastErr ?? new Error('npm install 多次失败')
+}
+
+/**
+ * 随包解释器的身份：**pinned Electron 的版本 + 它内置的 Node 版本**。
+ *
+ * 0.8.7 起不再随包独立 `node.exe`：Host 与 pnpm 都由应用自身的 Electron 二进制以
+ * `ELECTRON_RUN_AS_NODE=1` 运行（少一个未签名解释器镜像 = 少一分杀软行为误报，
+ * 体积也少约 50 MB；harness 侧只认 Electron 43.0.0/44.0.0/45.0.0-alpha.6 的指纹，
+ * 因此 package.json 把 electron 精确钉在 44.0.0）。descriptor 里如实记录这两个版本。
+ */
+function electronIdentity() {
+  const manifest = path.join(root, 'node_modules', 'electron', 'package.json')
+  const version = JSON.parse(readFileSync(manifest, 'utf8')).version
+  const exe = process.platform === 'win32'
+    ? path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe')
+    : process.platform === 'darwin'
+      ? path.join(root, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron')
+      : path.join(root, 'node_modules', 'electron', 'dist', 'electron')
+  if (!existsSync(exe)) {
+    // electron 的二进制由它自己的 postinstall 下载（`node_modules/electron/install.js`）。
+    // 少数环境会跳过 postinstall（本地配置 / 缓存 / 代理失败），这里补一次，
+    // 免得构建在"解释器缺失"上失败——那正是本版新引入的硬前提。
+    console.log('[runtime] electron 二进制缺失 → 运行 electron/install.js 补装')
+    run(process.execPath, [path.join(root, 'node_modules', 'electron', 'install.js')], { cwd: root })
+  }
+  if (!existsSync(exe)) {
+    throw new Error(`随包解释器缺失：${exe}（先 npm install 把 electron@${version} 装好）`)
+  }
+  const nodeVersion = execFileSync(exe, ['-e', 'process.stdout.write(process.versions.node)'], {
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    encoding: 'utf8',
+  }).trim()
+  return { version, nodeVersion }
 }
 
 /* ── resources/runtime：便携 Node + pnpm ─────────────────────────────── */
@@ -335,7 +377,10 @@ function writeRuntimeDescriptor() {
       version: pkg.version,
       dshVersion: DSH_VERSION,
       hostProtocolVersion: HOST_PROTOCOL_VERSION,
-      nodeVersion: NODE_VERSION,
+      // 真正跑 harness 的解释器是随包 Electron（以 Node 模式运行），因此记录它与它内置的 Node，
+      // 而不是构建期下载的那份便携 Node（那份只用于构建时 npm 操作，不进安装包）。
+      electronVersion: ELECTRON.version,
+      nodeVersion: ELECTRON.nodeVersion,
       pnpmVersion: PNPM_VERSION,
     },
     platform: process.platform,
@@ -463,7 +508,13 @@ async function main() {
   }
   writeFileSync(
     path.join(runtimeDir, 'versions.json'),
-    `${JSON.stringify({ schemaVersion: 1, node: NODE_VERSION, pnpm: PNPM_VERSION }, null, 2)}\n`,
+    // 运行时真正用的解释器 = 随包 Electron（以 Node 模式跑 Host 与 pnpm）；
+    // 构建期便携 Node 只是工具链，写在这里会让人误以为它在安装包里。
+    `${JSON.stringify(
+      { schemaVersion: 1, electron: ELECTRON.version, node: ELECTRON.nodeVersion, pnpm: PNPM_VERSION, toolchainNode: NODE_VERSION },
+      null,
+      2,
+    )}\n`,
   )
   console.log(`[runtime] done -> ${runtimeDir} + ${dshDir}`)
 }

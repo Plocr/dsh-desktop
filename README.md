@@ -34,7 +34,7 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（官方 runProf
 |---|---|
 | 传输 | **官方形态**：Host 用 `runProfile` 起真实 Web Host（loopback，默认 19387，可用 `webserver.config.port` patch 覆盖），ready 事件带回**认证 URL** 与 **index 注入片段**；窗口从 `dsh-app://app/` 加载随包 dist（入口注入 `__DSH_BOOT_READY__`），其余请求由主进程带 cookie 转发。凭据只存在主进程，渲染层拿不到；`--no-open` 保证不自动开浏览器 |
 | Web UI 远端流 | 官方 WebSocket mux：客户端连 `ws://127.0.0.1:<hostPort>`，主进程按官方方式补 `Origin`/`cookie`；局域网/浏览器版门面额外做 WS 升级代理（同样过设备授权 + token 门禁） |
-| 运行时 | `extraResources` 直接随包两棵树：`resources/runtime`（便携 Node + pnpm）与 `resources/dsh`（`npm install @deepseek-ai/dsh` 的完整生产闭包 + 第一方包），**不再首启解压**；`resources/dsh/desktop-runtime.json` 记录每个文件的 sha256 与发行身份（壳版本 + dsh 版本 + Node/pnpm 版本 + 协议版本），启动时校验，对不上直接拒绝启动 |
+| 运行时 | `extraResources` 直接随包两棵树：`resources/runtime`（**pnpm**；0.8.7 起不再随包 `node.exe`，解释器用应用自身的 Electron 二进制 `ELECTRON_RUN_AS_NODE`，与官方桌面端同形）与 `resources/dsh`（`npm install @deepseek-ai/dsh` 的完整生产闭包 + 第一方包），**不再首启解压**；`resources/dsh/desktop-runtime.json` 记录每个文件的 sha256 与发行身份（壳版本 + dsh 版本 + Electron/Node/pnpm 版本 + 协议版本），启动时校验，对不上直接拒绝启动 |
 | 版本模型 | **一个签名更新单元**：壳 / dsh / Node / pnpm 由 `desktop-runtime.json` 绑死，随桌面端一起发版；不再有「单独更新 harness」的通道（历史上的整树刷新、兼容探测、tar.gz 解压与不兼容清单全部删除） |
 | 插件 | **官方插件系统原样运行**：Host 向 dsh 提供官方「启动器信息」（`profileContext`，身份名 `desktop`，含随包 pnpm 作为 `packageManager`），`plugin-manager` 与 HMR 因此激活——侧边栏「插件」页与 `plugin_manager` 工具可在本壳里安装/启停/卸载。profile（`$DSH_HOME/profiles/dsh-workbench`）承载组合：`dsh.profile.bundles` 是有序启用列表，第一方包（bridge / host / dsh）以 **junction 共享包**链接进 profile `node_modules`，第三方插件由官方管理器用**随包 pnpm**装进 profile 依赖，事务期间持有 `<profile>/lock` 与 `desktop-packages-pending` 标记；安装失败按官方语义回滚 `package.json` + `pnpm-lock.yaml`，依赖脚本待批准时给出「允许并重试」。**壳只做两件对账**（都不做插件管理）：启动期把解析不出来的 bundle 条目移出启用列表（不卸载任何东西），以及在启动前体检并修复 `node_modules` 与清单的不一致（缺包/锁文件脱节 → 随包 pnpm `pnpm install`；清单未声明、pnpm 也不认的插件目录 → 清除，链接只删链接） |
 | 签名 | Windows：EV 证书 + SafeNet 令牌（`signtoolOptions.sign` → `scripts/windows-sign.mjs`，未配置签名环境时显式跳过）；macOS：Developer ID 签名 + `notarytool` 公证 + stapling（`scripts/package-macos.mjs`，`resources/dsh`/`resources/runtime` 排除签名）。逐项说明见 [docs/SIGNING.md](docs/SIGNING.md) |
@@ -132,7 +132,7 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（官方 runProf
 2. 双击运行，按向导完成安装（可选择安装目录）
 3. 首次启动创建桌面 profile 并引导内嵌 harness（约 2 秒，无需解压、无需联网）
 
-> 安装包自包含：内置便携 Node 与 dsh 运行时，**无需**预先安装 Node.js 或全局 dsh。
+> 安装包自包含：内置 dsh 运行时与 pnpm（解释器用应用自身的 Electron 运行时），**无需**预先安装 Node.js 或全局 dsh。
 >
 > ⚠️ **杀毒软件误报**：本应用未签名，且会拉起内嵌 Node 运行时加载大量插件文件，容易被行为启发式
 > （如卡巴斯基的 `PDM:Trojan.Win32.Generic`）误判并**隔离运行时文件**——之后应用会反复启动失败。
@@ -184,7 +184,7 @@ Electron 壳 ──spawn(随包 Node)──▶ dsh-desktop-host（官方 runProf
   若下载完没点安装就退出，下次启动仍会重新提示（跨重启保留，不会丢）
 - 通知内附两个下载地址：GitHub 官方地址 + **免费加速代理地址**（默认 `ghfast.top`，可用环境变量 `DSH_DESKTOP_GH_PROXY` 覆盖）
 
-> **为什么没有"单独更新官方 Harness"的通道**：壳版本 + dsh 版本 + 便携 Node + pnpm + Host 协议版本被打包成一个
+> **为什么没有"单独更新官方 Harness"的通道**：壳版本 + dsh 版本 + Electron（harness 的解释器）+ pnpm + Host 协议版本被打包成一个
 > **签名更新单元**，写进随包 `resources/dsh/desktop-runtime.json`（逐文件 sha256），启动时校验；对不上直接拒绝启动。
 > 历史版本里那套「应用内检测 npm 版本 → 整树替换 → 兼容性闸门 → 不兼容清单」已全部移除。
 > 这么做换来的是：不存在"壳与运行时半新半旧"的组合，任何一方的行为差异都不会变成用户侧的偶发故障；
@@ -250,9 +250,10 @@ npm run dist:mac          # macOS dmg（需在 macOS 上执行，arm64/x64）
 
 - `scripts/build.mjs`：esbuild 打包 main/preload → `dist/`
 - `scripts/make-icons.mjs`：生成应用图标（png / ico / icns）
-- `scripts/setup-runtime.mjs`：构建随包运行时两棵树——`resources/runtime`（便携 Node + pnpm）与 `resources/dsh`（`npm install @deepseek-ai/dsh` + 第一方包 tgz + `desktop-runtime.json` 逐文件 sha256 清单）；源码哈希未变时秒过不联网
-  - 可用环境变量：`DSH_RUNTIME_DSH_VERSION`（默认取 `package.json` 的 `dshRuntime.dsh`，该值由上游巡检自动同步——与官方桌面端同版；本壳 profile 为自有名 `dsh-workbench`，不受官方 desktop 守卫影响）、`DSH_RUNTIME_NODE_VERSION`（默认 `v24.15.0`）、`DSH_RUNTIME_NODE_ARCH`（目标便携 Node 架构，交叉构建时显式指定）
-  - **载荷策略**：`DSH_DESKTOP_OFFICE_RUNTIME=1` 才把 Office→PDF 原生引擎（LibreOffice，win32-x64 ≈ 325 MB / 2050 文件）打进包——默认不带，安装包因此小 ~80 MB、装机文件少数千个；代价是应用内 docx/xlsx/pptx 预览不可用（第一次转换会以 `unavailable` 明确报错）。文档类 `.md`（保留 LICENSE/NOTICE）与便携 Node 自带的 npm 目录也在打包时剔除。
+- `scripts/setup-runtime.mjs`：构建随包运行时两棵树——`resources/runtime`（pnpm；**不含 `node.exe`**）与 `resources/dsh`（`npm install @deepseek-ai/dsh` + 第一方包 tgz + `desktop-runtime.json` 逐文件 sha256 清单）；源码哈希未变时秒过不联网。构建期会临时下载一份便携 Node 当**工具链**（跑 npm 装 dsh 闭包），它不进安装包
+  - 可用环境变量：`DSH_RUNTIME_DSH_VERSION`（默认取 `package.json` 的 `dshRuntime.dsh`，该值由上游巡检自动同步——与官方桌面端同版；本壳 profile 为自有名 `dsh-workbench`，不受官方 desktop 守卫影响）、`DSH_RUNTIME_NODE_VERSION`（构建期工具链 Node，默认 `v24.15.0`）、`DSH_RUNTIME_NODE_ARCH`（目标架构，交叉构建时显式指定）
+  - **解释器=随包 Electron**：`package.json` 的 `electron` 是**精确版本**（`44.0.0`）——harness 的 `node-addon-require-builtin` 只认 Electron `43.0.0 / 44.0.0 / 45.0.0-alpha.6` 的运行时指纹，换成别的补丁/次版本 harness 会拒绝启动。`desktop-runtime.json.release` 记 `electronVersion` 与 Electron 内置的 `nodeVersion`
+  - **载荷策略**：`DSH_DESKTOP_OFFICE_RUNTIME=1` 才把 Office→PDF 原生引擎（LibreOffice，win32-x64 ≈ 325 MB / 2050 文件）打进包——默认不带，安装包因此小 ~80 MB、装机文件少数千个；代价是应用内 docx/xlsx/pptx 预览不可用（第一次转换会以 `unavailable` 明确报错）。打包时还会剔除文档类 `.md`（保留 LICENSE/NOTICE）、非目标平台/架构的原生二进制（如 node-pty 的 arm64 ConPTY），以及整个构建期工具链 `runtime/node/**`。
 - `scripts/merge-mac-manifest.mjs`：合并 macOS arm64/x64 的 `latest-mac.yml` 为一份（多架构自动更新）。zip（应用内更新唯一认的载荷）与 dmg（手动安装）都进 `files[]`，sha512/size 由下载下来的实际文件现算——打包期那份早于公证/钉票，已作废
 
 CI（`.github/workflows/build-release.yml`）：master/PR 跑 `check`（typecheck + 单测）与 `e2e`（Windows：真实 dsh 运行时 + Host 管道 + 桥接契约，`npm run e2e:bridge`）；打 `v*` tag 或手动触发时跑三平台安装包构建并上传到对应 Release。mac 的 arm64 构建在 x64 runner 上交叉进行，便携 Node 目标架构经 `DSH_RUNTIME_NODE_ARCH` 显式指定。

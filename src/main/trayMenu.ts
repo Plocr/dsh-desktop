@@ -33,6 +33,14 @@ export interface TrayState extends TrayStatusState {
   lastHarnessError: string | null
   /** 手机连接（局域网门面）是否开启 */
   phoneOn: boolean
+  /**
+   * profile 依赖体检发现的漂移（缺失/残留/锁文件脱节）；null = 干净。
+   *
+   * 只在**检测到漂移**时多出一条「修复插件环境…」。修复本身要用户点一下才跑：
+   * 启动时静默跑 `pnpm install` 是"应用自己装软件"的形状，行为启发式（杀软 PDM）最敏感，
+   * 也让用户无法预期机器上发生了什么（真机事故见 docs/ANTIVIRUS-FALSE-POSITIVE.md）。
+   */
+  pluginDrift: { missing: number; residue: number; lockDrift: number } | null
 }
 
 /** 菜单动作（由 index.ts 注入，模板只负责摆放）。 */
@@ -53,6 +61,8 @@ export interface TrayActions {
   exitSafeMode: () => void
   /** 托盘「进入安全模式」：停用全部插件（仅系统必需） */
   enterSafeMode: () => void
+  /** 托盘「修复插件环境」：用随包 pnpm 把 profile 依赖收敛回清单描述的状态。 */
+  repairPlugins: () => void
   setAutoStart: (v: boolean) => void
   setNotifications: (v: boolean) => void
   setAutoUpdate: (v: boolean) => void
@@ -60,6 +70,8 @@ export interface TrayActions {
 }
 
 export function trayMenuTemplate(s: TrayState, a: TrayActions): MenuItemConstructorOptions[] {
+  // 兼容旧调用方/测试夹具：缺字段按「无漂移」处理
+  const drift = s.pluginDrift ?? null
   return [
     { label: '显示工作台', click: () => a.showWindow() },
     { label: '打开浏览器版', click: () => a.openBrowser() },
@@ -78,6 +90,13 @@ export function trayMenuTemplate(s: TrayState, a: TrayActions): MenuItemConstruc
           { label: '退出安全模式（恢复全部插件）', click: () => a.exitSafeMode() },
         ]
       : [{ label: '进入安全模式（停用全部插件）', click: () => a.enterSafeMode() }]),
+    // 依赖漂移入口：只在体检发现不一致时出现（干净时托盘里没有这一条）
+    ...(drift === null
+      ? []
+      : [{
+          label: `修复插件环境（缺失 ${String(drift.missing)} · 残留 ${String(drift.residue)}）…`,
+          click: () => a.repairPlugins(),
+        }]),
     { type: 'separator' },
     {
       label: '设置',
@@ -129,11 +148,13 @@ export function trayMenuTemplate(s: TrayState, a: TrayActions): MenuItemConstruc
  * 那些事件其实完全不影响菜单内容，所以用指纹把它们挡掉。
  */
 export function trayMenuSignature(s: TrayState): string {
+  const drift = s.pluginDrift ?? null
   return JSON.stringify([
     trayStatusLine(s),
     s.phoneOn,
     s.safeMode,
     s.lastHarnessError,
+    drift === null ? null : [drift.missing, drift.residue, drift.lockDrift],
     s.autoUpdate,
     s.autoStart,
     s.notifications,

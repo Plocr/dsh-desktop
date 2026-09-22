@@ -60,6 +60,11 @@
   ${If} ${Errors}
     StrCpy $0 1
   ${EndIf}
+  ; 0.8.7 起不再随包便携 Node（解释器用应用自身的 Electron 二进制，见
+  ; docs/ANTIVIRUS-FALSE-POSITIVE.md）。覆盖安装旧版本时把上一版留下的
+  ; resources\runtime\node 清掉：它虽然还会被执行，但属于"未签名解释器镜像"，
+  ; 正是杀软行为启发式的靶子，留着只有坏处。
+  RMDir /r "$INSTDIR\resources\runtime\node"
   ; Finish can launch the app while NSIS removes its remaining plugin directory.
   RMDir /r "$PLUGINSDIR\7z-out"
   ${If} $0 == 1

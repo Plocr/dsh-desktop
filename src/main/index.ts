@@ -24,7 +24,8 @@ import { initLogger, log, logDirPath } from './logger'
 import { loadSettings, saveSettings, type AppSettings } from './settings'
 import { appResourcesDir, ensureProfile, resolveRuntime, shippedResourcesDir, type RuntimeSpec } from './runtime'
 import { readProfileBundles, pruneStaleProfileBundles, isolateProfileForSafeMode, restoreProfileManifest } from './pluginfs.ts'
-import { repairProfileIfNeeded } from './profileRepair.ts'
+import { inspectProfile, repairProfileIfNeeded, type ProfileRepairOptions } from './profileRepair.ts'
+import type { ProfileDependencyReport } from './profileDeps.ts'
 import {
   accountLoginSteps,
   accountLoginFailureText,
@@ -148,6 +149,11 @@ let pendingDeepLinks: DeepLinkAction[] = []
 /** 桥接连接状态 + 插件诊断（托盘「桥接：…」一行；见 refreshTray）。 */
 let bridgeConnected = false
 let bridgeDiag: BridgeDiag | null = null
+/**
+ * profile 依赖体检结论（只读检测，见启动路径的说明）：非 null 时托盘多一条「修复插件环境…」。
+ * 修复动作要用户点了才跑（不在启动时静默装包）。
+ */
+let pluginDrift: { missing: number; residue: number; lockDrift: number } | null = null
 /**
  * 官方「左下角登录」的壳侧记忆（同一次尝试只开一次浏览器、只在结束时唤回一次窗口）。
  * 状态本体在 harness 里（PKCE/凭据都在那边），这里只记 attempt id 去过重。
@@ -495,6 +501,75 @@ async function promptLanApproval(ip: string): Promise<boolean> {
   } finally {
     lanApprovalLock = false
   }
+}
+
+/** 体检报告 → 托盘用的精简漂移计数（干净时 null）。 */
+function driftOf(report: ProfileDependencyReport): { missing: number; residue: number; lockDrift: number } | null {
+  if (!report.needsRepair) return null
+  return { missing: report.missing.length, residue: report.residue.length, lockDrift: report.lockDrift.length }
+}
+
+/** 壳侧修复动作的参数（启动自动路径与托盘显式路径共用）。 */
+function repairOptions(explicit = false): ProfileRepairOptions {
+  return {
+    profileDir: desktopProfileDir(),
+    node: runtime?.node ?? process.execPath,
+    pnpmEntry: runtime?.pnpmEntry ?? '',
+    dshHome: dshHome(),
+    markerFile: path.join(app.getPath('userData'), 'plugin-repair.json'),
+    explicit,
+    log: (level, message) => log(level, message),
+  }
+}
+
+/**
+ * 托盘「修复插件环境…」：**用户显式触发**的 profile 依赖修复。
+ *
+ * 与启动自动路径（仅 `DSH_DESKTOP_PROFILE_REPAIR=force` 时走）的区别只有两点：
+ * ① 先弹确认（说清会跑 `pnpm install`、会删哪些残留目录）；② 忽略「同状态静默期」，
+ * 用户点了一次就一定会真的试一次。修完重启 Host，让 harness 重新解析 bundle。
+ */
+async function repairPluginsFromTray(): Promise<void> {
+  if (runtime === null) return
+  let report: ProfileDependencyReport
+  try {
+    report = inspectProfile(desktopProfileDir())
+  } catch (err) {
+    log('error', `profile repair: 体检失败：${err instanceof Error ? err.message : String(err)}`)
+    return
+  }
+  if (!report.needsRepair) {
+    pluginDrift = null
+    refreshTray()
+    notify('插件环境无需修复', '清单、已装包与锁文件一致。')
+    return
+  }
+  const lines = [
+    report.missing.length > 0 ? `· 声明了却没装上（会用随包 pnpm 重装）：${report.missing.join('、')}` : null,
+    report.residue.length > 0 ? `· 清单里没有、pnpm 也不认的插件目录（会删除）：${report.residue.join('、')}` : null,
+    report.lockDrift.length > 0 ? '· 锁文件与清单脱节（会随之重写）' : null,
+  ].filter((line): line is string => line !== null)
+  const r = await dialog.showMessageBox({
+    type: 'question',
+    buttons: ['开始修复', '取消'],
+    defaultId: 0,
+    cancelId: 1,
+    title: '修复插件环境',
+    message: '将把 profile 依赖收敛回 package.json 描述的状态',
+    detail: `${lines.join('\n')}\n\n修复期间会短暂停止 Harness，完成后自动重启。`,
+    noLink: true,
+  })
+  if (r.response !== 0) return
+  await stopHostBeforePluginOp()
+  const result = await repairProfileIfNeeded(repairOptions(true))
+  pluginDrift = result === null ? null : driftOf(result.report)
+  const ok = result === null || !result.installed || result.installOk
+  notify(
+    ok ? '插件环境已修复' : '插件环境修复未完成',
+    result === null ? '无需修复。' : `${result.summary}。`,
+  )
+  refreshTray()
+  host?.restart()
 }
 
 /** 重启 Host：先按当前设置把 profile 组合拉回一致（安全模式 / 失效条目），再重启。 */
@@ -1204,34 +1279,37 @@ async function main(): Promise<void> {
   runLegacySessionRepair(runtime.dshVersion)
   perf('旧会话修复检查')
 
-  // profile 依赖体检与修复：官方插件管理器的事务失败只回滚清单（`package.json` + 锁文件），
+  // profile 依赖**体检**（只读）：官方插件管理器的事务失败只回滚清单（`package.json` + 锁文件），
   // `node_modules` 不回滚；跨版本换 pnpm 主版本（store 换代）时每次包操作都会失败，于是留下
   // 「声明了却没装上」「装上了清单里没有」这两类不一致——前者让 harness 解不出 bundle，
-  // 后者就是用户看到的插件残留。这里在 Host 起来之前把盘面收敛回清单描述的状态。
-  // 失败不阻塞启动（解析不出来的 bundle 由 reconcilePluginBundles 的解析检查兜住）。
+  // 后者就是用户看到的插件残留。
+  //
+  // 这里**只检测、不修**：修复要跑 `pnpm install` / 删目录，是"应用自己装软件"的形状，
+  // 行为启发式（杀软 PDM）对这类静默动作最敏感，用户也无从预期（见 docs/ANTIVIRUS-FALSE-POSITIVE.md）。
+  // 检测结果进托盘（多一条「修复插件环境…」），由用户显式触发；`DSH_DESKTOP_PROFILE_REPAIR=force`
+  // 保留给开发/CI 自动跑。
   try {
-    const repair = await repairProfileIfNeeded({
-      profileDir: desktopProfileDir(),
-      node: runtime.node,
-      pnpmEntry: runtime.pnpmEntry,
-      dshHome: dshHome(),
-      markerFile: path.join(app.getPath('userData'), 'plugin-repair.json'),
-      log: (level, message) => log(level, message),
-      onRepaired: (result) => {
-        // 只有真的动过手才打扰用户（成功/失败都说明白是插件的事）
-        if (!result.installed && result.removed.length === 0) return
-        if (!settings.notifications) return
-        notify(
-          '插件环境已体检',
-          result.installed && !result.installOk
-            ? `依赖重装失败：${result.report.missing.join('、')} 仍不可用（检查网络后重启应用会重试）。`
-            : result.summary,
+    if (process.env.DSH_DESKTOP_PROFILE_REPAIR === 'force') {
+      const repair = await repairProfileIfNeeded(repairOptions())
+      if (repair !== null) {
+        log('info', `profile repair: ${repair.summary}`)
+        pluginDrift = driftOf(repair.report)
+      }
+    } else {
+      const report = inspectProfile(desktopProfileDir())
+      pluginDrift = driftOf(report)
+      if (pluginDrift !== null) {
+        log(
+          'error',
+          `profile drift: 缺失 ${pluginDrift.missing}｜残留 ${pluginDrift.residue}｜锁文件脱节 ${pluginDrift.lockDrift}`
+            + `（托盘「修复插件环境」可修复：${report.missing.concat(report.residue).join(', ') || '—'}）`,
         )
-      },
-    })
-    if (repair !== null) log('info', `profile repair: ${repair.summary}`)
+      } else {
+        log('info', 'profile drift: none（清单/已装/锁文件一致）')
+      }
+    }
   } catch (err) {
-    log('error', `profile repair failed: ${err instanceof Error ? err.message : String(err)}`)
+    log('error', `profile inspection failed: ${err instanceof Error ? err.message : String(err)}`)
   }
   perf('profile 依赖体检')
 
@@ -1403,6 +1481,7 @@ async function main(): Promise<void> {
       safeMode: isSafeMode(safeModeFile()),
       lastHarnessError,
       phoneOn: settings.lanShare,
+      pluginDrift,
       bridge: {
         connected: bridgeConnected,
         jobs: bridgeJobsState(),
@@ -1416,6 +1495,7 @@ async function main(): Promise<void> {
     stopPhone: () => void stopPhoneAccess(),
     exitSafeMode: () => void exitSafeModeFromTray(),
     enterSafeMode: () => void enterSafeModeFromTray(),
+    repairPlugins: () => void repairPluginsFromTray(),
     restartHarness: () => void restartHarness(),
     openLogs: () => void shell.openPath(logDirPath()),
     cleanLogs: () => cleanLogs(),

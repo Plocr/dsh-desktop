@@ -51,6 +51,19 @@ export function desktopRuntimeFileExclusion(relativePath, target, options = {}) 
     if (platform !== undefined && platform !== `${target.platform}-${target.arch}`) return 'node-pty other platform'
     if (file.endsWith('.pdb')) return 'node-pty debug symbols'
   }
+  /**
+   * node-pty 的 ConPTY 第三方二进制（OpenConsole.exe / conpty.dll）：按目标平台+架构各带一份。
+   * 非目标架构那份（真机 x64 安装包里就有 win10-arm64）**永远不会被执行**，却正好是被杀软
+   * 启发式隔离的那类 PE（真机 2026-09-23：卡巴斯基把 win10-arm64 的两个文件一起清了）。
+   * 交叉构建时 target.arch 已经是目标架构，所以这里按同一判据剔除即可。
+   */
+  if (name === 'node-pty' && entry.startsWith('third_party/conpty/')) {
+    const platformDir = entry.split('/')[3] ?? ''
+    const expected = `${target.platform === 'win32' ? 'win10' : target.platform === 'darwin' ? 'darwin' : 'linux'}-${target.arch}`
+    if (platformDir.startsWith('win10-') || platformDir.startsWith('linux-') || platformDir.startsWith('darwin-')) {
+      if (platformDir !== expected) return 'node-pty other platform (conpty)'
+    }
+  }
   if (name === '@koromix/koffi-win32-x64' && entry === 'win32_x64/koffi.lib') return 'Koffi import library'
   return undefined
 }

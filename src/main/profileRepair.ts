@@ -54,6 +54,11 @@ export interface ProfileRepairOptions {
   log: (level: 'info' | 'error', message: string) => void
   /** 修复结果（仅在真的动手时回调）。 */
   onRepaired?: (result: ProfileRepairResult) => void
+  /**
+   * 用户显式触发（托盘「修复插件环境…」）：忽略「同状态静默期」，必定尝试一次。
+   * 缺省 false = 启动期的自动路径（只在 `DSH_DESKTOP_PROFILE_REPAIR=force` 时才会走到）。
+   */
+  explicit?: boolean
   /** 依赖注入（测试用）。 */
   spawnImpl?: typeof spawn
   now?: () => number
@@ -233,6 +238,8 @@ function runPnpmInstall(options: ProfileRepairOptions): Promise<{ ok: boolean; t
         cwd: options.profileDir,
         env: {
           ...process.env,
+          // 与 Host 侧同一个解释器：自家 Electron 二进制以 Node 模式跑 pnpm。
+          ELECTRON_RUN_AS_NODE: '1',
           // 与 Host 侧一致：registry / store 由参数给出，别让用户 npmrc 干扰
           npm_config_registry: 'https://registry.npmjs.org/',
           npm_config_store_dir: path.join(stateDir, 'store'),
@@ -277,7 +284,7 @@ function runPnpmInstall(options: ProfileRepairOptions): Promise<{ ok: boolean; t
 export async function repairProfileIfNeeded(options: ProfileRepairOptions): Promise<ProfileRepairResult | null> {
   const mode = process.env.DSH_DESKTOP_PROFILE_REPAIR
   if (mode === 'off' || mode === '0' || mode === 'false') return null
-  const forced = mode === 'force'
+  const forced = mode === 'force' || options.explicit === true
 
   let report: ProfileDependencyReport
   try {

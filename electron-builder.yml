@@ -22,12 +22,13 @@ files:
 extraResources:
   - from: resources/runtime
     to: runtime
-    # 便携 Node 里只保留 node 可执行文件：`node/node_modules/npm`（1739 文件 / 10 MB）
-    # 只在**构建期**被 scripts/setup-runtime.mjs 用来安装 dsh 闭包，运行期一律走随包 pnpm
-    # （pnpm/dist 自带 node-gyp）。剔除它显著减少安装包文件数 → NSIS 安装更快。
+    # 0.8.7 起 **不随包 node.exe**：Host 与 pnpm 由应用自身的 Electron 二进制以
+    # `ELECTRON_RUN_AS_NODE=1` 运行（与官方桌面端同形）。构建期那份便携 Node 只是工具链
+    # （跑 npm 装 dsh 闭包），整棵 `node/` 从安装包里剔除：少一个未签名解释器镜像
+    # （杀软行为启发式的主要触发面之一）、少约 50 MB / 约 500 个文件。
     filter:
       - '**/*'
-      - '!node/node_modules/npm/**'
+      - '!node/**'
   - from: resources/dsh
     to: dsh
   - from: resources/dsh/node_modules

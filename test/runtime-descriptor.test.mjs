@@ -18,6 +18,7 @@ const RELEASE = {
   version: '0.7.19',
   dshVersion: '0.1.5-rc.2',
   hostProtocolVersion: DESKTOP_HOST_PROTOCOL_VERSION,
+  electronVersion: '44.0.0',
   nodeVersion: '24.15.0',
   pnpmVersion: '10.34.5',
 }

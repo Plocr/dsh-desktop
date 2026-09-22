@@ -19,6 +19,7 @@ const state = (over = {}) => ({
   safeMode: false,
   lastHarnessError: null,
   phoneOn: false,
+  pluginDrift: null,
   harnessState: '运行中',
   bridge: { connected: true, jobs: 'present', protocol: 'ok', lastCode: null },
   ...over,
@@ -42,6 +43,7 @@ function actions() {
       uninstall: record('uninstall'),
       exitSafeMode: record('exitSafeMode'),
       enterSafeMode: record('enterSafeMode'),
+      repairPlugins: record('repairPlugins'),
       setAutoStart: record('setAutoStart'),
       setNotifications: record('setNotifications'),
       setAutoUpdate: record('setAutoUpdate'),
@@ -68,6 +70,28 @@ test('托盘一级菜单：窗口 / 浏览器版 / 手机连接 / 状态 / 重�
   menu.find((i) => i.label === '打开浏览器版').click()
   menu.find((i) => i.label === '退出').click()
   assert.deepEqual(calls, ['openBrowser', 'quit'])
+})
+
+/**
+ * 依赖漂移入口（0.8.7）：干净时托盘里**没有**这一条；体检发现不一致时才出现，
+ * 且点击后走「修复插件环境」动作（启动期不再静默跑 pnpm install）。
+ */
+test('插件依赖漂移：只在体检发现不一致时多一条「修复插件环境…」', () => {
+  const { a, calls } = actions()
+  const clean = trayMenuTemplate(state(), a)
+  assert.equal(labels(clean).some((l) => l.startsWith('修复插件环境')), false, '干净时不该出现')
+
+  const drifted = trayMenuTemplate(state({ pluginDrift: { missing: 1, residue: 2, lockDrift: 0 } }), a)
+  const label = labels(drifted).find((l) => l.startsWith('修复插件环境'))
+  assert.equal(label, '修复插件环境（缺失 1 · 残留 2）…')
+  drifted.find((i) => i.label === label).click()
+  assert.deepEqual(calls, ['repairPlugins'])
+
+  // 指纹必须跟着漂移状态变，否则菜单不会重建（用户点了没反应）
+  assert.notEqual(
+    trayMenuSignature(state()),
+    trayMenuSignature(state({ pluginDrift: { missing: 1, residue: 0, lockDrift: 0 } })),
+  )
 })
 
 test('手机连接：点击走 openPhone；已开启时多出「断开手机连接」走 stopPhone', () => {

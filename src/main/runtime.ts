@@ -66,8 +66,20 @@ export function shippedResourcesDir(): string {
 
 /** 解析出的运行时（路径全部为绝对路径；descriptor 为已校验的发行身份 + 文件清单）。 */
 export interface RuntimeSpec {
-  /** 随包便携 Node 可执行文件（官方 nodejs.org 发行包，独立于系统 Node）。 */
+  /**
+   * 运行 harness 的解释器：**本应用自己的 Electron 二进制**（以 `ELECTRON_RUN_AS_NODE=1` 当 Node 用）。
+   *
+   * 为什么不再随包一个便携 `node.exe`（0.8.7）：
+   *  1. **杀软误报面**：一个未签名的 `node.exe` 从深层目录里被执行、再拉子进程，是行为启发式的高分形状
+   *     （真机被卡巴斯基 PDM 判过，见 docs/ANTIVIRUS-FALSE-POSITIVE.md）；换成自家 app 二进制后
+   *     进程链变成「app → app」，与官方桌面端同形；
+   *  2. **少 50 MB / 约 500 个文件**（安装包与安装耗时都跟着降）；
+   *  3. harness 本来就原生支持这种跑法：它的 `node-addon-require-builtin` 只认
+   *     Electron `43.0.0 / 44.0.0 / 45.0.0-alpha.6` 的指纹，所以 package.json 把 electron 精确钉在 44.0.0。
+   */
   node: string
+  /** 是否必须以 `ELECTRON_RUN_AS_NODE=1` 启动 `node`（即上面那份 Electron 二进制）。 */
+  nodeRunAsNode: boolean
   /** 不可变 dsh 运行时树根（node_modules + desktop-runtime.json）。 */
   runtimeDir: string
   /** 随包 dsh 版本（descriptor.release.dshVersion）。 */
@@ -122,16 +134,12 @@ export function resolveRuntime(): RuntimeSpec {
       `桌面运行时与外壳版本不匹配：运行时 ${release.version} ≠ 外壳 ${shellVersion}（请重新安装完整版本）。`,
     )
   }
-  const node = process.platform === 'win32'
-    ? path.join(resources, 'runtime', 'node', 'node.exe')
-    : path.join(resources, 'runtime', 'node', 'bin', 'node')
   const pnpmEntry = path.join(resources, 'runtime', 'pnpm', 'bin', 'pnpm.cjs')
   // 关键文件清单：不逐文件校验 sha256（上万文件，太慢），但**启动必需**的这几处必须在。
   // 真机事故（2026-09-23）：安全软件把 Host 入口按启发式隔离掉，启动时报的是 Node 的
   // `Cannot find module`，用户看不懂；这里给出「哪个文件缺了 + 最可能的原因」。
   const hostEntry = path.join(runtimeDir, 'node_modules', 'dsh-desktop-host', 'lib', 'index.js')
   const essentials = [
-    ['Node', node],
     ['pnpm', pnpmEntry],
     ['Host 入口', hostEntry],
     ['bridge 插件', path.join(runtimeDir, 'node_modules', 'dsh-desktop-bridge', 'lib', 'index.js')],
@@ -148,7 +156,15 @@ export function resolveRuntime(): RuntimeSpec {
         `安装目录：${resources}）。`,
     )
   }
-  return { node, runtimeDir, dshVersion: release.dshVersion, pnpmEntry, descriptor }
+  return {
+    // 用自家二进制当 Node：省掉随包 node.exe（见 RuntimeSpec.node 的说明）
+    node: process.execPath,
+    nodeRunAsNode: true,
+    runtimeDir,
+    dshVersion: release.dshVersion,
+    pnpmEntry,
+    descriptor,
+  }
 }
 
 /* ── profile 托管 ─────────────────────────────────────────────────────── */

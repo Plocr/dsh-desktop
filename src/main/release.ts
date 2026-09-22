@@ -25,6 +25,14 @@ export interface DesktopRelease {
   /** Exact bundled `@deepseek-ai/dsh` version bound to this shell release. */
   readonly dshVersion: string
   readonly hostProtocolVersion: typeof DESKTOP_HOST_PROTOCOL_VERSION
+  /**
+   * 随包 Electron 版本（= 运行 harness 的解释器版本）。
+   *
+   * 为什么单列：0.8.7 起不再随包独立 `node.exe`，Host/pnpm 都由这个 Electron 二进制以 Node 模式跑，
+   * 而 harness 的 `node-addon-require-builtin` 只认 Electron `43.0.0 / 44.0.0 / 45.0.0-alpha.6`
+   * 的运行时指纹——版本漂了 harness 会直接拒绝启动，所以把它写进发行身份里可核对。
+   */
+  readonly electronVersion: string
   readonly nodeVersion: string
   readonly pnpmVersion: string
 }
@@ -38,6 +46,7 @@ export function parseDesktopRelease(value: unknown): DesktopRelease {
   if (!isRecord(value) || value.schemaVersion !== 1 || typeof value.version !== 'string'
     || valid(value.version) === null || typeof value.dshVersion !== 'string' || valid(value.dshVersion) === null
     || value.hostProtocolVersion !== DESKTOP_HOST_PROTOCOL_VERSION
+    || typeof value.electronVersion !== 'string' || valid(value.electronVersion) === null
     || typeof value.nodeVersion !== 'string' || valid(value.nodeVersion) === null
     || typeof value.pnpmVersion !== 'string' || valid(value.pnpmVersion) === null) {
     throw new Error('dsh desktop: invalid desktop release metadata')
@@ -47,6 +56,7 @@ export function parseDesktopRelease(value: unknown): DesktopRelease {
     version: value.version,
     dshVersion: value.dshVersion,
     hostProtocolVersion: DESKTOP_HOST_PROTOCOL_VERSION,
+    electronVersion: value.electronVersion,
     nodeVersion: value.nodeVersion,
     pnpmVersion: value.pnpmVersion,
   }

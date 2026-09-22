@@ -69,11 +69,16 @@ function desktopPackageManager(pnpmEntry: string): {
   }
   return {
     command: process.execPath,
-    // 全局参数放在子命令之前：pnpm 接受 `pnpm --config.x=y <command>`。
+    // 子命令之前放全局参数：pnpm 接受 `pnpm --config.x=y <command>`。
     // store-dir 与旧的壳内事务完全一致 —— 既有 profile 的 node_modules 就是从这个 store
     // 链接出来的，换 store 会让 pnpm 直接 ERR_PNPM_UNEXPECTED_STORE。
+    //
+    // 注意这里的 `command` 是本进程的 execPath：宿主已经跑在**自家 Electron 二进制**上
+    // （ELECTRON_RUN_AS_NODE 模式），所以 pnpm 也由同一个二进制执行——不再随包一个独立的
+    // node.exe（杀软误报面 + 50 MB 体积，见 docs/ANTIVIRUS-FALSE-POSITIVE.md）。
+    // `--expose-internals` 已移除：实测 pnpm 11 的 install/add/remove 都不需要它，
+    // 而这个 flag 在行为启发式里非常显眼。
     args: [
-      '--expose-internals',
       resolve(pnpmEntry),
       '--config.registry=https://registry.npmjs.org/',
       `--config.store-dir=${store}`,
@@ -81,6 +86,7 @@ function desktopPackageManager(pnpmEntry: string): {
       `--config.userconfig=${npmrc}`,
     ],
     env: {
+      ELECTRON_RUN_AS_NODE: '1',
       DSH_DESKTOP_NODE_EXECUTABLE: process.execPath,
       PATH: `${nodeDir}${delimiter}${process.env.PATH ?? ''}`,
       XDG_CACHE_HOME: cache,

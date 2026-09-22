@@ -136,9 +136,16 @@ export class DesktopHostProcess {
       ...(this.port === undefined ? [] : ['--port', String(this.port)]),
     ], {
       cwd: this.projectDir,
-      env: Object.fromEntries(Object.entries(this.environment).filter(([name]) => (
-        name !== 'NODE_OPTIONS' && name !== 'NODE_PATH' && !/^DSH_DESKTOP_/u.test(name) && !/^(?:npm|pnpm|corepack)_/iu.test(name)
-      ))),
+      env: {
+        ...Object.fromEntries(Object.entries(this.environment).filter(([name]) => (
+          name !== 'NODE_OPTIONS' && name !== 'NODE_PATH' && name !== 'ELECTRON_RUN_AS_NODE'
+          && !/^DSH_DESKTOP_/u.test(name) && !/^(?:npm|pnpm|corepack)_/iu.test(name)
+        ))),
+        // 用自家 Electron 二进制当 Node 跑 Host（不随包 node.exe，见 RuntimeSpec.node）。
+        // 该变量会随环境传给 Host 的所有子进程：harness 与插件里任何 `process.execPath`
+        // 都应当以 Node 模式启动，而不是弹出第二个应用窗口。
+        ELECTRON_RUN_AS_NODE: '1',
+      },
       // 官方形态：只有 stdio + Node IPC，没有字节管道。
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     })

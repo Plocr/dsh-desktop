@@ -29,7 +29,21 @@ import { BRIDGE_PROTOCOL_VERSION } from '../src/main/bridgeEvents.ts'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const runtimeDir = path.join(root, 'resources', 'dsh')
-const nodeExe = path.join(root, 'resources', 'runtime', 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node')
+// Host 运行时解释器：生产路径 = **应用自己的 Electron 二进制 + ELECTRON_RUN_AS_NODE=1**
+// （0.8.7 起不再随包 node.exe）。可用环境变量把解释器换成便携 Node 做对照实验：
+//   DSH_E2E_HOST_NODE=<路径>  DSH_E2E_HOST_RUN_AS_NODE=0|1
+const electronExe = process.platform === 'win32'
+  ? path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe')
+  : process.platform === 'darwin'
+    ? path.join(root, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron')
+    : path.join(root, 'node_modules', 'electron', 'dist', 'electron')
+const nodeExe = process.env.DSH_E2E_HOST_NODE !== undefined && process.env.DSH_E2E_HOST_NODE !== ''
+  ? process.env.DSH_E2E_HOST_NODE
+  : electronExe
+// 默认「是不是 Node 模式」跟着解释器走：给了自定义解释器（便携 Node）就不用 RUN_AS_NODE
+const hostRunAsNode = process.env.DSH_E2E_HOST_RUN_AS_NODE !== undefined
+  ? process.env.DSH_E2E_HOST_RUN_AS_NODE === '1'
+  : nodeExe === electronExe
 const templateDir = path.join(root, 'resources', 'profile-template', 'dsh-workbench')
 const hostEntry = path.join(runtimeDir, 'node_modules', 'dsh-desktop-host', 'lib', 'index.js')
 const pnpmEntry = path.join(root, 'resources', 'runtime', 'pnpm', 'bin', 'pnpm.cjs')
@@ -126,7 +140,12 @@ function startHost(extraArgs = []) {
   startedAt = Date.now()
   child = spawn(nodeExe, [hostEntry, runtimeDir, profileDir, '--pnpm', pnpmEntry, ...extraArgs], {
     cwd: profileDir,
-    env: { ...process.env, DSH_HOME: home, DSH_DESKTOP: '1' },
+    env: {
+      ...process.env,
+      DSH_HOME: home,
+      DSH_DESKTOP: '1',
+      ...(hostRunAsNode ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
+    },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   })
   child.on('message', (m) => {
