@@ -112,6 +112,23 @@ export function uniqueJobs(jobs) {
   return [...byId.values()]
 }
 
+/**
+ * 官方 `ctx.jobs` 注册表的「代」判定（纯函数，可单测）。
+ *
+ * dsh 0.1.7-alpha.1 把两个监听器 API 换成了事件流，**没有并存期**：
+ *  - 旧代（≤ 0.1.6）：`onJobsChanged(listener)` / `onJobDone(listener)`；
+ *  - 新代（≥ 0.1.7）：`events.subscribe(filter, listener)`。
+ * 同一次换代还改了 caller 类型：旧代 `list/get/wait/kill(caller?: Agent)`，
+ * 新代 `(caller?: SessionId)`。传错代**不会抛错**——caller 与 `owner` 对不上，
+ * 可见集静默退化成「只剩无主任务」，正是「通知时有时无」那类最难查的故障。
+ * 所以判代只认新代独有的 `events.subscribe`，不猜版本号字符串。
+ *
+ * @returns `2` = 事件流一代；`1` = 监听器一代（含服务缺失/异形实现）。
+ */
+export function jobsApiGeneration(jobs) {
+  return typeof safe(() => jobs?.events?.subscribe, undefined) === 'function' ? 2 : 1
+}
+
 /** 常量时间比较 token（本地进程也可能尝试侧信道；长度不同直接判否）。 */
 export function tokenMatches(candidate, expected) {
   if (typeof candidate !== 'string' || typeof expected !== 'string' || expected === '') return false
@@ -272,10 +289,11 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * 跨会话聚合全部后台任务（owner 相对，须逐会话以 live Agent 为 caller）。
+   * 跨会话聚合全部后台任务（owner 相对，须逐会话以 live caller 为参数）。
    * `jobs.list(caller)` 的可见集含**无主任务**（owner === undefined 的任务投给每个
    * caller），因此逐会话拼接必须按 id 去重；末尾再补一次无 caller 的 list，
    * 让「一个 live 会话都没有」时无主任务也不丢。
+   * caller 形状随宿主代次变化（旧代 live Agent / 新代 SessionId），见 jobsApiGeneration。
    * 任一服务缺失（jobs/sessions/agents）都按「没有任务」降级，绝不抛错打挂 RPC。
    */
   function listAllJobs() {
@@ -287,9 +305,14 @@ export function apply(ctx, config = {}) {
     const sessions = safe(() => ctx.get('sessions')?.list() ?? [], [])
     const agents = ctx.get('agents')
     const jobs = ctx.get('jobs')
+    const generation = jobsApiGeneration(jobs)
     for (const session of sessions) {
-      const agent = safe(() => agents?.get(session?.id), undefined)
-      append(safe(() => jobs?.list(agent), undefined))
+      // 新代 caller 就是 SessionId（纯 id 字符串）；旧代要 live Agent，由它取 id。
+      const caller =
+        generation >= 2
+          ? safe(() => session?.id, undefined)
+          : safe(() => agents?.get(session?.id), undefined)
+      append(safe(() => jobs?.list(caller), undefined))
     }
     append(safe(() => jobs?.list(), undefined))
     return uniqueJobs(out)
@@ -643,33 +666,61 @@ export function apply(ctx, config = {}) {
 
   // 后台任务：可见集变化（注册/stopping/结算/移除）与单个任务完成。
   // 注意：必须在 Loader 安定后接线——apply 阶段 `jobs` 服务可能尚未就绪。
+  //
+  // 这里按代次分两条路（见 jobsApiGeneration）：旧代两个监听器 / 新代一条事件流。
+  // 桥接是「用户可见性」的观察者，不是模型侧的 completion reporter，语义见下面
+  // `settled` 处的注释。
   const wireJobs = () => {
     const jobs = ctx.get('jobs')
     if (!jobs) {
       diag('warn', 'jobs.absent', { hint: 'jobs 服务在安定后仍不可见：后台任务徽标/通知不可用' })
       return
     }
-    diag('info', 'jobs.present', {})
     const pushChanged = () => {
       const list = listAllJobs().map(minimalJob)
       broadcast('jobs.changed', { jobs: list })
     }
-    let onChanged
-    try {
-      onChanged = jobs.onJobsChanged(pushChanged)
-    } catch (err) {
-      diag('warn', 'jobs.watch.failed', { api: 'onJobsChanged', message: err instanceof Error ? err.message : String(err) })
+    const pushDone = (record) => {
+      broadcast('job.done', { job: minimalJob(record) })
     }
-    let onDone
-    try {
-      onDone = jobs.onJobDone((record) => {
-        broadcast('job.done', { job: minimalJob(record) })
-      })
-    } catch (err) {
-      diag('warn', 'jobs.watch.failed', { api: 'onJobDone', message: err instanceof Error ? err.message : String(err) })
+    const generation = jobsApiGeneration(jobs)
+    let wired = 0
+    /** 挂一个监听器：宿主换代/实现缺失都不该把桥接打挂，失败只记诊断。 */
+    const attach = (api, fn) => {
+      try {
+        const dispose = fn()
+        if (typeof dispose === 'function') ctx.on('dispose', dispose)
+        wired += 1
+      } catch (err) {
+        diag('warn', 'jobs.watch.failed', { api, message: err instanceof Error ? err.message : String(err) })
+      }
     }
-    if (typeof onChanged === 'function') ctx.on('dispose', onChanged)
-    if (typeof onDone === 'function') ctx.on('dispose', onDone)
+    if (generation >= 2) {
+      // 新代（≥ 0.1.7）：一条事件流同时管「可见集变化」和「结算」。
+      //  · filter `owners:'all'`：桥接住在宿主组合里、不代表任何单个 scope，要的是
+      //    旧代无 scope 监听器那种进程级可见性（每个会话的任务都要报）；
+      //  · `output` 只报「环形缓冲写到第几字节」——壳不消费任务输出，忽略它，
+      //    否则会按输出频率反复全量重推可见集；
+      //  · `settled` 无论 `awaited` 与否都推 `job.done`：`awaited` 的语义是「已有
+      //    模型侧 waiter 拿到这条结果，别再往模型轮次里报一遍」，而壳的通知是给
+      //    **用户**看的，与旧代 onJobDone 逐条通知保持一致。
+      attach('jobs.events.subscribe', () =>
+        jobs.events.subscribe({ owners: 'all' }, (event) => {
+          const type = safe(() => event?.type, null)
+          if (type === 'output') return
+          pushChanged()
+          if (type === 'settled') pushDone(safe(() => event.job, undefined))
+        }),
+      )
+    } else {
+      // 旧代（≤ 0.1.6）：两个监听器各管一件事（可见集变化 / 单任务完成）。
+      attach('onJobsChanged', () => jobs.onJobsChanged(pushChanged))
+      attach('onJobDone', () => jobs.onJobDone(pushDone))
+    }
+    // `jobs.present` 必须在接线**之后**发：壳按「最新一条诊断」判断 jobs 可用性
+    // （src/main/index.ts 的 bridgeJobsState），先报 present 再报 watch.failed 会让
+    // 「服务在、但一个监听器都没接上」显示成正常；一个都没接上就只留 watch.failed。
+    if (wired > 0) diag('info', 'jobs.present', { api: generation >= 2 ? 'events.subscribe' : 'listeners' })
   }
 
   // 会话事件：审批请求/决定（通知 + 待审批环）与会话标题（目录推送）。

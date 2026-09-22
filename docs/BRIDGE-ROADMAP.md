@@ -73,7 +73,7 @@ bridge 是**壳 ↔ harness 的唯一通道**：插件跑在 Host 进程内的 d
 | 插件契约（hermetic） | `node --test test/bridge-plugin.test.mjs` | 起真插件 + 真 vendored ws 客户端：发现行（含"只打一行"/无 loader/安定失败三条路径）、鉴权（错 token 4001 / 超时 4002）、全部 RPC、审批推送形状、任务去重、dispose 语义、服务全缺降级 |
 | 壳侧纯逻辑 | `node --test test/bridge-events.test.mjs` | 发现行前缀契约、非法/空 token 拒绝、日志脱敏、快照→徽标、通知文案 |
 | 运行时前提 | `node --test test/runtime-descriptor.test.mjs` | 三件共享包硬前提（dsh 版本 / host / bridge） |
-| 端到端（真实 harness） | `npm run e2e:bridge` | 真 Host + dsh 0.1.6-alpha.2：发现行出现、鉴权、**协议版本一致 + diag（jobs.present）**、`workspace.register` 真建工作区、错/空 token 均被 4001 拒绝、未知方法报错、管道 fetch 与 LAN 门禁；CI 已接入（`e2e` job） |
+| 端到端（真实 harness） | `npm run e2e:bridge` | 真 Host + 当前 pin 的 dsh（0.1.7-alpha.1）：发现行出现、鉴权、**协议版本一致 + diag（jobs.present）**、`workspace.register` 真建工作区、错/空 token 均被 4001 拒绝、未知方法报错、管道 fetch 与 LAN 门禁；CI 已接入（`e2e` job） |
 
 全量：`npm run check`（typecheck + 90 项测试）。本轮修复均在真实 dsh 上跑过 `e2e:bridge`（含 `resources/dsh` 手工同步 0.4.0；**正式发行前需重跑 `npm run setup:runtime` 让 tgz 与 descriptor 一起重建**）。
 
@@ -158,7 +158,7 @@ dispose 里仍显式 `close()`/`unref()`。语义是"桥接照常服务，但不
 
 1. **不把 UI 能力搬回桥接**（D25）：终端/仪表盘/主题这类扩展属于 harness 插件（`dsh.client` 双面包），桥接只做"桌面原生能力"。
 2. **不让插件监听非回环地址**；跨机访问走壳的 LAN 门面。
-3. **不在插件里做缓存/重试层**：`onJobsChanged` 的语义就是「重新读一遍可见集」（官方明确不做增量），插件侧加缓存只会引入不一致。
+3. **不在插件里做缓存/重试层**：可见集变化的语义就是「重新读一遍可见集」（官方明确不做增量），插件侧加缓存只会引入不一致。
 4. **不引入运行时依赖**：`vendor/ws` 内联副本的约束继续成立（离线随包的首要条件）。
 5. **不让 discovery 行携带敏感信息**：token 只走 stdout 一次，不写 profile、不进日志。
 
@@ -170,8 +170,9 @@ dispose 里仍显式 `close()`/`unref()`。语义是"桥接照常服务，但不
 | --- | --- |
 | `session/event` 监听签名 `(session, event)` | `@deepseek-ai/dsh-session` append → `callbackArgs = [this, event]`；官方监听器写法见 `dsh-agent-presets` |
 | `approval/asked` data = `{ id, toolName, callId?, reason? }` | `SessionEventMap`（typert 声明） |
-| `jobs.list(caller)` 含无主任务；`caller` 是 live Agent（`agents.get(sessionId)`，agent/session 共享 id） | `dsh-jobs-local`；`dsh-agent` 的 `get(id)` 注释 |
-| `onJobDone(snapshot, owner)` / `onJobsChanged(owner)`；snapshot 形状 `{id,kind,label,ownerSession?,status,detail?,startedAt,finishedAt?,reported}` | `dsh-jobs-local` |
+| `jobs.list(caller)` 含无主任务；`caller` 类型按宿主代次变化：**旧代**（≤0.1.6）live Agent（`agents.get(sessionId)`，agent/session 共享 id）→ `caller?.id`；**新代**（≥0.1.7）直接是 `SessionId` 字符串（`job.owner.id === caller`） | `dsh-jobs-local` 两代 `list()`/`assertAccess()` 实现；判代见 D42（`jobsApiGeneration`） |
+| **旧代**（≤0.1.6）：`onJobDone(snapshot, owner)` / `onJobsChanged(owner)`；snapshot 形状 `{id,kind,label,ownerSession?,status,detail?,startedAt,finishedAt?,reported}` | `dsh-jobs-local` 0.1.6-alpha.2 |
+| **新代**（≥0.1.7）：两个监听器 API 被删除，改为 `jobs.events.subscribe(filter, listener)`（filter `{owner}` / `{owners:'all'\|'scope'}`；事件 `registered\|progress\|stopping\|removed\|settled\|output`）；视图改称 `JobView`（`owner` 取代 `ownerSession`，新增 `progress`/`output:{total,earliest,spillPaths?}`）；`JobStart`→`JobSpec`；新增 `readAt(id, from, caller?)` 与 `remove(id, caller?)` | `@deepseek-ai/dsh-jobs` 0.1.7-alpha.1 类型声明（`lib/types/types.d.ts`、`view.d.ts`）；`dsh-jobs-local` 的 `get events()` + `subscribe()` |
 | `sessionPersistence.list()` → `[{header:{id,createdAt},revision,sizeBytes}]`；`open(id,'read')` → `handle.read(0)` → `{eventState,events}` + `handle.close()` | `dsh-session-persistence-jsonl` |
 | `credentials.resolve(ref)` → `{value, source} | undefined`；默认 ref `DEEPSEEK_API_KEY` | `dsh-credentials-local`；`dsh-llm-deepseek` |
 | `ctx.get('loader')?.await()` 是安定时序的官方用法 | `dsh-app-boot` |

@@ -4,6 +4,7 @@ import {
   BRIDGE_PROTOCOL_VERSION,
   apply,
   approvalEventOf,
+  jobsApiGeneration,
   uniqueJobs,
   tokenMatches,
 } from '../packages/bridge/lib/index.js'
@@ -20,6 +21,7 @@ import { WebSocket } from '../packages/bridge/vendor/ws/wrapper.mjs'
  *  - 发现行必须在 WS **监听就绪后**打印（address() 在 listening 前是 null）；
  *  - `session/event` 的宿主签名是 `(session, event)`，不是 `(event)`；
  *  - `jobs.list(caller)` 会把无主任务投给每个 caller，逐会话聚合必须去重；
+ *  - jobs 宿主 API 换代（0.1.7：监听器 → 事件流、caller Agent → SessionId）后两代都要能接线；
  *  - 鉴权失败/超时必须断开；dispose 必须先广播再关连接。
  */
 
@@ -107,7 +109,10 @@ async function rpc(ws, messages, id, method, params) {
   return waitFor(() => messages.find((m) => m.type === 'result' && m.id === id), `RPC ${method}`)
 }
 
-/** 一组足够真实的宿主服务 stub（形状对齐 dsh 0.1.6-alpha.2）。 */
+/**
+ * 一组足够真实的宿主服务 stub（形状对齐 dsh 0.1.6/0.1.7：`sessions` + `agents` +
+ * `jobs`；jobs 的 caller 换代见 jobsStub）。
+ */
 function harnessStub({ sessionIds = ['s1'], jobs = undefined, loader = { await: () => Promise.resolve() } } = {}) {
   const liveSessions = () =>
     sessionIds.map((id) => ({
@@ -138,29 +143,70 @@ function harnessStub({ sessionIds = ['s1'], jobs = undefined, loader = { await: 
   }
 }
 
-/** jobs 服务 stub：复刻官方可见集语义（无主任务投给每个 caller）。 */
-function jobsStub() {
+/**
+ * jobs 服务 stub：复刻官方可见集语义（无主任务投给每个 caller）。
+ *
+ * `generation` 选宿主 API 代次，两代的差异是**真实存在过的破坏性变更**
+ * （0.1.7-alpha.1：监听器 → 事件流，caller Agent → SessionId）：
+ *  - `2`（默认）：`events.subscribe(filter, listener)` + `list(SessionId)`；
+ *  - `1`：`onJobsChanged` / `onJobDone` + `list(Agent)`。
+ * 传错代的形状会让 caller 与 owner 对不上（旧代读 `caller.id`，新代拿 caller 本身），
+ * 所以两代都跑同一批断言：可见集必须一致。
+ */
+function jobsStub(generation = 2) {
   const changed = []
   const done = []
+  const subs = []
+  const legacy = generation < 2
   const shared = { id: 'bg-shared', kind: 'bash', label: '共享任务', status: 'running' }
-  return {
-    service: {
-      list: (caller) =>
-        caller === undefined
-          ? [shared]
-          : [shared, { id: `job-${caller.id}`, kind: 'bash', label: `自有-${caller.id}`, status: 'running', ownerSession: caller.id }],
-      onJobsChanged: (fn) => {
-        changed.push(fn)
-        return () => {}
-      },
-      onJobDone: (fn) => {
-        done.push(fn)
-        return () => {}
-      },
+  const service = {
+    list: (caller) => {
+      const id = legacy ? caller?.id : caller
+      return id === undefined
+        ? [shared]
+        : [
+            shared,
+            {
+              id: `job-${id}`,
+              kind: 'bash',
+              label: `自有-${id}`,
+              status: 'running',
+              // 字段名也跟着换代：旧代 ownerSession / 新代 owner（minimalJob 两代都读）
+              ...(legacy ? { ownerSession: id } : { owner: id }),
+            },
+          ]
     },
-    fireChanged: () => changed.forEach((fn) => fn()),
-    fireDone: (record) => done.forEach((fn) => fn(record)),
-    registered: () => changed.length,
+  }
+  if (legacy) {
+    service.onJobsChanged = (fn) => {
+      changed.push(fn)
+      return () => {}
+    }
+    service.onJobDone = (fn) => {
+      done.push(fn)
+      return () => {}
+    }
+  } else {
+    service.events = {
+      subscribe: (filter, fn) => {
+        subs.push({ filter, fn })
+        return () => {}
+      },
+    }
+  }
+  return {
+    service,
+    /** 新代订阅用的 filter（断言只能是进程级 `owners:'all'`）。 */
+    filters: () => subs.map(({ filter }) => filter),
+    fireChanged: () =>
+      legacy ? changed.forEach((fn) => fn()) : subs.forEach(({ fn }) => fn({ type: 'progress', job: shared })),
+    fireDone: (record) =>
+      legacy
+        ? done.forEach((fn) => fn(record))
+        : subs.forEach(({ fn }) => fn({ type: 'settled', job: record, cause: 'producer', awaited: false })),
+    /** 新代专有：output 事件只报字节总数，不得触发可见集重推。 */
+    fireOutput: () => subs.forEach(({ fn }) => fn({ type: 'output', id: 'bg-shared', total: 12 })),
+    registered: () => (legacy ? changed.length : subs.length),
   }
 }
 
@@ -386,37 +432,88 @@ test('approval.asked / approval.decided：推送形状 + 待审批环出入环',
   }
 })
 
-test('jobs：逐会话聚合无主任务时去重，jobs.changed / job.done 正常推送', async () => {
-  const jobs = jobsStub()
-  const { ctx, target, stdout } = await startBridge({
-    services: harnessStub({ sessionIds: ['s1', 's2'], jobs: jobs.service }),
+test('jobsApiGeneration：按新代独有的 events.subscribe 判代（缺失/异形一律算旧代）', () => {
+  assert.equal(jobsApiGeneration({ events: { subscribe: () => () => {} } }), 2)
+  // 旧代：只有监听器
+  assert.equal(jobsApiGeneration({ onJobsChanged: () => () => {}, onJobDone: () => () => {} }), 1)
+  // events 在但 subscribe 不是函数（异形实现）→ 不能当新代用
+  assert.equal(jobsApiGeneration({ events: {} }), 1)
+  assert.equal(jobsApiGeneration({ events: { subscribe: 'nope' } }), 1)
+  // 服务缺失 / getter 抛错都不该崩
+  assert.equal(jobsApiGeneration(undefined), 1)
+  assert.equal(jobsApiGeneration({ get events() { throw new Error('boom') } }), 1)
+})
+
+for (const generation of [2, 1]) {
+  test(`jobs（宿主 API 第 ${generation} 代）：逐会话聚合无主任务时去重，jobs.changed / job.done 正常推送`, async () => {
+    const jobs = jobsStub(generation)
+    const { ctx, target, stdout } = await startBridge({
+      services: harnessStub({ sessionIds: ['s1', 's2'], jobs: jobs.service }),
+    })
+    const client = openClient(target.port)
+    try {
+      await client.open
+      client.ws.send(JSON.stringify({ type: 'auth', token: target.token }))
+      await waitFor(() => client.messages.find((m) => m.type === 'authed'), 'authed')
+
+      // jobs 接线发生在 Loader 安定后（apply 阶段服务可能尚未就绪）
+      await waitFor(() => jobs.registered() === 1, 'jobs 监听器注册')
+      // 新代只能用进程级 filter：桥接不代表任何单个 scope，逐会话聚合缺它就会漏任务
+      if (generation >= 2) assert.deepEqual(jobs.filters(), [{ owners: 'all' }])
+
+      jobs.fireChanged()
+      const changed = await waitFor(() => client.messages.find((m) => m.type === 'jobs.changed'), 'jobs.changed')
+      const ids = changed.payload.jobs.map((j) => j.id)
+      // 未去重时：bg-shared 出现在 s1、s2 与无 caller 三次
+      assert.deepEqual(ids, ['bg-shared', 'job-s1', 'job-s2'])
+      assert.deepEqual(changed.payload.jobs[1], {
+        id: 'job-s1',
+        kind: 'bash',
+        label: '自有-s1',
+        status: 'running',
+        owner: 's1',
+      })
+
+      jobs.fireDone({ id: 'bg-shared', kind: 'bash', label: '共享任务', status: 'done', ownerSession: undefined })
+      const donePush = await waitFor(() => client.messages.find((m) => m.type === 'job.done'), 'job.done')
+      assert.equal(donePush.payload.job.id, 'bg-shared')
+      assert.equal(donePush.payload.job.status, 'done')
+
+      // 新代：output 事件只是「环形缓冲写到第几字节」，不消费它的壳不该被它刷屏
+      if (generation >= 2) {
+        const before = client.messages.filter((m) => m.type === 'jobs.changed').length
+        jobs.fireOutput()
+        await new Promise((r) => setTimeout(r, 80))
+        assert.equal(client.messages.filter((m) => m.type === 'jobs.changed').length, before, 'output 不触发可见集重推')
+      }
+    } finally {
+      client.ws.close()
+      ctx.dispose()
+      stdout.restore()
+    }
   })
+}
+
+test('jobs：新代所有监听器都接不上时，最新诊断必须是 jobs.watch.failed 而不是 jobs.present', async () => {
+  // 服务在、但事件流不可用（官方再次改签名的形状）：壳按最新诊断判断可用性，
+  // 先报 present 再报失败会把「任务徽标/通知不可用」显示成正常。
+  const service = {
+    list: () => [],
+    events: {
+      subscribe: () => {
+        throw new Error('jobs.events.subscribe is not a function')
+      },
+    },
+  }
+  const { ctx, target, stdout } = await startBridge({ services: harnessStub({ jobs: service }) })
   const client = openClient(target.port)
   try {
     await client.open
-    client.ws.send(JSON.stringify({ type: 'auth', token: target.token }))
-    await waitFor(() => client.messages.find((m) => m.type === 'authed'), 'authed')
-
-    // jobs 接线发生在 Loader 安定后（apply 阶段服务可能尚未就绪）
-    await waitFor(() => jobs.registered() === 1, 'onJobsChanged 注册')
-
-    jobs.fireChanged()
-    const changed = await waitFor(() => client.messages.find((m) => m.type === 'jobs.changed'), 'jobs.changed')
-    const ids = changed.payload.jobs.map((j) => j.id)
-    // 未去重时：bg-shared 出现在 s1、s2 与无 caller 三次
-    assert.deepEqual(ids, ['bg-shared', 'job-s1', 'job-s2'])
-    assert.deepEqual(changed.payload.jobs[1], {
-      id: 'job-s1',
-      kind: 'bash',
-      label: '自有-s1',
-      status: 'running',
-      owner: 's1',
-    })
-
-    jobs.fireDone({ id: 'bg-shared', kind: 'bash', label: '共享任务', status: 'done', ownerSession: undefined })
-    const donePush = await waitFor(() => client.messages.find((m) => m.type === 'job.done'), 'job.done')
-    assert.equal(donePush.payload.job.id, 'bg-shared')
-    assert.equal(donePush.payload.job.status, 'done')
+    client.ws.send(JSON.stringify({ type: 'auth', token: target.token, protocolVersion: BRIDGE_PROTOCOL_VERSION }))
+    const authed = await waitFor(() => client.messages.find((m) => m.type === 'authed'), 'authed')
+    assert.equal(authed.payload.diag.code, 'jobs.watch.failed')
+    assert.equal(authed.payload.diag.level, 'warn')
+    assert.equal(authed.payload.diag.detail.api, 'jobs.events.subscribe')
   } finally {
     client.ws.close()
     ctx.dispose()
@@ -482,6 +579,8 @@ test('authed：回带协议版本与最新诊断（壳据此判断同代 + 显�
     assert.equal(typeof authed.payload.pid, 'number')
     // jobs 已接线（wireJobs 在宣告前跑）→ 最新诊断是 jobs.present
     assert.equal(authed.payload.diag.code, 'jobs.present')
+    // 诊断带上用的是哪一代宿主 API（0.1.7 起是事件流）
+    assert.equal(authed.payload.diag.detail.api, 'events.subscribe')
   } finally {
     client.ws.close()
     ctx.dispose()
