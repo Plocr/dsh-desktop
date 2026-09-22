@@ -11,10 +11,18 @@
  * ── 与上游的差异（重要） ──────────────────────────────────────────────
  * 1. 上游先 `--dir` 产出已签名 .app，再并发两条产物流（zip：App 公证+钉票；
  *    dmg：封装已签名 App 后公证+钉票），DMG 的公证发生在 electron-builder 的
- *    artifactBuildCompleted 钩子里。本仓库只发布 DMG（`DSH.Desktop-${version}-${arch}.dmg`，
- *    无 zip 目标），因此这里对 electron-builder 已产出的 dmg 做：
+ *    artifactBuildCompleted 钩子里。本仓库对 **dmg 一直**做：
  *    内层 App 签名核对 → notarytool submit --wait → stapler staple → stapler validate
  *    → spctl 评估 → 删除装订后必然过期的 blockmap（上游同样在公证后删除 dmg blockmap）。
+ *
+ *    `--zip`（只有 CI 的**签名**分支才传）额外补上 macOS **应用内更新**那条流：
+ *    electron-updater 的 MacUpdater 只认 zip（dmg 被显式排除，见
+ *    `electron-updater/out/MacUpdater.js:81`），而 electron-builder 产出的 zip 是在
+ *    **钉票之前**打的——里面的 .app 没有钉票。所以这里按顺序补：
+ *    App 公证 → 钉票 .app → **用钉票后的 .app 重新打 zip** → 删掉随之过期的
+ *    `<zip>.blockmap`（blockmap 与实际 zip 不符会让差分下载白跑）。
+ *    未签名构建不产出 zip：未签名的 zip 会被 Squirrel.Mac 拒绝，装不了就是装不了，
+ *    宁可不发，由壳侧诚实提示「请手动下载安装」（src/main/updatePayload.ts）。
  * 2. 上游要求四个环境变量（DSH_DESKTOP_APP_ID / DSH_DESKTOP_MACOS_SIGNING_IDENTITY /
  *    DSH_DESKTOP_MACOS_TEAM_ID / 公证凭据）。本仓库 appId 已固定在 electron-builder.yml
  *    （com.dsh.desktop.workbench），所以 DSH_DESKTOP_APP_ID 在此退化为**可选断言**：
@@ -426,6 +434,74 @@ export function findMacOSApplication(releaseDirectory, arch) {
 }
 
 /**
+ * 在产物目录中定位 `--mac dmg zip` 产出的更新包（应用内更新用）。
+ *
+ * @param {string} releaseDirectory electron-builder 输出目录。
+ * @param {string | undefined} arch 目标架构（arm64 / x64）。
+ * @returns {string | undefined} zip 绝对路径（没产出时 undefined）。
+ */
+export function findMacOSArchive(releaseDirectory, arch) {
+  if (!existsSync(releaseDirectory)) return undefined
+  const candidates = readdirSync(releaseDirectory)
+    .filter(name => name.endsWith('.zip'))
+    .filter(name => arch === undefined || name.includes(`-${arch}.`))
+  if (candidates.length === 0) return undefined
+  if (candidates.length > 1) {
+    throw new Error(`desktop macOS signing: multiple zips found in ${releaseDirectory} (${candidates.join(', ')})`)
+  }
+  return join(resolve(releaseDirectory), candidates[0])
+}
+
+/**
+ * 用 `ditto` 把一个 .app 打成 zip（Squirrel.Mac 解包依赖这个形状，不要换成 7z/zip CLI）。
+ *
+ * @param {string} appPath .app 绝对路径。
+ * @param {string} archivePath 目标 zip 绝对路径（覆盖写）。
+ * @returns {string} archivePath。
+ */
+export function createMacOSArchive(appPath, archivePath) {
+  rmSync(archivePath, { force: true })
+  runAppleCommand('/usr/bin/ditto', ['-c', '-k', '--keepParent', appPath, archivePath], 'ditto app zip')
+  if (!existsSync(archivePath)) {
+    throw new Error(`desktop macOS signing: ditto did not produce ${archivePath}`)
+  }
+  return archivePath
+}
+
+/**
+ * 公证 + 钉票 **.app 本体**（应用内更新的 zip 装的就是它）。
+ *
+ * 必须钉票后再打发布用的 zip：zip 是 Squirrel.Mac 的输入，里面的 .app 若无钉票，
+ * 离线或 Gatekeeper 严格模式下会校验不过。公证提交用的临时 zip 只是为了过
+ * notarytool（它要一个归档），与发布用的那个不是同一个文件。
+ *
+ * @param {string} appPath .app 绝对路径。
+ * @param {string} archivePath 发布用 zip（钉票后由本函数重建）。
+ * @param {ReturnType<typeof resolveMacOSNotarizationEnvironment>} credentials 公证凭据。
+ * @returns {Promise<void>}
+ */
+export async function notarizeAndStapleMacOSApplication(appPath, archivePath, credentials) {
+  const submissionArchive = `${archivePath}.notarize.zip`
+  createMacOSArchive(appPath, submissionArchive)
+  try {
+    await notarizeMacOSDiskImage(submissionArchive, credentials)
+  }
+  finally {
+    rmSync(submissionArchive, { force: true })
+  }
+  runAppleCommand('/usr/bin/xcrun', ['stapler', 'staple', appPath], 'stapler staple (app)')
+  runAppleCommand('/usr/bin/xcrun', ['stapler', 'validate', appPath], 'stapler validate (app)')
+  // 钉票改了 .app → 发布 zip 必须用钉票后的 .app 重打，否则发出去的是没钉票的版本
+  createMacOSArchive(appPath, archivePath)
+  const blockmap = `${archivePath}.blockmap`
+  if (existsSync(blockmap)) {
+    rmSync(blockmap, { force: true })
+    process.stdout.write(`desktop macOS notarization: removed stale ${basename(blockmap)} (invalidated by re-archiving)\n`)
+  }
+  process.stdout.write(`desktop macOS notarization: re-archived stapled app -> ${basename(archivePath)}\n`)
+}
+
+/**
  * 完整的「核对 → 公证 → 钉票 → 验证」流程（CLI 与 electron-builder 钩子共用）。
  *
  * @param {{
@@ -437,10 +513,11 @@ export function findMacOSApplication(releaseDirectory, arch) {
  *   requireSigning?: boolean,
  *   skipNotarize?: boolean,
  *   skipSpctl?: boolean,
+ *   zip?: boolean,
  *   identity?: string,
  *   teamId?: string,
  * }} options 运行参数。
- * @returns {Promise<{ appPath: string | undefined, diskImagePath: string | undefined }>} 已处理的产物路径。
+ * @returns {Promise<{ appPath: string | undefined, diskImagePath: string | undefined, archivePath: string | undefined }>} 已处理的产物路径。
  */
 export async function packageMacOSArtifacts(options = {}) {
   const environment = options.environment ?? process.env
@@ -449,8 +526,12 @@ export async function packageMacOSArtifacts(options = {}) {
   }
   const mode = resolveMacOSReleaseMode(environment, options.requireSigning === true)
   if (mode === 'unsigned') {
+    if (options.zip === true) {
+      // 未签名 zip 会被 Squirrel.Mac 拒绝：发了也装不上，比不发更糟（壳会以为能装）
+      throw new Error('desktop macOS signing: --zip requires a signed, notarized build; refusing to produce an unsigned update archive')
+    }
     process.stdout.write('desktop macOS signing: macOS signing variables are not set, skipping notarization and stapling (unsigned dmg)\n')
-    return { appPath: options.appPath, diskImagePath: options.diskImagePath }
+    return { appPath: options.appPath, diskImagePath: options.diskImagePath, archivePath: undefined }
   }
   const expected = resolveMacOSSigningEnvironment(environment, { identity: options.identity, teamId: options.teamId })
   const credentials = options.skipNotarize === true ? undefined : resolveMacOSNotarizationEnvironment(environment)
@@ -466,8 +547,24 @@ export async function packageMacOSArtifacts(options = {}) {
     process.stdout.write(`desktop macOS signing: verified Developer ID Application: ${expected.signingIdentity} (${expected.teamId}) on ${bundleIdentifier}\n`)
   }
 
+  // 应用内更新的 zip：必须在 dmg 之前处理，因为这一步会改 .app（钉票）
+  let archivePath
+  if (options.zip === true) {
+    if (appPath === undefined) {
+      throw new Error('desktop macOS signing: --zip needs the packaged .app; pass --app or --release-dir so it can be located')
+    }
+    if (credentials === undefined) {
+      throw new Error('desktop macOS signing: --zip requires notarization credentials (cannot staple without them)')
+    }
+    archivePath = findMacOSArchive(options.releaseDirectory ?? '.', options.arch)
+    if (archivePath === undefined) {
+      throw new Error('desktop macOS signing: --zip needs the zip artifact; package with `electron-builder --mac dmg zip`')
+    }
+    await notarizeAndStapleMacOSApplication(appPath, archivePath, credentials)
+  }
+
   if (options.diskImagePath === undefined && options.releaseDirectory === undefined) {
-    return { appPath, diskImagePath: undefined }
+    return { appPath, diskImagePath: undefined, archivePath }
   }
   const diskImagePath = options.diskImagePath ?? findMacOSDiskImage(options.releaseDirectory, options.arch)
   if (credentials !== undefined) {
@@ -493,7 +590,7 @@ export async function packageMacOSArtifacts(options = {}) {
       process.stderr.write(`desktop macOS signing: disk image signature not verified (not notarized): ${error.message}\n`)
     }
   }
-  return { appPath, diskImagePath }
+  return { appPath, diskImagePath, archivePath }
 }
 
 /**
@@ -547,6 +644,7 @@ function parseCliArguments(argv) {
     requireSigning: false,
     skipNotarize: false,
     skipSpctl: false,
+    zip: false,
     identity: undefined,
     teamId: undefined,
     appOnly: false,
@@ -570,6 +668,7 @@ function parseCliArguments(argv) {
       case '--require-signing': options.requireSigning = true; break
       case '--skip-notarize': options.skipNotarize = true; break
       case '--skip-spctl': options.skipSpctl = true; break
+      case '--zip': options.zip = true; break
       case '--help':
         process.stdout.write([
           'usage: node scripts/package-macos.mjs [options]',
@@ -583,6 +682,8 @@ function parseCliArguments(argv) {
           '  --require-signing      缺少签名变量时直接失败（CI 用）',
           '  --skip-notarize        只核对签名，不提交公证',
           '  --skip-spctl           跳过 spctl（部分 CI 镜像不可用）',
+          '  --zip                  公证+钉票 .app 后用钉票后的 .app 重打更新 zip',
+          '                         （应用内更新用；要求签名与公证凭据，且产物里有 zip）',
           '',
         ].join('\n'))
         process.exit(0)

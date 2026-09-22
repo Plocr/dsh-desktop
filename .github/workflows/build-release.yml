@@ -174,7 +174,20 @@ jobs:
             fi
           fi
           # 上传安装包 + latest.yml（GitHub provider 的更新元数据，updater 依赖）
-          gh release upload "$RELEASE_TAG" release/*.exe release/latest.yml --clobber
+          # blockmap 必须一起传：electron-updater 用 `<exe>.blockmap` 做差分下载，
+          # 取不到会 catch 后退回**整包**下载（AppUpdater.differentialDownloadInstaller
+          # 的 catch → `return true` → NsisUpdater 再走一遍完整 download），
+          # 也就是每次更新多下 ~160 MB。实测 0.8.3 / 0.8.4 两次 CI 出包都漏了它
+          # （手动出的 0.8.0 / 0.8.1 反而有）。
+          #
+          # 用 for 循环而不是 `if [ -e release/*.exe.blockmap ]`：glob 命中**多个**文件时
+          # `[` 会报 "too many arguments" 并判假，于是 blockmap 被静默漏传——正好是本次
+          # 要修的那个 bug 的另一种触发方式。循环对 0/1/N 个文件都正确。
+          assets=(release/*.exe release/latest.yml)
+          for f in release/*.exe.blockmap; do
+            if [ -e "$f" ]; then assets+=("$f"); fi
+          done
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
 
   # macOS arm64：x64 runner 交叉构建。便携 Node 显式取 arm64，
   # 与 --arm64 dmg 匹配（否则打进 x64 Node，arm64 Mac 上无法运行）。
@@ -230,7 +243,7 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "macOS signing secrets are absent; building an unsigned dmg"
           fi
-      - name: Package DMG (arm64, signed + notarized)
+      - name: Package DMG + update zip (arm64, signed + notarized)
         if: steps.mac-signing.outputs.enabled == 'true'
         timeout-minutes: 90
         env:
@@ -245,15 +258,18 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          # 1) 构建并签名 .app + DMG（forceCodeSigning=true：找不到指定证书时直接失败，不产出未签名产物；
-          #    mac.notarize=false：App 公证交给下面脚本统一处理，避免重复提交）
-          npx electron-builder --mac dmg --arm64 --publish never \
+          # 1) 构建并签名 .app + DMG + zip（forceCodeSigning=true：找不到指定证书时直接失败，
+          #    不产出未签名产物；mac.notarize=false：公证交给下面脚本统一处理，避免重复提交）。
+          #    zip 是 macOS **应用内更新**唯一认的载荷（MacUpdater 只找 zip、显式排除 dmg），
+          #    只有签名分支才产出它——未签名的 zip 会被 Squirrel.Mac 拒绝，发了也装不上。
+          npx electron-builder --mac dmg zip --arm64 --publish never \
             --config.mac.identity="$DSH_DESKTOP_MACOS_SIGNING_IDENTITY" \
             --config.mac.forceCodeSigning=true \
             --config.mac.notarize=false
-          # 2) 核对 .app 签名身份 → notarytool 公证 DMG → stapler 装订 → spctl 验证
-          #    （装订后 dmg 字节变化，脚本会删掉已过期的 *.dmg.blockmap）
-          node scripts/package-macos.mjs --release-dir release --arch arm64 --require-signing
+          # 2) 核对 .app 签名身份 → 公证+钉票 .app 并用**钉票后**的 .app 重打 zip（--zip）
+          #    → 公证 DMG → 钉票 → spctl 验证
+          #    （装订与重打都会让对应 blockmap 过期，脚本会删掉）
+          node scripts/package-macos.mjs --release-dir release --arch arm64 --require-signing --zip
       - name: Package DMG (arm64, unsigned)
         if: steps.mac-signing.outputs.enabled != 'true'
         run: npx electron-builder --mac dmg --arm64 --publish never
@@ -274,8 +290,23 @@ jobs:
             fi
           fi
           # 公证装订后 blockmap 会被删除（装订改变了 dmg 字节），存在才上传
+          # （for 循环而非 `[ -e glob ]`：见上方 Windows 步骤的同类说明）
           assets=(release/*arm64*.dmg)
-          if [ -e release/*arm64*.dmg.blockmap ]; then assets+=(release/*arm64*.dmg.blockmap); fi
+          for f in release/*arm64*.dmg.blockmap; do
+            if [ -e "$f" ]; then assets+=("$f"); fi
+          done
+          # 应用内更新载荷（只有签名分支产出；缺它壳会老实提示「请手动下载」）
+          for f in release/*arm64*.zip; do
+            if [ -e "$f" ]; then assets+=("$f"); fi
+          done
+          # 钉票后重打的 zip 没有有效 blockmap：真传上去会让差分下载拿到错的基准，
+          # 最后以 sha512 校验失败收场。这里显式挡住（package-macos 已删，防回归）。
+          for f in release/*arm64*.zip.blockmap; do
+            if [ -e "$f" ]; then
+              echo "::error::stale zip blockmap present ($f)"
+              exit 1
+            fi
+          done
           gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
 
   # macOS x64：原生 x64 构建。
@@ -330,7 +361,7 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "macOS signing secrets are absent; building an unsigned dmg"
           fi
-      - name: Package DMG (x64, signed + notarized)
+      - name: Package DMG + update zip (x64, signed + notarized)
         if: steps.mac-signing.outputs.enabled == 'true'
         timeout-minutes: 90
         env:
@@ -343,11 +374,12 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          npx electron-builder --mac dmg --x64 --publish never \
+          # 与 arm64 分支同形（zip = 应用内更新载荷，必须在钉票之后重打）
+          npx electron-builder --mac dmg zip --x64 --publish never \
             --config.mac.identity="$DSH_DESKTOP_MACOS_SIGNING_IDENTITY" \
             --config.mac.forceCodeSigning=true \
             --config.mac.notarize=false
-          node scripts/package-macos.mjs --release-dir release --arch x64 --require-signing
+          node scripts/package-macos.mjs --release-dir release --arch x64 --require-signing --zip
       - name: Package DMG (x64, unsigned)
         if: steps.mac-signing.outputs.enabled != 'true'
         run: npx electron-builder --mac dmg --x64 --publish never
@@ -368,8 +400,23 @@ jobs:
             fi
           fi
           # 公证装订后 blockmap 会被删除（装订改变了 dmg 字节），存在才上传
+          # （for 循环而非 `[ -e glob ]`：见上方 Windows 步骤的同类说明）
           assets=(release/*x64*.dmg)
-          if [ -e release/*x64*.dmg.blockmap ]; then assets+=(release/*x64*.dmg.blockmap); fi
+          for f in release/*x64*.dmg.blockmap; do
+            if [ -e "$f" ]; then assets+=("$f"); fi
+          done
+          # 应用内更新载荷（只有签名分支产出；缺它壳会老实提示「请手动下载」）
+          for f in release/*x64*.zip; do
+            if [ -e "$f" ]; then assets+=("$f"); fi
+          done
+          # 钉票后重打的 zip 没有有效 blockmap：真传上去会让差分下载拿到错的基准，
+          # 最后以 sha512 校验失败收场。这里显式挡住（package-macos 已删，防回归）。
+          for f in release/*x64*.zip.blockmap; do
+            if [ -e "$f" ]; then
+              echo "::error::stale zip blockmap present ($f)"
+              exit 1
+            fi
+          done
           gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
 
   # macOS 多架构更新的关键：把两个架构各自生成的 latest-mac.yml 合并为一份
@@ -382,23 +429,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Download dmg + blockmap assets
+      - name: Download mac assets (dmg / blockmap / update zip)
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
-          mkdir -p dmg
-          gh release download "$RELEASE_TAG" --pattern '*.dmg' --dir dmg
+          mkdir -p mac-assets
+          gh release download "$RELEASE_TAG" --pattern '*.dmg' --dir mac-assets
           # 公证装订后的 dmg 不再带 blockmap（上传步骤也会跳过），缺失不算失败
-          gh release download "$RELEASE_TAG" --pattern '*.dmg.blockmap' --dir dmg || true
-          ls -la dmg
+          gh release download "$RELEASE_TAG" --pattern '*.dmg.blockmap' --dir mac-assets || true
+          # 应用内更新载荷（只有签名分支产出）；缺失说明这次 mac 只能手动装，不算失败
+          gh release download "$RELEASE_TAG" --pattern '*.zip' --dir mac-assets || true
+          ls -la mac-assets
       - name: Merge latest-mac.yml
-        run: node scripts/merge-mac-manifest.mjs ./dmg ./dmg/latest-mac.yml
+        run: node scripts/merge-mac-manifest.mjs ./mac-assets ./mac-assets/latest-mac.yml
       - name: Upload merged latest-mac.yml
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
-          gh release upload "$RELEASE_TAG" ./dmg/latest-mac.yml --clobber
+          gh release upload "$RELEASE_TAG" ./mac-assets/latest-mac.yml --clobber

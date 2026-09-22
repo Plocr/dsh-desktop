@@ -49,6 +49,10 @@ win:
       - sha256
 
 mac:
+  # 这里只声明 dmg。**应用内更新**需要的 zip 由 CI 的签名分支在命令行上补
+  # （`npx electron-builder --mac dmg zip`，见 build-release.yml）：未签名的 zip
+  # 会被 Squirrel.Mac 拒绝，从配置层就不产出可以避免误发一个「装不上」的更新包。
+  # 壳侧对「只有 dmg、没有 zip」的版本会诚实提示手动下载（src/main/updatePayload.ts）。
   target:
     - target: dmg
       arch:

@@ -5,7 +5,7 @@
 | 平台 | 目标 | 用到的产物 | 关键实现 |
 | --- | --- | --- | --- |
 | Windows | 安装包 / 便携版带 Authenticode EV 签名 | NSIS `.exe`、应用 `.exe`、临时卸载器 | `scripts/windows-sign.mjs`（electron-builder `win.signtoolOptions.sign` 钩子）+ `scripts/installer.nsh` |
-| macOS | `.app` 带 Developer ID 签名，`.dmg` 经 Apple 公证 + 钉票 | `DSH.Desktop-<版本>-<架构>.dmg` | `scripts/package-macos.mjs` |
+| macOS | `.app` 带 Developer ID 签名，`.dmg` 经 Apple 公证 + 钉票；签名分支另出应用内更新用的 `.zip`（`--zip`：公证+钉票 `.app` 后用钉票后的 `.app` 重打） | `DSH.Desktop-<版本>-<架构>.dmg`、`DSH.Desktop-<版本>-<架构>.zip` | `scripts/package-macos.mjs` |
 
 实现适配自 DeepSeek Harness 官方桌面端（MIT License，`apps/desktop/scripts/*`），差异与理由写在脚本头注释里。**未配置签名变量时两条链路都自动跳过**，因此没有证书的人仍然可以正常构建（但产物是未签名的）。
 
@@ -126,15 +126,16 @@ DSH_DESKTOP_UNSIGNED=1 npm run dist:win
 
 ### 2.1 工作原理
 
-1. `electron-builder --mac dmg` 用 Developer ID Application 证书签 `.app`（`CSC_LINK` 导入的临时钥匙串 + 显式 `identity`），并生成 dmg；
+1. `electron-builder --mac dmg`（CI 的签名分支是 `--mac dmg zip`）用 Developer ID Application 证书签 `.app`（`CSC_LINK` 导入的临时钥匙串 + 显式 `identity`），并生成 dmg（+ zip）；
 2. `scripts/package-macos.mjs`：
    - 深度严格校验 `.app` 签名（`codesign --verify --deep --strict` + `--display --verbose=4` 必须出现 `Authority=Developer ID Application: <限定名>` 与 `TeamIdentifier=<Team ID>`），必要时断言 `CFBundleIdentifier == DSH_DESKTOP_APP_ID`；
+   - **传了 `--zip` 时先处理应用内更新的 zip**：给 `.app` 打临时 zip 提交公证 → `stapler staple` 钉票 `.app` → 用**钉票后**的 `.app` 重打发布 zip → 删掉随之作废的 `<zip>.blockmap`（这一步必须在 dmg 之前，因为它会改 `.app`）；
    - `xcrun notarytool submit <dmg> --wait --output-format json` 提交公证，`Invalid` 时自动拉取官方日志（`notarytool log`）再失败；
    - `xcrun stapler staple` 钉票 + `stapler validate` 校验；
    - `spctl --assess --type install --verbose=4` 模拟 Gatekeeper 评估；
    - 删除装订后必然过期的 `<dmg>.blockmap`（字节已变），并提示 CI 上传步骤跳过它。
 
-   上游同样在公证后删除 dmg blockmap；差别是上游还发 zip 并给 App 单独钉票，本仓库只发 dmg，所以 dmg 内的 `.app` 不带独立票据（从 dmg 安装时 Gatekeeper 用 dmg 的票据，行为正确）。
+   为什么必须「钉票后重打 zip」：electron-updater 在 macOS 上**只认 zip**（dmg 被 `MacUpdater` 显式排除），而 electron-builder 产出的 zip 是在钉票之前打的——里面的 `.app` 没有票据。上游的做法也一样（zip 与 dmg 两条流各自公证+钉票）。未签名时不产出 zip：未签名的 zip 会被 Squirrel.Mac 拒绝，装不了就是装不了，宁可不发（壳侧会诚实提示手动下载 dmg）。
 
 ### 2.2 证书与 Team ID 的获取
 
@@ -234,7 +235,10 @@ spctl --assess --type install --verbose=4 release/DSH.Desktop-<版本>-arm64.dmg
 | `stapler validate exited with 65: ... does not have a ticket` | 公证未通过或提交的不是同一个 dmg（例如公证后又重新打包） |
 | `spctl exited with 3: rejected` | 未公证/未钉票，或 Gatekeeper 缓存。可 `spctl --assess` 重跑；CI 上用 `--skip-spctl` 跳过（参考环境限制） |
 | 公证耗时很长 | 首次公证通常 2–15 分钟；CI 里该步骤加了 `timeout-minutes: 90` |
-| 公证后 dmg 的 `.blockmap` 消失 | 预期行为：钉票改变了 dmg 字节，旧 blockmap 必然失效（`merge-mac-manifest.mjs` 会按 dmg 重算 sha512） |
+| 公证后 dmg 的 `.blockmap` 消失 | 预期行为：钉票改变了 dmg 字节，旧 blockmap 必然失效（`merge-mac-manifest.mjs` 会按**实际文件**重算 dmg 与 zip 的 sha512） |
+| `--zip` 报 `requires a signed, notarized build` | 未配置签名变量时不产出 zip：未签名 zip 会被 Squirrel.Mac 拒绝，发了也装不上 |
+| `--zip` 报 `needs the zip artifact` | 打包命令少了 zip 目标，应用 `npx electron-builder --mac dmg zip ...`（见 `electron-builder.yml` 里 mac 只声明 dmg 的原因） |
+| 用户报「更新弹了通知但没动静」（macOS） | 该版本清单里没有 zip（未签名分支），壳会改为诚实提示手动下载；若用户手动检查，应看到「此版本未提供 macOS 自动更新包（zip）」而不是一句「检查更新失败」 |
 
 ---
 
@@ -243,8 +247,8 @@ spctl --assess --type install --verbose=4 release/DSH.Desktop-<版本>-arm64.dmg
 `.github/workflows/build-release.yml` 的 job 名与产物上传逻辑保持不变，只是新增了「检测 secrets → 签名/未签名二选一」的分支：
 
 - `build-windows`：四个 `DSH_WIN_*` secret 齐全时注入签名变量（并在打包后用 `Get-AuthenticodeSignature` 硬校验），否则不注入任何变量、构建未签名安装包。默认跑 `windows-latest`；要真签名需把仓库变量 `DSH_WINDOWS_RUNNER` 指向插着 SafeNet Token 的 self-hosted Windows runner（托管 runner 没有 USB Token）。
-- `build-macos-arm64` / `build-macos-x64`：`MAC_*` + `APPLE_*` secret 齐全时用 `CSC_LINK` 导入证书、`--config.mac.identity` 指定身份、`--config.mac.forceCodeSigning=true` 强制签名，再跑 `scripts/package-macos.mjs --require-signing` 做公证 + 钉票 + 验证；否则完全按原样出未签名 dmg。两者都保持 `continue-on-error: true`。
-- `merge-mac-manifest`：因为装订过的 dmg 不带 blockmap，下载步骤改成「dmg 必须、blockmap 可选」。
+- `build-macos-arm64` / `build-macos-x64`：`MAC_*` + `APPLE_*` secret 齐全时用 `CSC_LINK` 导入证书、`--config.mac.identity` 指定身份、`--config.mac.forceCodeSigning=true` 强制签名，打包命令是 `--mac dmg zip`，再跑 `scripts/package-macos.mjs --require-signing --zip` 做「公证+钉票 .app → 重打 zip → 公证+钉票 dmg → 验证」；否则完全按原样出未签名 dmg（**不产 zip**）。两者都保持 `continue-on-error: true`。上传步骤会带上 zip，并在发现残留的 `<zip>.blockmap` 时直接失败——钉票后重打的 zip 没有有效块图，传上去会让差分下载拿到错基准、最后以 sha512 校验失败收场。
+- `merge-mac-manifest`：下载「dmg 必须、blockmap 可选、zip 可选」，合并时按**实际文件**重算 sha512/size（打包期那份早于公证/钉票，已作废）。
 
 需要的 secrets（名称）：
 
@@ -278,7 +282,7 @@ mac:
   notarize: false         # App 的公证交给 scripts/package-macos.mjs，避免重复提交
 ```
 
-有意**不**采用的项（与上游差异）：`mac.forceCodeSigning: true`（上游在 JS 配置里按环境分支，本仓库 YAML 是静态的，会让无证书构建失败；CI 只在签名分支用命令行 `--config.mac.forceCodeSigning=true`）、`dmg.writeUpdateInfo: false`（上游的 dmg 不是更新载荷，本仓库的 electron-updater 依赖 `latest-mac.yml`）、`mac.signIgnore`（上游用于跳过预先签好的运行时目录；本仓库运行时是 `resources/dsh` + `resources/runtime` 两棵树（签名时整体排除））。
+有意**不**采用的项（与上游差异）：`mac.forceCodeSigning: true`（上游在 JS 配置里按环境分支，本仓库 YAML 是静态的，会让无证书构建失败；CI 只在签名分支用命令行 `--config.mac.forceCodeSigning=true`）、`mac.target` 里静态写 `zip`（改成签名分支在命令行上加 `--mac dmg zip`——未签名的 zip 会被 Squirrel.Mac 拒绝，从配置层就不产出可避免误发「装不上」的更新包）、`dmg.writeUpdateInfo: false`（上游的 dmg 不是更新载荷，本仓库的 electron-updater 依赖 `latest-mac.yml`）、`mac.signIgnore`（上游用于跳过预先签好的运行时目录；本仓库运行时是 `resources/dsh` + `resources/runtime` 两棵树（签名时整体排除））。
 
 > 另一种挂法：electron-builder 26.x 允许把钩子写成模块路径字符串，例如
 > `afterSign: ./scripts/package-macos.mjs`、`artifactBuildCompleted: ./scripts/package-macos.mjs`
