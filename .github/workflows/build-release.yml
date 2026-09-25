@@ -165,14 +165,23 @@ jobs:
           # 若 release 尚不存在（刚打 tag 尚未建 release）则先创建，避免 upload 报 release not found。
           # 更新日志：优先用随代码提交的 docs/release-notes/<tag>.md（上游自动同步流程会写
           # "跟随官方最新 harness 同步"那份），没有才退回 GitHub 自动生成。
+          #
+          # 竞态（2026-09-25 真机踩到）：Windows / mac x64 / mac arm64 三个 job 并发跑，
+          # 都在"view 说没有 → create"之间，先到的 job 建好后，后到的 create 会以
+          # `HTTP 422: Release.tag_name already exists` 直接失败——v0.8.12 的 arm64 dmg
+          # 就是这么丢的（job 是 continue-on-error，整体还是绿的，只少一个产物）。
+          # 所以 create 失败不当错误（可能另一个 job 已经建好），随后再确认 release 真的在。
           NOTES="docs/release-notes/$RELEASE_TAG.md"
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             if [ -f "$NOTES" ]; then
-              gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --notes-file "$NOTES"
+              gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --notes-file "$NOTES" \
+                || echo "release 创建竞态（另一个 job 先建好了）——继续上传"
             else
-              gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes
+              gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes \
+                || echo "release 创建竞态（另一个 job 先建好了）——继续上传"
             fi
           fi
+          gh release view "$RELEASE_TAG" >/dev/null   # 到这里必须能看到 release，否则本就该红
           # 上传安装包 + latest.yml（GitHub provider 的更新元数据，updater 依赖）
           # blockmap 必须一起传：electron-updater 用 `<exe>.blockmap` 做差分下载，
           # 取不到会 catch 后退回**整包**下载（AppUpdater.differentialDownloadInstaller
@@ -281,14 +290,18 @@ jobs:
         run: |
           # 若 release 尚不存在（并发时 Windows 任务还没创建）则先创建，
           # 否则 gh release upload 会报 release not found（mac 任务跑得更快）
+          # 竞态处理同上：create 失败不当错误（可能另一个 job 已经建好），随后再确认。
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             NOTES="docs/release-notes/$RELEASE_TAG.md"
             if [ -f "$NOTES" ]; then
-              gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --notes-file "$NOTES"
+              gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --notes-file "$NOTES" \
+                || echo "release 创建竞态（另一个 job 先建好了）——继续上传"
             else
-              gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes
+              gh release create "$RELEASE_TAG" --title "DSH Desktop $RELEASE_TAG" --generate-notes \
+                || echo "release 创建竞态（另一个 job 先建好了）——继续上传"
             fi
           fi
+          gh release view "$RELEASE_TAG" >/dev/null   # 到这里必须能看到 release，否则本就该红
           # 公证装订后 blockmap 会被删除（装订改变了 dmg 字节），存在才上传
           # （for 循环而非 `[ -e glob ]`：见上方 Windows 步骤的同类说明）
           assets=(release/*arm64*.dmg)
