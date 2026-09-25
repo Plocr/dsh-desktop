@@ -6,7 +6,7 @@
  * Web 应用（`runProfile` 起的 127.0.0.1:19387），Electron 只做「本地窗口 + 转发」。
  */
 import { spawn, type ChildProcess } from 'node:child_process'
-import { join } from 'node:path'
+import { runtimeTreeHostEntry } from './hostEntry.ts'
 import { log } from './logger.ts'
 import { authenticateWebHost, forwardWebRequest } from './webDocument.ts'
 
@@ -58,6 +58,8 @@ export class DesktopHostProcess {
   private readonly pnpmEntry: string | undefined
   private readonly allowLinkedPackages: boolean
   private readonly port: number | undefined
+  /** Host 入口绝对路径（壳自带副本优先，见 hostEntry.ts）；缺省 = 运行时树副本。 */
+  private readonly hostEntry: string | undefined
   private child: ChildProcess | undefined
   private readyResolve!: (ready: DesktopHostReady) => void
   private readyReject!: (error: Error) => void
@@ -92,6 +94,7 @@ export class DesktopHostProcess {
    * @param onExit - Receives the child's exit code and signal once the process is gone.
    * @param pnpmEntry - Bundled pnpm entry handed to the Host as its launcher-provided package manager.
    * @param allowLinkedPackages - Development-only: allow workspace-linked bundle packages.
+   * @param hostEntry - Absolute Host entry to spawn (shell-bundled copy preferred, see hostEntry.ts).
    */
   constructor(
     node: string,
@@ -106,6 +109,7 @@ export class DesktopHostProcess {
     pnpmEntry?: string,
     allowLinkedPackages = false,
     port?: number,
+    hostEntry?: string,
   ) {
     this.node = node
     this.runtimeDir = runtimeDir
@@ -119,13 +123,15 @@ export class DesktopHostProcess {
     this.pnpmEntry = pnpmEntry
     this.allowLinkedPackages = allowLinkedPackages
     this.port = port
+    this.hostEntry = hostEntry
   }
 
   /** Start the child once and resolve only after its composition is serving requests. */
   async start(): Promise<DesktopHostReady> {
     if (this.child !== undefined) return this.readyPromise
+    // 入口由壳决定（壳自带副本优先，见 hostEntry.ts）；兜底才是随包运行时树里的那份。
     // 本壳的 Host 包为非作用域名（与官方私有包 @deepseek-ai/dsh-desktop-host 的路径不同）。
-    const entry = join(this.runtimeDir, 'node_modules', 'dsh-desktop-host', 'lib', 'index.js')
+    const entry = this.hostEntry ?? runtimeTreeHostEntry(this.runtimeDir)
     const child = spawn(this.node, [
       // 用**操作系统证书库**（Windows 根证书）而不是 Node 自带的 CA 列表。
       // 真机事故（2026-09-23）：卡巴斯基的"加密连接扫描"会用自己的根证书重建 TLS 链，

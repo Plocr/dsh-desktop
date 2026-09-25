@@ -1,6 +1,8 @@
 /**
  * HostManager：管理 Desktop Host 子进程（`packages/host`，入口
- * `<runtimeDir>/node_modules/dsh-desktop-host/lib/index.js`）的完整生命周期。
+ * **壳自带副本 `<appPath>/dist/main/host-entry.cjs` 优先**，随包运行时树里的
+ * `<runtimeDir>/node_modules/dsh-desktop-host/lib/index.js` 兜底——
+ * 后者会被杀软启发式当成可疑散件删掉，不能当启动硬前提，见 src/main/hostEntry.ts）的完整生命周期。
  *
  * 与旧 HarnessManager（`dsh --profile <profile> --port 0` CLI 子进程）一致的语义：
  *  - 崩溃后指数退避自动重启；`childGen` 世代守卫保证僵尸旧进程的迟到事件
@@ -17,8 +19,8 @@
  */
 import { log } from './logger.ts'
 import { DesktopHostProcess } from './hostProcess.ts'
+import { runtimeTreeHostEntry } from './hostEntry.ts'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
 import { request as httpRequest } from 'node:http'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
@@ -76,6 +78,11 @@ export interface HostOptions {
    * （旧 HarnessManager 是 spawn 时注入的），否则 Host 会落到默认 `~/.dsh`。
    */
   env?: NodeJS.ProcessEnv
+  /**
+   * Host 入口绝对路径（壳自带副本优先，见 src/main/hostEntry.ts）。
+   * 缺省 = 运行时树副本，供开发/测试使用。
+   */
+  hostEntry?: string
 }
 
 /** 崩溃重启退避上限（与原 HarnessManager 一致）。 */
@@ -358,12 +365,12 @@ export class HostManager {
 
   private spawn(): void {
     if (this.quit) return
-    // 运行时完整性前置检查：随包 Host 入口在不在。
-    // 缺失只可能来自「安装被破坏 / 安全软件隔离」（运行时是不可变的签名更新单元），
+    // 运行时完整性前置检查：Host 入口在不在（壳自带副本优先，运行时树副本兜底）。
+    // 只有当**两处都不可用**时才可能是「安装被破坏 / 两处都被安全软件清掉」，
     // 绝不能当成 harness 崩溃去重试——重试只会把应用推进安全模式，把问题伪装成插件故障。
-    const hostEntry = join(this.opts.runtimeDir, 'node_modules', 'dsh-desktop-host', 'lib', 'index.js')
+    const hostEntry = this.opts.hostEntry ?? runtimeTreeHostEntry(this.opts.runtimeDir)
     if (!existsSync(hostEntry)) {
-      log('error', `host entry missing: ${hostEntry}（随包运行时被破坏或被安全软件隔离）`)
+      log('error', `host entry missing: ${hostEntry}（壳自带副本与随包运行时树副本都不可用）`)
       this.quit = true
       this.setState('stopped')
       this.handlers.onRuntimeDamaged?.({ entry: hostEntry })
@@ -385,6 +392,7 @@ export class HostManager {
       // 开发（带 inspector）时放行 workspace 链接的 bundle；打包运行时走官方 runtime 解析。
       this.opts.inspectPort !== undefined,
       this.opts.port,
+      hostEntry,
     )
     this.child = host
     log('info', `host spawn ${this.opts.node} ${this.opts.runtimeDir} (project=${this.opts.projectDir}${this.opts.inspectPort === undefined ? '' : `, inspect=${String(this.opts.inspectPort)}`})`)

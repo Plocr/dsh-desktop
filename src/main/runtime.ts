@@ -24,6 +24,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, st
 import os from 'node:os'
 import path from 'node:path'
 import { DESKTOP_PROFILE } from './desktopProfile.ts'
+import { bundledHostEntry, resolveHostEntry, runtimeTreeHostEntry } from './hostEntry.ts'
 import { log } from './logger.ts'
 import { linkDesktopHostPackages, readDesktopProfileState } from './profilePackages.ts'
 import { parseDesktopRelease, type DesktopRelease } from './release.ts'
@@ -138,15 +139,23 @@ export function resolveRuntime(): RuntimeSpec {
   // 关键文件清单：不逐文件校验 sha256（上万文件，太慢），但**启动必需**的这几处必须在。
   // 真机事故（2026-09-23）：安全软件把 Host 入口按启发式隔离掉，启动时报的是 Node 的
   // `Cannot find module`，用户看不懂；这里给出「哪个文件缺了 + 最可能的原因」。
-  const hostEntry = path.join(runtimeDir, 'node_modules', 'dsh-desktop-host', 'lib', 'index.js')
-  const essentials = [
+  const essentials: [string, string][] = [
     ['pnpm', pnpmEntry],
-    ['Host 入口', hostEntry],
     ['bridge 插件', path.join(runtimeDir, 'node_modules', 'dsh-desktop-bridge', 'lib', 'index.js')],
     ['harness 包', path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')],
     ['Web 前端 dist', path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist', 'index.html')],
-  ] as const
+  ]
   const missing = essentials.filter(([, file]) => !existsSync(file))
+  // Host 入口有**两处**候选：壳自带副本（随 dist/** 打进 app.asar）与运行时树副本。
+  // 只要有一处可用就继续——这一条是真机事故（2026-09-23 起：卡巴斯基把树里那份散件按
+  // PDM 启发式清除）的结构性修复：被杀软清掉散件，应用照样起得来，
+  // 不再要求用户加白名单 / 重装。见 src/main/hostEntry.ts。
+  if (resolveHostEntry(app.getAppPath(), runtimeDir) === undefined) {
+    missing.push([
+      `Host 入口（壳内 ${bundledHostEntry(app.getAppPath())} 与运行时树副本都缺）`,
+      runtimeTreeHostEntry(runtimeDir),
+    ])
+  }
   if (missing.length > 0) {
     const list = missing.map(([label, file]) => `  · ${label}：${file}`).join('\n')
     throw new Error(

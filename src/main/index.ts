@@ -23,6 +23,7 @@ import { randomBytes } from 'node:crypto'
 import { initLogger, log, logDirPath } from './logger'
 import { loadSettings, saveSettings, type AppSettings } from './settings'
 import { appResourcesDir, ensureProfile, resolveRuntime, shippedResourcesDir, type RuntimeSpec } from './runtime'
+import { resolveHostEntry } from './hostEntry.ts'
 import { readProfileBundles, pruneStaleProfileBundles, isolateProfileForSafeMode, restoreProfileManifest } from './pluginfs.ts'
 import { inspectProfile, repairProfileIfNeeded, type ProfileRepairOptions } from './profileRepair.ts'
 import type { ProfileDependencyReport } from './profileDeps.ts'
@@ -1339,6 +1340,10 @@ async function main(): Promise<void> {
       node: runtime.node,
       runtimeDir: runtime.runtimeDir,
       projectDir: desktopProfileDir(),
+      // Host 入口：**壳自带副本（app.asar）优先**，运行时树副本兜底。
+      // 树里那份散件被杀软按启发式清掉时应用照样能启动（2026-09-23 真机事故的结构性修复，
+      // 见 src/main/hostEntry.ts 与 docs/ANTIVIRUS-FALSE-POSITIVE.md）。
+      hostEntry: resolveHostEntry(app.getAppPath(), runtime.runtimeDir)?.entry,
       // 随包 pnpm → Host 的 profileContext.packageManager：官方插件管理器据此工作（离线可用）
       pnpmEntry: runtime.pnpmEntry,
       // Host 在随包 Node 里引导 profile：DSH_HOME 必须显式传入（官方 Host 不读壳的设置）

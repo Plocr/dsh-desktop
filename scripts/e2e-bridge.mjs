@@ -45,7 +45,11 @@ const hostRunAsNode = process.env.DSH_E2E_HOST_RUN_AS_NODE !== undefined
   ? process.env.DSH_E2E_HOST_RUN_AS_NODE === '1'
   : nodeExe === electronExe
 const templateDir = path.join(root, 'resources', 'profile-template', 'dsh-workbench')
-const hostEntry = path.join(runtimeDir, 'node_modules', 'dsh-desktop-host', 'lib', 'index.js')
+// Host 入口两处候选（见 src/main/hostEntry.ts）：**壳自带副本优先**（打包态在 app.asar 里，
+// 0.8.9 起不再把运行时树里的散件当启动硬前提），运行时树副本兜底。
+const bundledHostEntry = path.join(root, 'dist', 'main', 'host-entry.cjs')
+const runtimeHostEntry = path.join(runtimeDir, 'node_modules', 'dsh-desktop-host', 'lib', 'index.js')
+const hostEntry = existsSync(bundledHostEntry) ? bundledHostEntry : runtimeHostEntry
 const pnpmEntry = path.join(root, 'resources', 'runtime', 'pnpm', 'bin', 'pnpm.cjs')
 const webDistDir = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist')
 
@@ -53,12 +57,18 @@ const args = process.argv.slice(2)
 const sessionsArgIdx = args.indexOf('--sessions')
 const sessionsDir = sessionsArgIdx >= 0 ? args[sessionsArgIdx + 1] : null
 
-for (const [label, p] of [['runtime node', nodeExe], ['Host 入口', hostEntry], ['profile 模板', templateDir], ['web dist', webDistDir]]) {
+for (const [label, p] of [
+  ['runtime node', nodeExe],
+  ['Host 入口（壳自带副本或运行时树副本）', hostEntry],
+  ['profile 模板', templateDir],
+  ['web dist', webDistDir],
+]) {
   if (!existsSync(p)) {
-    console.error(`[e2e] 缺少 ${label}: ${p}（先跑 npm run setup:runtime）`)
+    console.error(`[e2e] 缺少 ${label}: ${p}（先跑 npm run build + npm run setup:runtime）`)
     process.exit(2)
   }
 }
+console.log(`[e2e] Host 入口: ${hostEntry === bundledHostEntry ? '壳自带 dist（生产形态）' : '运行时树'} ${hostEntry}`)
 
 /* ── 临时 DSH_HOME + profile（等价壳 ensureProfile 的结果）── */
 
