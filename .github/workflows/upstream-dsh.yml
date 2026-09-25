@@ -17,10 +17,20 @@ name: upstream-dsh
 # 那种情况需要人工改 packages/host 或 packages/bridge 源码；`DESKTOP_HOST_PROTOCOL_VERSION`
 # （src/main/hostProcess.ts + scripts/setup-runtime.mjs 两处）也只在 IPC 契约变化时才需要手动 +1。
 #
+# ⛔ **2026-09-25 起暂停自动巡检（schedule 已停用，只保留手动触发）**：
+#   官方 0.1.7-rc.1 / rc.2 给桌面客户端加了**官方私有桌面壳才有的原生桥**要求——
+#   `@deepseek-ai/dsh-client-shortcuts` 在桌面运行时（`document.documentElement.dataset.platform` 存在）下
+#   强制要求 `window.dshDesktop.keyboard`，缺失即 `Desktop keyboard bridge unavailable` 抛错，
+#   连带 24 个依赖它的客户端 UI 模块 pending → 工作台打不开（真机复现；官方 web 路径不受影响）。
+#   这不是"改个版本号"能跟上的变化，需要先在壳侧实现 preload 桥
+#   `window.dshDesktop.{keyboard,shortcuts}`（详见 docs/DESIGN.md D51）。因此：
+#   随包 harness 暂时钉在**最后一个验证可用**的 `0.1.7-alpha.2`，等上游稳定 + 桥接实现完成后再恢复自动巡检。
+#   恢复方式：放开下面的 schedule 注释，并把版本号守卫的上限解掉（见 workflow 内 dsh-version-guard 步骤）。
+#
 # Actions 基线：checkout / setup-node / cache 一律 ≥ v5（Node 24），理由同 build-release.yml。
 on:
-  schedule:
-    - cron: '0 20 * * *'
+  # schedule:
+  #   - cron: '0 20 * * *'
   workflow_dispatch:
     inputs:
       publish:
@@ -101,6 +111,30 @@ jobs:
             echo "- npm 最高版本：\`${{ steps.upstream.outputs.highest }}\`（latest dist-tag：\`${{ steps.upstream.outputs.latest_tag }}\`）"
             echo "- 是否有更新：\`${{ steps.upstream.outputs.update }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # 暂停期间的硬守卫（2026-09-25）：即使有人手动触发（或将来误开 schedule），
+      # 也不许把随包 harness 同步到需要"官方私有桌面壳原生桥"的版本上去——
+      # 0.1.7-rc.1+ 的 `@deepseek-ai/dsh-client-shortcuts` 在桌面运行时强制要求
+      # `window.dshDesktop.keyboard`，我们还没实现（见 docs/DESIGN.md D51），
+      # 同步过去的结果就是"工作台打不开"（真机已复现）。
+      - name: 暂停守卫：未实现桌面原生桥前，拒绝同步新版本
+        if: ${{ steps.upstream.outputs.update == 'true' || inputs.version != '' }}
+        shell: pwsh
+        run: |
+          $target = if ('${{ inputs.version }}' -ne '') { '${{ inputs.version }}' } else { '${{ steps.upstream.outputs.highest }}' }
+          @(
+            '## upstream-dsh：自动同步已暂停'
+            ''
+            "目标版本：``$target``"
+            ''
+            '原因：官方桌面客户端（0.1.7-rc.1 起）要求官方私有桌面壳提供的原生桥'
+            '`window.dshDesktop.{keyboard,shortcuts}`；壳侧尚未实现，同步过去会导致工作台打不开。'
+            ''
+            '恢复步骤：① 实现并验证 preload 桥（docs/DESIGN.md D51）；② 放开本 workflow 顶部的 schedule；'
+            '③ 删除本步骤（或改成只放行已验证版本）。'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          Write-Error "自动同步已暂停：桌面原生桥未实现前不升级随包 harness（目标 $target）"
+          exit 1
 
       - name: Cache dsh runtime
         if: ${{ steps.upstream.outputs.update == 'true' || inputs.version != '' }}
