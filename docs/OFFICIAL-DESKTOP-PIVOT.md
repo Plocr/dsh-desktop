@@ -85,3 +85,24 @@ Host 能起。属于待查项（本机环境或未签名产物路径问题），
   成本从"复刻一遍"降到"跟着升一个仓库版本 + 重新出包"。
 - 官方未提供桌面安装包、也未承诺支持我们的再分发形态；品牌指南要求改名（见上）。
 - 解包 1 GB / 安装包预计 300 MB 级（含内置运行时与 LibreOffice 引擎），比自研壳（约 150 MB）大一倍。
+
+## 6. 后续（2026-09-25 当天）：B 也不用做了，官方已经出包
+
+在准备 B 的 CI 时发现官方**正式下载通道**已经在发桌面安装包（不在 GitHub Releases 里，走自己的 CDN）：
+
+```
+https://download.deepseek.com/dsh-desk/feeds/win-x64/nightly.yml
+  version: 0.1.7-rc.2
+  https://download.deepseek.com/dsh-desk/bin/win-x64/deepseek-harness-0.1.7-rc.2-win-x64.exe
+  sha512: AY7f45dYO7BFrfgaLmzXNWP0pavlxkSbsehPo/WF6PXcFdDK3fF1oHUPs/4f2bzROgQvm6wSgawZ/g7UzbPRmw==
+  size: 288245480
+```
+
+因此 A / B 都不再需要：用户直接用官方包（自动更新走官方通道）。本仓库随之冻结在 v0.8.12。
+
+B 阶段已经做过、可留作备查的东西：
+
+- fork：`Plocr/deepseek-harness`（上游 workflow 全部禁用，只留一条 `dsh-desktop-unsigned.yml`；
+  实测能出 `deepseek-harness-0.1.7-rc.2-win-x64-unsigned.exe`，仅官方 smoke 的 Office→PDF 一步会在本机与 CI 失败）。
+  不再需要时可整仓删除。
+- 本地工作副本：`E:\Dsh\deepseek-harness`（约 4.3 GB，含 node_modules 与打包产物），可直接删除。

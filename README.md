@@ -1,5 +1,21 @@
 # DSH Desktop
 
+> ## ⛔ 项目已冻结（2026-09-25）：请改用**官方桌面端**
+>
+> 官方已通过自己的下载通道发布桌面安装包（Windows x64，随官方 nightly 通道）：
+>
+> - 安装包：<https://download.deepseek.com/dsh-desk/bin/win-x64/deepseek-harness-0.1.7-rc.2-win-x64.exe>（约 288 MB）
+> - 校验/清单：<https://download.deepseek.com/dsh-desk/feeds/win-x64/nightly.yml>
+> - 本仓库的实测记录与结论见 [docs/OFFICIAL-DESKTOP-PIVOT.md](docs/OFFICIAL-DESKTOP-PIVOT.md)
+>
+> 原因：官方 0.1.7-rc.1 起，桌面客户端强制要求官方私有桌面壳提供的原生桥
+> （`window.dshDesktop.keyboard` / `shortcuts`，见 [docs/DESIGN.md](docs/DESIGN.md) D51）。
+> 自研壳要跟就得复刻一套不公开的私有契约，成本与风险都不划算；官方既然已经出包，就直接用官方。
+>
+> 本仓库停在 **v0.8.12**（随包 harness 钉在最后一个验证可用的 `0.1.7-alpha.2`，含杀软误报的结构性修复），
+> 仍可安装使用；上游自动巡检已暂停，不再跟随新版本。需要"自带运行时 + 手机连接/局域网门面 + 安全模式 + 插件体检"
+> 这些官方没有的能力时，可以继续用 v0.8.12。
+
 以 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 为基底的**桌面工作台**：Electron 原生壳 + 内嵌 harness 运行时，离线、免安装 Node、免全局 dsh 即可使用。
 
 > **自带视觉模型**：内置 `DeepSeek-V4-Flash-Vision-Exp`（`deepseek-v4-flash-vision-exp`），支持图片输入——直接把截图/图片拖进输入框，让模型看图说话、识别界面、分析图表。
